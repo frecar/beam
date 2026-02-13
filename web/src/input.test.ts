@@ -1,5 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { roundToEven, isSignificantResize } from "./resize";
+import type { InputEvent } from "./connection";
+
+// Use absolute path to ensure vite resolves the .ts source file, not the
+// stale .js build artifact sitting next to it. Vite transforms .ts files
+// through esbuild regardless of how they're referenced.
+// @ts-expect-error -- absolute .ts path not recognized by tsc but works in vite
+const { InputHandler } = await import("/home/frecar/code/remotedesktop/web/src/input.ts");
 
 describe("roundToEven", () => {
   it("rounds odd numbers down to even", () => {
@@ -69,5 +76,126 @@ describe("isSignificantResize", () => {
     expect(isSignificantResize(1000, 1000, 1100, 1000)).toBe(false);
     // 10.1% should be true
     expect(isSignificantResize(1000, 1000, 1101, 1000)).toBe(true);
+  });
+});
+
+/**
+ * Scroll multiplier tests for InputHandler.
+ *
+ * Strategy: create a minimal mock HTMLElement that captures event listeners,
+ * construct an InputHandler, call enable(), then invoke the captured wheel
+ * handler directly with mock WheelEvent objects. Verify the sendInput callback
+ * receives correctly scaled scroll deltas.
+ */
+describe("InputHandler scroll multiplier", () => {
+  let sent: InputEvent[];
+  let handler: InstanceType<typeof InputHandler>;
+  let wheelHandler: (e: WheelEvent) => void;
+
+  /** Create a minimal mock HTMLElement with just enough API surface for InputHandler */
+  function createMockTarget(): HTMLElement {
+    const listeners: Record<string, Function> = {};
+    return {
+      addEventListener: (type: string, fn: Function, _opts?: any) => {
+        listeners[type] = fn;
+      },
+      removeEventListener: () => {},
+      querySelector: () => null,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 1920, height: 1080 }),
+      style: {},
+      // Expose captured listeners for test access
+      __listeners: listeners,
+    } as unknown as HTMLElement;
+  }
+
+  /** Create a mock WheelEvent with the given deltas and mode */
+  function createWheelEvent(deltaX: number, deltaY: number, deltaMode = 0): WheelEvent {
+    return {
+      deltaX,
+      deltaY,
+      deltaMode,
+      preventDefault: () => {},
+    } as unknown as WheelEvent;
+  }
+
+  beforeEach(() => {
+    // Stub document methods that InputHandler.enable() calls
+    vi.stubGlobal("document", {
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      pointerLockElement: null,
+      fullscreenElement: null,
+    });
+
+    // Stub ResizeObserver (used by enable())
+    vi.stubGlobal("ResizeObserver", class {
+      observe() {}
+      disconnect() {}
+    });
+
+    sent = [];
+    const target = createMockTarget();
+    handler = new InputHandler(target, (event: InputEvent) => {
+      sent.push(event);
+    });
+    handler.enable();
+
+    // Extract the wheel handler that InputHandler registered
+    wheelHandler = (target as any).__listeners["wheel"];
+  });
+
+  it("has a setScrollMultiplier method", () => {
+    expect(typeof handler.setScrollMultiplier).toBe("function");
+  });
+
+  it("default scroll multiplier is 1.0 (deltas pass through unchanged)", () => {
+    wheelHandler(createWheelEvent(0, 100));
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ t: "s", dx: 0, dy: 100 });
+  });
+
+  it("scroll multiplier 2.0x doubles wheel deltas", () => {
+    handler.setScrollMultiplier(2.0);
+    wheelHandler(createWheelEvent(10, 50));
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ t: "s", dx: 20, dy: 100 });
+  });
+
+  it("scroll multiplier 0.5x halves wheel deltas", () => {
+    handler.setScrollMultiplier(0.5);
+    wheelHandler(createWheelEvent(40, 200));
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ t: "s", dx: 20, dy: 100 });
+  });
+
+  it("scroll multiplier 3.0x triples wheel deltas", () => {
+    handler.setScrollMultiplier(3.0);
+    wheelHandler(createWheelEvent(10, -30));
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ t: "s", dx: 30, dy: -90 });
+  });
+
+  it("scroll multiplier applies after deltaMode line scaling", () => {
+    // deltaMode 1 = DOM_DELTA_LINE, multiplied by 30 before scroll multiplier
+    handler.setScrollMultiplier(2.0);
+    wheelHandler(createWheelEvent(0, 3, 1));
+
+    // 3 lines * 30 px/line = 90, then * 2.0 multiplier = 180
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ t: "s", dx: 0, dy: 180 });
+  });
+
+  it("scroll multiplier applies after deltaMode page scaling", () => {
+    // deltaMode 2 = DOM_DELTA_PAGE, multiplied by 300 before scroll multiplier
+    handler.setScrollMultiplier(2.0);
+    wheelHandler(createWheelEvent(1, 1, 2));
+
+    // 1 page * 300 px/page = 300, then * 2.0 multiplier = 600
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ t: "s", dx: 600, dy: 600 });
   });
 });
