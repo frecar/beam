@@ -6,6 +6,16 @@ export type ClipboardSyncDirection = "sent" | "received";
 /** Callback signature for clipboard sync notifications */
 export type ClipboardSyncCallback = (direction: ClipboardSyncDirection, preview: string) => void;
 
+/** A single clipboard history entry */
+export interface ClipboardHistoryEntry {
+  timestamp: number;
+  direction: ClipboardSyncDirection;
+  text: string;
+}
+
+const MAX_HISTORY = 20;
+const HISTORY_PREVIEW_LENGTH = 100;
+
 /**
  * Bridges the browser clipboard with the remote desktop.
  * - On paste: reads local clipboard and sends text to remote
@@ -15,9 +25,43 @@ export class ClipboardBridge {
   private sendClipboard: (event: InputEvent) => void;
   private onPaste = this.handlePaste.bind(this);
   private syncCallback: ClipboardSyncCallback | null = null;
+  private history: ClipboardHistoryEntry[] = [];
+  private historyCallback: (() => void) | null = null;
 
   constructor(sendClipboard: (event: InputEvent) => void) {
     this.sendClipboard = sendClipboard;
+  }
+
+  /** Register a callback that fires when history changes */
+  onHistoryChange(callback: () => void): void {
+    this.historyCallback = callback;
+  }
+
+  /** Get clipboard history entries */
+  getHistory(): ClipboardHistoryEntry[] {
+    return this.history;
+  }
+
+  /** Clear all clipboard history */
+  clearHistory(): void {
+    this.history = [];
+    this.historyCallback?.();
+  }
+
+  /** Truncate text for display preview */
+  static truncatePreview(text: string): string {
+    const singleLine = text.replace(/\n/g, " ").trim();
+    if (singleLine.length <= HISTORY_PREVIEW_LENGTH) return singleLine;
+    return singleLine.substring(0, HISTORY_PREVIEW_LENGTH - 3) + "...";
+  }
+
+  /** Add an entry to the history ring buffer */
+  private addHistory(direction: ClipboardSyncDirection, text: string): void {
+    this.history.push({ timestamp: Date.now(), direction, text });
+    if (this.history.length > MAX_HISTORY) {
+      this.history.shift();
+    }
+    this.historyCallback?.();
   }
 
   /** Register a callback that fires when clipboard text is synced */
@@ -44,6 +88,7 @@ export class ClipboardBridge {
   handleRemoteClipboard(text: string): void {
     if (text) {
       this.syncCallback?.("received", this.buildPreview(text));
+      this.addHistory("received", text);
     }
     navigator.clipboard.writeText(text).catch(() => {
       // Clipboard write permission denied — ignore silently
@@ -65,6 +110,7 @@ export class ClipboardBridge {
       if (text && text.length <= MAX_CLIPBOARD_BYTES) {
         this.sendClipboard({ t: "cp", text });
         this.syncCallback?.("sent", this.buildPreview(text));
+        this.addHistory("sent", text);
       }
     } catch {
       // Clipboard read permission denied or not focused — ignore silently.
@@ -79,6 +125,7 @@ export class ClipboardBridge {
       e.preventDefault();
       this.sendClipboard({ t: "c", text });
       this.syncCallback?.("sent", this.buildPreview(text));
+      this.addHistory("sent", text);
     }
   }
 }

@@ -1,4 +1,4 @@
-import { ClipboardBridge } from "./clipboard";
+import { ClipboardBridge, type ClipboardHistoryEntry } from "./clipboard";
 import { BeamConnection } from "./connection";
 import { FileDownloader, FileUploader } from "./filetransfer";
 import type { DownloadMessage } from "./filetransfer";
@@ -81,6 +81,11 @@ const statusText = document.getElementById("status-text") as HTMLSpanElement;
 const statusVersion = document.getElementById("status-version") as HTMLSpanElement;
 
 const bandwidthIndicator = document.getElementById("bandwidth-indicator") as HTMLSpanElement;
+const lsRtt = document.getElementById("ls-rtt") as HTMLSpanElement;
+const lsFps = document.getElementById("ls-fps") as HTMLSpanElement;
+const lsDecode = document.getElementById("ls-decode") as HTMLSpanElement;
+const lsLoss = document.getElementById("ls-loss") as HTMLSpanElement;
+const lsTooltip = document.getElementById("ls-tooltip") as HTMLDivElement;
 const faviconLink = document.querySelector("link[rel='icon']") as HTMLLinkElement;
 
 const btnMute = document.getElementById("btn-mute") as HTMLButtonElement;
@@ -139,6 +144,22 @@ let perfFps = 0;
 let perfLatency = 0;
 let perfBitrate = 0;
 let perfLoss = 0;
+
+// Decode time tracking (per-frame average from inbound-rtp stats)
+let prevFramesDecoded = 0;
+let prevTotalDecodeTime = 0;
+let currentDecodeTimeMs = 0;
+
+// Running RTT average for tooltip
+let rttSamples: number[] = [];
+const RTT_SAMPLE_WINDOW = 30;
+
+// Tooltip stats
+let lastJitterMs = 0;
+let lastVideoCodec = "";
+let lastVideoResolution = "";
+let totalPacketsReceived = 0;
+let totalPacketsLost = 0;
 
 // Track connection state so quality updates only apply when connected
 let currentConnectionState: "disconnected" | "connecting" | "connected" | "error" = "disconnected";
@@ -207,6 +228,21 @@ window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", ()
     updateThemeButton();
   }
 });
+
+// Clipboard history panel state
+let clipboardHistoryVisible = false;
+const clipboardHistoryPanel = document.getElementById("clipboard-history-panel") as HTMLDivElement;
+const chpList = document.getElementById("chp-list") as HTMLDivElement;
+const chpClearBtn = document.getElementById("chp-clear") as HTMLButtonElement;
+const chpCloseBtn = document.getElementById("chp-close") as HTMLButtonElement;
+
+// Admin sessions panel state
+let adminPanelVisible = false;
+let adminRefreshInterval: ReturnType<typeof setInterval> | null = null;
+const adminPanelOverlay = document.getElementById("admin-panel-overlay") as HTMLDivElement;
+const adminSessionsTbody = document.getElementById("admin-sessions-tbody") as HTMLTableSectionElement;
+const adminSessionCount = document.getElementById("admin-session-count") as HTMLSpanElement;
+const adminPanelClose = document.getElementById("admin-panel-close") as HTMLButtonElement;
 
 // Session info panel state
 let sessionInfoVisible = false;
@@ -489,9 +525,12 @@ async function pollWebRTCStats(): Promise<void> {
   let bitrateKbps: number | null = null;
   let packetsLost = 0;
   let packetsReceived = 0;
-  let candidateType = "";
   let currentBytesReceived = 0;
   let currentTimestamp = 0;
+  let framesDecoded = 0;
+  let totalDecodeTime = 0;
+  let jitterSec = 0;
+  let videoCodecId = "";
 
   stats.forEach((report) => {
     if (report.type === "candidate-pair" && report.state === "succeeded") {
@@ -507,15 +546,24 @@ async function pollWebRTCStats(): Promise<void> {
       packetsLost = report.packetsLost || 0;
       currentBytesReceived = report.bytesReceived || 0;
       currentTimestamp = report.timestamp;
+      framesDecoded = report.framesDecoded || 0;
+      totalDecodeTime = report.totalDecodeTime || 0;
+      if (typeof report.jitter === "number") {
+        jitterSec = report.jitter;
+      }
+      videoCodecId = report.codecId || "";
     }
 
-    // Detect connection type (relay = TURN, srflx = STUN, host = direct)
-    if (report.type === "local-candidate" && report.isRemote === false) {
-      if (report.candidateType) {
-        candidateType = report.candidateType;
-      }
-    }
   });
+
+  // Resolve video codec name from codec stats
+  if (videoCodecId) {
+    stats.forEach((report) => {
+      if (report.type === "codec" && report.id === videoCodecId) {
+        lastVideoCodec = (report.mimeType || "").replace("video/", "");
+      }
+    });
+  }
 
   // Calculate actual received video bitrate from inbound-rtp delta
   if (currentBytesReceived > 0 && prevBytesReceived > 0 && currentTimestamp > prevStatsTimestamp) {
@@ -529,21 +577,40 @@ async function pollWebRTCStats(): Promise<void> {
   prevBytesReceived = currentBytesReceived;
   prevStatsTimestamp = currentTimestamp;
 
+  // Calculate per-frame decode time
+  if (framesDecoded > prevFramesDecoded && totalDecodeTime > prevTotalDecodeTime) {
+    const deltaFrames = framesDecoded - prevFramesDecoded;
+    const deltaTime = totalDecodeTime - prevTotalDecodeTime;
+    currentDecodeTimeMs = (deltaTime / deltaFrames) * 1000;
+  }
+  prevFramesDecoded = framesDecoded;
+  prevTotalDecodeTime = totalDecodeTime;
+
+  // RTT running average for tooltip
   if (rttMs !== null) {
-    ui?.updateLatency(rttMs);
+    rttSamples.push(rttMs);
+    if (rttSamples.length > RTT_SAMPLE_WINDOW) rttSamples.shift();
+  }
+
+  // Store stats for tooltip
+  lastJitterMs = jitterSec * 1000;
+  totalPacketsReceived = packetsReceived;
+  totalPacketsLost = packetsLost;
+  if (remoteVideo.videoWidth > 0) {
+    lastVideoResolution = `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`;
   }
 
   // Calculate loss percentage
   const lossPercent =
-    packetsReceived > 0 ? ((packetsLost / packetsReceived) * 100).toFixed(1) : "0.0";
+    packetsReceived > 0 ? (packetsLost / packetsReceived) * 100 : 0;
 
-  // Update quality info in toolbar
-  ui?.updateQuality(bitrateKbps, parseFloat(lossPercent), candidateType);
+  // Update latency stats display in status bar
+  updateLatencyStats(rttMs, currentDecodeTimeMs, lossPercent);
 
   // Update performance overlay state
   if (rttMs !== null) perfLatency = rttMs;
   if (bitrateKbps !== null) perfBitrate = bitrateKbps;
-  perfLoss = parseFloat(lossPercent);
+  perfLoss = Math.round(lossPercent * 10) / 10;
   updatePerfOverlay();
 
   // Update status bar connection quality indicator based on latency
@@ -576,6 +643,48 @@ function updatePerfOverlay(): void {
     `Res  ${res}`;
 }
 
+// --- Latency stats display (status bar) ---
+
+function tooltipRow(label: string, value: string): string {
+  return `<div class="ls-tooltip-row"><span class="ls-tooltip-label">${label}</span><span>${value}</span></div>`;
+}
+
+/** Update the compact latency stats display in the status bar */
+function updateLatencyStats(rttMs: number | null, decodeMs: number, lossPercent: number): void {
+  if (rttMs !== null) {
+    const rttRounded = Math.round(rttMs);
+    lsRtt.textContent = `RTT: ${rttRounded}ms`;
+    lsRtt.className = "ls-stat " + (rttMs < 20 ? "ls-good" : rttMs <= 50 ? "ls-warn" : "ls-bad");
+  }
+
+  if (decodeMs > 0) {
+    lsDecode.textContent = `Dec: ${decodeMs.toFixed(1)}ms`;
+  }
+
+  lsLoss.textContent = `Loss: ${lossPercent.toFixed(1)}%`;
+
+  // Update tooltip with detailed stats
+  const avgRtt = rttSamples.length > 0
+    ? Math.round(rttSamples.reduce((a, b) => a + b, 0) / rttSamples.length)
+    : null;
+
+  lsTooltip.innerHTML = [
+    tooltipRow("RTT", rttMs !== null ? `${Math.round(rttMs)} ms${avgRtt !== null ? ` (avg: ${avgRtt} ms)` : ""}` : "--"),
+    tooltipRow("Jitter", `${lastJitterMs.toFixed(1)} ms`),
+    tooltipRow("FPS", `${Math.round(perfFps)}`),
+    tooltipRow("Decode", decodeMs > 0 ? `${decodeMs.toFixed(1)} ms` : "--"),
+    tooltipRow("Received", `${totalPacketsReceived.toLocaleString()} pkts`),
+    tooltipRow("Lost", `${totalPacketsLost.toLocaleString()} (${lossPercent.toFixed(2)}%)`),
+    tooltipRow("Resolution", lastVideoResolution || "--"),
+    tooltipRow("Codec", lastVideoCodec || "--"),
+  ].join("");
+}
+
+/** Update just the FPS in the latency stats (called from renderer callback) */
+function updateLatencyStatsFps(fps: number): void {
+  lsFps.textContent = `FPS: ${Math.round(fps)}`;
+}
+
 // --- Session info panel ---
 
 function toggleSessionInfoPanel(): void {
@@ -594,6 +703,215 @@ function hideSessionInfoPanel(): void {
   sessionInfoVisible = false;
   sessionInfoPanel.classList.remove("visible");
   stopSessionDurationTimer();
+}
+
+// --- Clipboard history panel ---
+
+function toggleClipboardHistoryPanel(): void {
+  clipboardHistoryVisible = !clipboardHistoryVisible;
+  if (clipboardHistoryVisible) {
+    clipboardHistoryPanel.classList.add("visible");
+    renderClipboardHistory();
+  } else {
+    clipboardHistoryPanel.classList.remove("visible");
+  }
+}
+
+function hideClipboardHistoryPanel(): void {
+  clipboardHistoryVisible = false;
+  clipboardHistoryPanel.classList.remove("visible");
+}
+
+/** Format a timestamp as HH:MM:SS */
+function formatTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString();
+}
+
+/** Render the clipboard history list from the ClipboardBridge */
+function renderClipboardHistory(): void {
+  if (!clipboardHistoryVisible) return;
+
+  const history: ClipboardHistoryEntry[] = clipboardBridge?.getHistory() ?? [];
+  if (history.length === 0) {
+    chpList.innerHTML = '<div class="chp-empty">No clipboard activity yet</div>';
+    return;
+  }
+
+  // Render newest-first
+  const html = history.slice().reverse().map((entry, idx) => {
+    const arrow = entry.direction === "sent" ? "\u2192" : "\u2190";
+    const dirClass = entry.direction;
+    const preview = ClipboardBridge.truncatePreview(entry.text);
+    // Escape HTML to prevent XSS from clipboard content
+    const escaped = preview
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+    return `<div class="chp-entry">
+      <div class="chp-entry-header">
+        <div class="chp-entry-meta">
+          <span class="chp-direction ${dirClass}">${arrow}</span>
+          <span>${formatTime(entry.timestamp)}</span>
+          <span>${entry.direction === "sent" ? "Sent" : "Received"}</span>
+        </div>
+        <button class="chp-copy" data-chp-idx="${idx}" aria-label="Copy to clipboard">Copy</button>
+      </div>
+      <div class="chp-text">${escaped}</div>
+    </div>`;
+  }).join("");
+
+  chpList.innerHTML = html;
+
+  // Wire copy buttons
+  chpList.querySelectorAll(".chp-copy").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = parseInt((btn as HTMLElement).dataset.chpIdx || "0", 10);
+      const reversedHistory = history.slice().reverse();
+      const entry = reversedHistory[idx];
+      if (entry) {
+        navigator.clipboard.writeText(entry.text).then(
+          () => ui?.showNotification("Copied to clipboard", "success", 1500),
+          () => ui?.showNotification("Failed to copy", "error"),
+        );
+      }
+    });
+  });
+}
+
+// --- Admin sessions panel ---
+
+/** Shape of the admin session list API response */
+interface AdminSession {
+  id: string;
+  username: string;
+  display: number;
+  created_at: number;
+  last_activity: number;
+}
+
+/** Format a Unix epoch timestamp as a relative time string ("2m ago", "1h ago") */
+function formatRelativeTime(epochSecs: number): string {
+  const deltaSecs = Math.floor(Date.now() / 1000) - epochSecs;
+  if (deltaSecs < 60) return `${deltaSecs}s ago`;
+  if (deltaSecs < 3600) return `${Math.floor(deltaSecs / 60)}m ago`;
+  if (deltaSecs < 86400) return `${Math.floor(deltaSecs / 3600)}h ago`;
+  return `${Math.floor(deltaSecs / 86400)}d ago`;
+}
+
+function toggleAdminPanel(): void {
+  adminPanelVisible = !adminPanelVisible;
+  if (adminPanelVisible) {
+    adminPanelOverlay.classList.add("visible");
+    fetchAdminSessions();
+    adminRefreshInterval = setInterval(fetchAdminSessions, 10_000);
+  } else {
+    hideAdminPanel();
+  }
+}
+
+function hideAdminPanel(): void {
+  adminPanelVisible = false;
+  adminPanelOverlay.classList.remove("visible");
+  if (adminRefreshInterval) {
+    clearInterval(adminRefreshInterval);
+    adminRefreshInterval = null;
+  }
+}
+
+async function fetchAdminSessions(): Promise<void> {
+  if (!currentToken) {
+    adminSessionsTbody.innerHTML = '<tr><td colspan="6" class="admin-empty">Not authenticated</td></tr>';
+    return;
+  }
+
+  try {
+    const resp = await fetch("/api/admin/sessions", {
+      headers: { Authorization: `Bearer ${currentToken}` },
+    });
+    if (!resp.ok) {
+      if (resp.status === 401) {
+        adminSessionsTbody.innerHTML = '<tr><td colspan="6" class="admin-empty">Session expired</td></tr>';
+        return;
+      }
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const sessions = (await resp.json()) as AdminSession[];
+    renderAdminSessions(sessions);
+  } catch {
+    adminSessionsTbody.innerHTML = '<tr><td colspan="6" class="admin-empty">Failed to load sessions</td></tr>';
+  }
+}
+
+function renderAdminSessions(sessions: AdminSession[]): void {
+  adminSessionCount.textContent = String(sessions.length);
+
+  if (sessions.length === 0) {
+    adminSessionsTbody.innerHTML = '<tr><td colspan="6" class="admin-empty">No active sessions</td></tr>';
+    return;
+  }
+
+  adminSessionsTbody.innerHTML = sessions.map((s) => {
+    const shortId = s.id.substring(0, 8);
+    const created = formatRelativeTime(s.created_at);
+    const idle = formatRelativeTime(s.last_activity);
+    const isSelf = s.id === currentSessionId;
+    const escapedId = s.id.replace(/"/g, "&quot;");
+    return `<tr>
+      <td title="${escapedId}">${shortId}${isSelf ? " *" : ""}</td>
+      <td>${s.username}</td>
+      <td>:${s.display}</td>
+      <td>${created}</td>
+      <td>${idle}</td>
+      <td><button class="admin-terminate-btn" data-session-id="${escapedId}"${isSelf ? ' title="This is your session"' : ""}>Terminate</button></td>
+    </tr>`;
+  }).join("");
+
+  // Wire terminate buttons
+  adminSessionsTbody.querySelectorAll(".admin-terminate-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const sessionId = (btn as HTMLElement).dataset.sessionId;
+      if (sessionId) {
+        terminateAdminSession(sessionId, btn as HTMLButtonElement);
+      }
+    });
+  });
+}
+
+async function terminateAdminSession(sessionId: string, btn: HTMLButtonElement): Promise<void> {
+  const isSelf = sessionId === currentSessionId;
+  const msg = isSelf
+    ? "This is YOUR active session. Terminate it?"
+    : "Terminate this session? The user will be disconnected.";
+  if (!confirm(msg)) return;
+
+  btn.disabled = true;
+  btn.textContent = "...";
+
+  try {
+    const resp = await fetch(`/api/admin/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${currentToken!}` },
+    });
+    if (resp.ok) {
+      ui?.showNotification("Session terminated", "success");
+      if (isSelf) {
+        hideAdminPanel();
+        handleDisconnect();
+        return;
+      }
+      fetchAdminSessions();
+    } else if (resp.status === 404) {
+      ui?.showNotification("Session already ended", "info");
+      fetchAdminSessions();
+    } else {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+  } catch {
+    ui?.showNotification("Failed to terminate session", "error");
+    btn.disabled = false;
+    btn.textContent = "Terminate";
+  }
 }
 
 /** Format a duration in ms as "Xh Ym Zs" */
@@ -959,7 +1277,7 @@ function startStatsPolling(): void {
   stopStatsPolling();
   statsInterval = setInterval(() => {
     pollWebRTCStats();
-  }, 2000);
+  }, 1000);
 }
 
 function stopStatsPolling(): void {
@@ -1064,12 +1382,31 @@ function handleDisconnect(): void {
   sessionBytesReceived = 0;
   prevAudioBytesReceived = 0;
   prevAudioStatsTimestamp = 0;
+  prevFramesDecoded = 0;
+  prevTotalDecodeTime = 0;
+  currentDecodeTimeMs = 0;
+  rttSamples = [];
+  lastJitterMs = 0;
+  lastVideoCodec = "";
+  lastVideoResolution = "";
+  totalPacketsReceived = 0;
+  totalPacketsLost = 0;
   connectedSinceTime = null;
   sessionUsername = null;
   hideSessionInfoPanel();
+  hideClipboardHistoryPanel();
+  hideAdminPanel();
 
   // Hide bandwidth indicator
   bandwidthIndicator.classList.remove("visible");
+
+  // Reset latency stats display
+  lsRtt.textContent = "RTT: --";
+  lsRtt.className = "ls-stat";
+  lsFps.textContent = "FPS: --";
+  lsDecode.textContent = "Dec: --";
+  lsLoss.textContent = "Loss: --";
+  lsTooltip.innerHTML = "";
 
   // Clear saved session
   clearSession();
@@ -1396,7 +1733,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
 
   // Wire FPS updates from renderer to UI + perf overlay
   renderer.onFpsUpdate((fps) => {
-    ui?.updateFps(fps);
+    updateLatencyStatsFps(fps);
     perfFps = fps;
   });
 
@@ -1530,6 +1867,9 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
         const message = preview ? `${label}: ${preview}` : label;
         ui?.showNotification(message, "info", 2000);
       });
+      clipboardBridge.onHistoryChange(() => {
+        renderClipboardHistory();
+      });
     }
     clipboardBridge.enable();
   });
@@ -1636,6 +1976,10 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
     e.preventDefault();
     helpOverlay.classList.toggle("visible");
   }
+  if (e.key === "F7") {
+    e.preventDefault();
+    toggleAdminPanel();
+  }
   if (e.key === "F8") {
     e.preventDefault();
     toggleMute();
@@ -1655,6 +1999,11 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "F12") {
     e.preventDefault();
     captureScreenshot();
+  }
+  // Ctrl+Shift+V: toggle clipboard history panel
+  if (e.key === "V" && e.ctrlKey && e.shiftKey) {
+    e.preventDefault();
+    toggleClipboardHistoryPanel();
   }
 });
 
@@ -1683,6 +2032,25 @@ reconnectDisconnectBtn.addEventListener("click", () => {
 // Session info panel close button
 sipCloseBtn.addEventListener("click", () => {
   hideSessionInfoPanel();
+});
+
+// Clipboard history panel buttons
+chpCloseBtn.addEventListener("click", () => {
+  hideClipboardHistoryPanel();
+});
+chpClearBtn.addEventListener("click", () => {
+  clipboardBridge?.clearHistory();
+  renderClipboardHistory();
+});
+
+// Admin panel close button + click-outside-to-close
+adminPanelClose.addEventListener("click", () => {
+  hideAdminPanel();
+});
+adminPanelOverlay.addEventListener("click", (e) => {
+  if (e.target === adminPanelOverlay) {
+    hideAdminPanel();
+  }
 });
 
 // Session info panel copy stats button

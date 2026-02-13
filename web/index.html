@@ -544,12 +544,54 @@
       .status-stats {
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: 6px;
+        position: relative;
       }
 
-      .status-stat {
+      .ls-stat {
         color: var(--text-stat);
-        min-width: 48px;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+
+      .ls-sep {
+        color: var(--text-tertiary);
+        font-size: 11px;
+      }
+
+      .ls-good { color: #4ade80; }
+      .ls-warn { color: #facc15; }
+      .ls-bad { color: #ff6b6b; }
+
+      .ls-tooltip {
+        display: none;
+        position: absolute;
+        bottom: calc(100% + 8px);
+        right: 0;
+        padding: 10px 14px;
+        background: var(--bg-card-solid);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        font: 12px/1.7 "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+        color: var(--text-primary);
+        white-space: nowrap;
+        box-shadow: 0 4px 16px var(--shadow-toast);
+        z-index: 300;
+        pointer-events: none;
+      }
+
+      .status-stats:hover .ls-tooltip {
+        display: block;
+      }
+
+      .ls-tooltip-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+      }
+
+      .ls-tooltip-label {
+        color: var(--text-secondary);
       }
 
       .status-separator {
@@ -803,6 +845,141 @@
       .sip-value.sip-warn { color: #facc15; }
       .sip-value.sip-bad { color: #ff6b6b; }
       .sip-value.sip-dim { color: var(--text-tertiary); }
+
+      /* Clipboard History Panel (Ctrl+Shift+V toggle) — slides in from right */
+      #clipboard-history-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 28px; /* above status bar */
+        width: 320px;
+        background: var(--bg-sip);
+        border-left: 1px solid var(--border-subtle);
+        backdrop-filter: blur(16px);
+        z-index: 9998;
+        transform: translateX(100%);
+        transition: transform 0.25s ease;
+        overflow-y: auto;
+        font-size: 13px;
+        color: var(--help-card-text);
+        user-select: text;
+      }
+      #clipboard-history-panel.visible {
+        transform: translateX(0);
+      }
+      :fullscreen #clipboard-history-panel,
+      #clipboard-history-panel.fullscreen {
+        bottom: 0;
+      }
+      .chp-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 16px 10px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .chp-header h2 {
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--text-primary);
+        letter-spacing: 0.3px;
+        margin: 0;
+      }
+      .chp-header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .chp-clear {
+        padding: 2px 8px;
+        background: var(--bg-btn);
+        border: 1px solid var(--border-color);
+        border-radius: 3px;
+        color: var(--text-btn);
+        font-size: 11px;
+        font-family: inherit;
+        cursor: pointer;
+        line-height: 1;
+        transition: background 0.15s, border-color 0.15s;
+      }
+      .chp-clear:hover {
+        background: var(--bg-btn-hover);
+      }
+      .chp-close {
+        background: none;
+        border: none;
+        color: var(--text-tertiary);
+        font-size: 18px;
+        cursor: pointer;
+        padding: 0 4px;
+        line-height: 1;
+        transition: color 0.15s;
+      }
+      .chp-close:hover {
+        color: var(--text-btn);
+      }
+      .chp-close:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .chp-empty {
+        padding: 32px 16px;
+        text-align: center;
+        color: var(--text-tertiary);
+        font-size: 12px;
+      }
+      .chp-entry {
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border-subtle);
+        transition: background 0.1s;
+      }
+      .chp-entry:hover {
+        background: var(--bg-btn);
+      }
+      .chp-entry-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 4px;
+      }
+      .chp-entry-meta {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: var(--text-secondary);
+      }
+      .chp-direction {
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .chp-direction.sent { color: var(--accent); }
+      .chp-direction.received { color: #4ade80; }
+      .chp-copy {
+        padding: 1px 6px;
+        background: var(--bg-btn);
+        border: 1px solid var(--border-color);
+        border-radius: 3px;
+        color: var(--text-btn);
+        font-size: 10px;
+        font-family: inherit;
+        cursor: pointer;
+        line-height: 1.4;
+        transition: background 0.15s;
+      }
+      .chp-copy:hover {
+        background: var(--bg-btn-hover);
+      }
+      .chp-text {
+        font-size: 12px;
+        color: var(--text-primary);
+        font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+        word-break: break-all;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        max-height: 3.6em;
+        overflow: hidden;
+      }
 
       /* Help overlay (F1 toggle) */
       #help-overlay {
@@ -1104,6 +1281,138 @@
         font-size: 16px; /* prevent iOS zoom on focus */
       }
 
+      /* ── Admin Sessions Panel (F7) ────────────────────── */
+      #admin-panel-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 10000;
+        background: var(--bg-overlay);
+        backdrop-filter: blur(4px);
+        align-items: center;
+        justify-content: center;
+      }
+      #admin-panel-overlay.visible { display: flex; }
+
+      .admin-panel {
+        background: var(--help-card-bg);
+        border: 1px solid var(--border-accent);
+        border-radius: 8px;
+        min-width: 560px;
+        max-width: 720px;
+        width: 90%;
+        max-height: 80vh;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 8px 32px var(--shadow-overlay);
+      }
+
+      .admin-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 20px 12px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .admin-panel-header h2 {
+        font-size: 15px;
+        font-weight: 500;
+        color: var(--text-primary);
+        letter-spacing: 0.3px;
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .admin-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 20px;
+        height: 20px;
+        padding: 0 6px;
+        border-radius: 10px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      .admin-panel-body {
+        padding: 12px 20px 16px;
+        overflow-y: auto;
+      }
+
+      .admin-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      .admin-table th {
+        text-align: left;
+        padding: 6px 8px;
+        color: var(--text-secondary);
+        font-weight: 600;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 1px solid var(--border-color);
+        white-space: nowrap;
+      }
+
+      .admin-table td {
+        padding: 8px 8px;
+        color: var(--text-primary);
+        border-bottom: 1px solid var(--border-subtle);
+        font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+      }
+
+      .admin-table tr:last-child td {
+        border-bottom: none;
+      }
+
+      .admin-table .admin-empty {
+        text-align: center;
+        color: var(--text-tertiary);
+        padding: 24px 8px;
+        font-family: inherit;
+      }
+
+      .admin-terminate-btn {
+        padding: 3px 10px;
+        background: transparent;
+        border: 1px solid rgba(255, 107, 107, 0.3);
+        border-radius: 3px;
+        color: #ff6b6b;
+        font-size: 11px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+        white-space: nowrap;
+      }
+
+      .admin-terminate-btn:hover {
+        background: rgba(255, 107, 107, 0.1);
+        border-color: rgba(255, 107, 107, 0.5);
+      }
+
+      .admin-terminate-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      @media (max-width: 768px) {
+        .admin-panel {
+          min-width: auto;
+          width: calc(100% - 32px);
+          max-height: 90vh;
+        }
+        .admin-table { font-size: 11px; }
+      }
+
       /* ── Responsive: Mobile / Tablet ───────────────────── */
       @media (max-width: 768px) {
         /* Login card: full width on small screens */
@@ -1172,6 +1481,12 @@
 
         /* Session info panel: full-screen overlay on mobile */
         #session-info-panel {
+          width: 100%;
+          bottom: 0;
+        }
+
+        /* Clipboard history panel: full-screen overlay on mobile */
+        #clipboard-history-panel {
           width: 100%;
           bottom: 0;
         }
@@ -1256,6 +1571,7 @@
           </form>
           <div class="login-error" id="login-error" role="alert" aria-live="assertive"></div>
           <div class="login-hints">
+            <kbd>F7</kbd> Sessions &middot;
             <kbd>F8</kbd> Toggle audio &middot;
             <kbd>F9</kbd> Performance overlay &middot;
             <kbd>F10</kbd> Session info &middot;
@@ -1350,16 +1666,59 @@
       </div>
     </div>
 
+    <!-- Clipboard History Panel (Ctrl+Shift+V toggle) -->
+    <div id="clipboard-history-panel" role="complementary" aria-label="Clipboard history">
+      <div class="chp-header">
+        <h2>Clipboard History</h2>
+        <div class="chp-header-actions">
+          <button class="chp-clear" id="chp-clear" aria-label="Clear clipboard history">Clear</button>
+          <button class="chp-close" id="chp-close" aria-label="Close clipboard history">&times;</button>
+        </div>
+      </div>
+      <div id="chp-list">
+        <div class="chp-empty">No clipboard activity yet</div>
+      </div>
+    </div>
+
+    <!-- Admin Sessions Panel (F7 toggle) -->
+    <div id="admin-panel-overlay" role="dialog" aria-label="Manage sessions" aria-modal="true">
+      <div class="admin-panel">
+        <div class="admin-panel-header">
+          <h2>Active Sessions <span id="admin-session-count" class="admin-badge">0</span></h2>
+          <button class="sip-close" id="admin-panel-close" aria-label="Close admin panel">&times;</button>
+        </div>
+        <div class="admin-panel-body">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Session</th>
+                <th>User</th>
+                <th>Display</th>
+                <th>Created</th>
+                <th>Idle</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="admin-sessions-tbody">
+              <tr><td colspan="6" class="admin-empty">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- Help Overlay (F1 toggle) -->
     <div id="help-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
       <div class="help-card">
         <h2>Keyboard Shortcuts</h2>
         <div><kbd>F1</kbd> Toggle this help</div>
+        <div><kbd>F7</kbd> Manage sessions</div>
         <div><kbd>F8</kbd> Toggle audio mute</div>
         <div><kbd>F9</kbd> Performance overlay</div>
         <div><kbd>F10</kbd> Session info panel</div>
         <div><kbd>F11</kbd> Toggle fullscreen</div>
         <div><kbd>F12</kbd> Screenshot</div>
+        <div><kbd>Ctrl+Shift+V</kbd> Clipboard history</div>
         <div><kbd>Esc</kbd> Exit fullscreen</div>
       </div>
     </div>
@@ -1392,10 +1751,15 @@
         <span id="bandwidth-indicator" class="bandwidth-indicator" aria-live="off"></span>
       </div>
       <div class="status-right">
-        <div class="status-stats">
-          <span class="status-stat" id="stat-latency">-- ms</span>
-          <span class="status-stat" id="stat-fps">-- FPS</span>
-          <span class="status-stat" id="stat-quality">--</span>
+        <div class="status-stats" id="latency-stats">
+          <span class="ls-stat" id="ls-rtt">RTT: --</span>
+          <span class="ls-sep" aria-hidden="true">|</span>
+          <span class="ls-stat" id="ls-fps">FPS: --</span>
+          <span class="ls-sep" aria-hidden="true">|</span>
+          <span class="ls-stat" id="ls-decode">Dec: --</span>
+          <span class="ls-sep" aria-hidden="true">|</span>
+          <span class="ls-stat" id="ls-loss">Loss: --</span>
+          <div class="ls-tooltip" id="ls-tooltip" role="tooltip"></div>
         </div>
         <div class="status-separator" aria-hidden="true"></div>
         <select class="status-select" id="layout-select" title="Keyboard layout" aria-label="Keyboard layout">
