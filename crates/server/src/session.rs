@@ -350,6 +350,15 @@ impl SessionManager {
         sessions.values().map(|s| s.info.clone()).collect()
     }
 
+    /// List all active sessions with their last activity timestamps.
+    pub async fn list_sessions_with_activity(&self) -> Vec<(SessionInfo, u64)> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .values()
+            .map(|s| (s.info.clone(), s.last_activity))
+            .collect()
+    }
+
     /// Get a specific session's info.
     pub async fn get_session(&self, session_id: Uuid) -> Option<SessionInfo> {
         let sessions = self.sessions.read().await;

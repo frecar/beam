@@ -164,6 +164,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/release", post(release_session))
         .route("/api/sessions/{id}/heartbeat", post(session_heartbeat))
         .route("/api/sessions/{id}/ws", get(browser_ws_upgrade))
+        .route("/api/admin/sessions", get(admin_list_sessions))
+        .route("/api/admin/sessions/{id}", delete(admin_delete_session))
         .route("/api/health", get(health_check))
         .route("/api/health/detailed", get(health_check_detailed))
         .route("/metrics", get(metrics))
@@ -899,6 +901,64 @@ async fn delete_session(
     signaling::remove_channel(&state.channels, id).await;
 
     tracing::info!(target: "audit", event = "session_destroyed", session_id = %id, "Session destroyed");
+    (StatusCode::OK, "Session destroyed").into_response()
+}
+
+/// GET /api/admin/sessions - list ALL active sessions with activity info (requires JWT)
+async fn admin_list_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<WsQuery>,
+) -> impl IntoResponse {
+    if let Err((status, msg)) = extract_claims_from_headers(&headers, &query, &state.jwt_secret) {
+        return (status, Json(json!({ "error": msg }))).into_response();
+    }
+
+    let sessions: Vec<_> = state
+        .session_manager
+        .list_sessions_with_activity()
+        .await
+        .into_iter()
+        .map(|(info, last_activity)| {
+            json!({
+                "id": info.id,
+                "username": info.username,
+                "display": info.display,
+                "created_at": info.created_at,
+                "last_activity": last_activity,
+            })
+        })
+        .collect();
+    Json(sessions).into_response()
+}
+
+/// DELETE /api/admin/sessions/:id - destroy any session (requires JWT, no ownership check)
+async fn admin_delete_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Query(query): Query<WsQuery>,
+) -> impl IntoResponse {
+    let claims = match extract_claims_from_headers(&headers, &query, &state.jwt_secret) {
+        Ok(c) => c,
+        Err((status, msg)) => return (status, msg).into_response(),
+    };
+
+    if state.session_manager.get_session(id).await.is_none() {
+        return (StatusCode::NOT_FOUND, "Session not found").into_response();
+    }
+
+    if let Err(e) = state.session_manager.destroy_session(id).await {
+        tracing::error!(%id, "Failed to destroy session: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to destroy session",
+        )
+            .into_response();
+    }
+
+    signaling::remove_channel(&state.channels, id).await;
+    tracing::info!(target: "audit", event = "admin_session_destroyed", session_id = %id, admin = %claims.sub, "Session destroyed by admin");
     (StatusCode::OK, "Session destroyed").into_response()
 }
 

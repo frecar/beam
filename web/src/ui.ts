@@ -13,9 +13,6 @@ const FS_ACTIVATION_ZONE_PX = 6;
 
 export class BeamUI {
   private statusBar: HTMLElement;
-  private latencyEl: HTMLElement;
-  private fpsEl: HTMLElement;
-  private qualityEl: HTMLElement;
   private toastContainer: HTMLElement;
 
   private onFullscreen: (() => void) | null = null;
@@ -27,9 +24,6 @@ export class BeamUI {
 
   constructor() {
     this.statusBar = document.getElementById("status-bar") as HTMLElement;
-    this.latencyEl = document.getElementById("stat-latency") as HTMLElement;
-    this.fpsEl = document.getElementById("stat-fps") as HTMLElement;
-    this.qualityEl = document.getElementById("stat-quality") as HTMLElement;
     this.toastContainer = document.getElementById("toast-container") as HTMLElement;
 
     this.setupButtons();
@@ -46,36 +40,6 @@ export class BeamUI {
 
   setOnEndSession(callback: () => void): void {
     this.onEndSession = callback;
-  }
-
-  updateLatency(ms: number): void {
-    this.latencyEl.textContent = `${Math.round(ms)} ms`;
-  }
-
-  updateFps(fps: number): void {
-    this.fpsEl.textContent = `${Math.round(fps)} FPS`;
-  }
-
-  updateQuality(
-    bitrateKbps: number | null,
-    lossPercent: number,
-    candidateType: string,
-  ): void {
-    const parts: string[] = [];
-    if (bitrateKbps !== null) {
-      parts.push(
-        bitrateKbps >= 1000
-          ? `${(bitrateKbps / 1000).toFixed(1)} Mbps`
-          : `${bitrateKbps} kbps`,
-      );
-    }
-    if (lossPercent > 0) {
-      parts.push(`${lossPercent}% loss`);
-    }
-    if (candidateType === "relay") {
-      parts.push("TURN");
-    }
-    this.qualityEl.textContent = parts.join(" | ");
   }
 
   showNotification(message: string, type: NotificationType, durationMs: number = TOAST_DURATION_MS): void {
