@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -113,6 +113,39 @@ impl LoginRateLimiter {
     }
 }
 
+/// Middleware that adds security headers to every response.
+async fn security_headers(
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "referrer-policy",
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    headers.insert("x-xss-protection", HeaderValue::from_static("0"));
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             connect-src 'self' wss: ws:; img-src 'self' data:; media-src 'self' blob:",
+        ),
+    );
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+
+    response
+}
+
 /// Build the Axum router with all routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let api = Router::new()
@@ -134,6 +167,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let serve_dir = ServeDir::new(&state.config.server.web_root);
 
     api.fallback_service(serve_dir)
+        .layer(axum::middleware::from_fn(security_headers))
 }
 
 /// Query parameters for WebSocket upgrade
@@ -1171,5 +1205,56 @@ mod tests {
             let json = body_json(response).await;
             assert_eq!(json["error"], "Invalid username");
         }
+    }
+
+    #[tokio::test]
+    async fn security_headers_present_on_responses() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let headers = response.headers();
+
+        assert_eq!(
+            headers.get("x-content-type-options").map(|v| v.as_bytes()),
+            Some(b"nosniff".as_slice()),
+            "missing or wrong X-Content-Type-Options"
+        );
+        assert_eq!(
+            headers.get("x-frame-options").map(|v| v.as_bytes()),
+            Some(b"DENY".as_slice()),
+            "missing or wrong X-Frame-Options"
+        );
+        assert_eq!(
+            headers.get("referrer-policy").map(|v| v.as_bytes()),
+            Some(b"strict-origin-when-cross-origin".as_slice()),
+            "missing or wrong Referrer-Policy"
+        );
+        assert_eq!(
+            headers.get("x-xss-protection").map(|v| v.as_bytes()),
+            Some(b"0".as_slice()),
+            "missing or wrong X-XSS-Protection"
+        );
+        assert_eq!(
+            headers.get("content-security-policy").map(|v| v.as_bytes()),
+            Some(
+                b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+                  connect-src 'self' wss: ws:; img-src 'self' data:; media-src 'self' blob:"
+                    .as_slice()
+            ),
+            "missing or wrong Content-Security-Policy"
+        );
+        assert_eq!(
+            headers.get("permissions-policy").map(|v| v.as_bytes()),
+            Some(b"camera=(), microphone=(), geolocation=()".as_slice()),
+            "missing or wrong Permissions-Policy"
+        );
     }
 }
