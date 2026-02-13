@@ -88,3 +88,118 @@ impl ClipboardBridge {
         Ok(Some(text))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- sanitize: control character stripping ---
+
+    #[test]
+    fn sanitize_strips_escape() {
+        assert_eq!(ClipboardBridge::sanitize("hello\x1bworld"), "helloworld");
+    }
+
+    #[test]
+    fn sanitize_strips_bell() {
+        assert_eq!(ClipboardBridge::sanitize("ding\x07dong"), "dingdong");
+    }
+
+    #[test]
+    fn sanitize_strips_null() {
+        assert_eq!(ClipboardBridge::sanitize("a\x00b"), "ab");
+    }
+
+    #[test]
+    fn sanitize_strips_delete() {
+        assert_eq!(ClipboardBridge::sanitize("rm\x7fme"), "rmme");
+    }
+
+    #[test]
+    fn sanitize_strips_mixed_control_chars() {
+        // ESC[31m is a typical ANSI color sequence
+        let input = "\x1b[31mred text\x1b[0m";
+        assert_eq!(ClipboardBridge::sanitize(input), "[31mred text[0m");
+    }
+
+    #[test]
+    fn sanitize_strips_all_c0_controls_except_whitespace() {
+        // C0 control range is 0x00..=0x1F. Tab (0x09), LF (0x0A), CR (0x0D) are kept.
+        let mut input = String::new();
+        for c in 0x00u8..=0x1F {
+            input.push(c as char);
+        }
+        let result = ClipboardBridge::sanitize(&input);
+        assert_eq!(result, "\t\n\r");
+    }
+
+    // --- sanitize: preserves normal text ---
+
+    #[test]
+    fn sanitize_preserves_ascii_text() {
+        let text = "Hello, World! 123 @#$%^&*()";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    #[test]
+    fn sanitize_preserves_unicode() {
+        let text = "Hei verden! \u{1F600} \u{00E6}\u{00F8}\u{00E5}";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    #[test]
+    fn sanitize_preserves_empty_string() {
+        assert_eq!(ClipboardBridge::sanitize(""), "");
+    }
+
+    #[test]
+    fn sanitize_preserves_spaces_and_punctuation() {
+        let text = "line one.  line two!  (parens) [brackets] {braces}";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    // --- sanitize: preserves whitespace ---
+
+    #[test]
+    fn sanitize_preserves_newlines() {
+        let text = "line one\nline two\nline three";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    #[test]
+    fn sanitize_preserves_carriage_returns() {
+        let text = "line one\r\nline two\r\n";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    #[test]
+    fn sanitize_preserves_tabs() {
+        let text = "col1\tcol2\tcol3";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    #[test]
+    fn sanitize_preserves_mixed_whitespace() {
+        let text = "header\n\tcol1\tcol2\r\ndata\n";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    // --- sanitize: realistic clipboard payloads ---
+
+    #[test]
+    fn sanitize_handles_terminal_escape_injection() {
+        // Simulates a malicious clipboard payload that could run commands
+        // if pasted into a terminal: ESC ]0; sets title, BEL terminates
+        let malicious = "\x1b]0;pwned\x07\necho hacked";
+        assert_eq!(
+            ClipboardBridge::sanitize(malicious),
+            "]0;pwned\necho hacked"
+        );
+    }
+
+    #[test]
+    fn sanitize_handles_multiline_code_snippet() {
+        let code = "fn main() {\n    println!(\"hello\");\n}\n";
+        assert_eq!(ClipboardBridge::sanitize(code), code);
+    }
+}
