@@ -2,7 +2,6 @@
 ///
 /// Provides NAL unit extraction, IDR detection, and SPS parsing for
 /// verifying encoder output compatibility with Chrome's WebRTC decoder.
-
 /// Check if an Annex B H.264 access unit contains an IDR slice (NAL type 5).
 /// Scans for start codes (00 00 00 01 or 00 00 01) and checks the NAL unit type
 /// in the byte following each start code. Returns true if any NAL is type 5 (IDR).
@@ -34,6 +33,7 @@ pub fn h264_contains_idr(data: &[u8]) -> bool {
 
 /// Extract NAL units from an Annex B byte stream.
 /// Returns a Vec of (nal_type, payload_bytes) tuples.
+#[allow(dead_code)]
 pub fn extract_nals(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
     let mut nals = Vec::new();
     let mut nal_starts = Vec::new();
@@ -88,6 +88,7 @@ pub fn extract_nals(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
 
 /// Minimal SPS (Sequence Parameter Set) info for Chrome WebRTC compatibility checks.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SpsInfo {
     pub profile_idc: u8,
     pub constraint_set0_flag: bool,
@@ -98,6 +99,7 @@ pub struct SpsInfo {
 }
 
 /// Exp-Golomb bit reader for H.264 SPS parsing.
+#[allow(dead_code)]
 struct BitReader<'a> {
     data: &'a [u8],
     byte_offset: usize,
@@ -169,6 +171,7 @@ impl<'a> BitReader<'a> {
 
 /// Parse an SPS NAL unit (including the NAL header byte).
 /// Only parses enough to extract profile, level, and VUI colour presence.
+#[allow(dead_code)]
 pub fn parse_sps(nal_data: &[u8]) -> Option<SpsInfo> {
     if nal_data.is_empty() {
         return None;

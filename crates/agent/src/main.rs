@@ -27,12 +27,8 @@ const DEFAULT_BITRATE: u32 = 100_000; // 100 Mbps — for VA-API/software encode
 const LOW_BITRATE: u32 = 5_000; // 5 Mbps — for constrained WAN connections
 const DEFAULT_FRAMERATE: u32 = 60; // 60fps — higher rates cause WebRTC bufferbloat (RTT spikes to seconds)
 const LOW_FRAMERATE: u32 = 30; // 30fps for low quality mode
-const IDLE_TIMEOUT_MS: u64 = 300_000; // 5 minutes of no input → idle mode
-const IDLE_FRAMERATE: u32 = 5; // Low framerate when no input — saves GPU/CPU
-
-/// Build the reusable input event callback that dispatches input events
-/// to the appropriate subsystem (uinput, clipboard, resize, layout, quality).
-fn build_input_callback(
+/// Shared context for building the input event callback.
+struct InputCallbackCtx {
     injector: Arc<Mutex<InputInjector>>,
     clipboard: Arc<Mutex<ClipboardBridge>>,
     resize_tx: mpsc::Sender<(u32, u32)>,
@@ -41,7 +37,21 @@ fn build_input_callback(
     capture_wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     capture_cmd_tx: std::sync::mpsc::Sender<CaptureCommand>,
     display: String,
-) -> Arc<dyn Fn(InputEvent) + Send + Sync> {
+}
+
+/// Build the reusable input event callback that dispatches input events
+/// to the appropriate subsystem (uinput, clipboard, resize, layout, quality).
+fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send + Sync> {
+    let InputCallbackCtx {
+        injector,
+        clipboard,
+        resize_tx,
+        last_input_time,
+        clipboard_read_tx,
+        capture_wake,
+        capture_cmd_tx,
+        display,
+    } = ctx;
     let ctrl_down = Arc::new(AtomicBool::new(false));
     let last_layout = Arc::new(std::sync::Mutex::new(String::new()));
 
@@ -91,14 +101,12 @@ fn build_input_callback(
                     && dy.is_finite()
                     && (-10000.0..=10000.0).contains(&dx)
                     && (-10000.0..=10000.0).contains(&dy)
-                {
-                    if let Err(e) = injector
+                    && let Err(e) = injector
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .inject_mouse_move_rel(dx, dy)
-                    {
-                        warn!("Relative mouse move inject error: {e:#}");
-                    }
+                {
+                    warn!("Relative mouse move inject error: {e:#}");
                 }
             }
             InputEvent::Button { b, d } => {
@@ -115,14 +123,12 @@ fn build_input_callback(
                     && dy.is_finite()
                     && (-10000.0..=10000.0).contains(&dx)
                     && (-10000.0..=10000.0).contains(&dy)
-                {
-                    if let Err(e) = injector
+                    && let Err(e) = injector
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .inject_scroll(dx, dy)
-                    {
-                        warn!("Scroll inject error: {e:#}");
-                    }
+                {
+                    warn!("Scroll inject error: {e:#}");
                 }
             }
             InputEvent::Clipboard { ref text } => {
@@ -548,16 +554,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build the reusable input callback (Arc<dyn Fn>) so it survives peer recreation
-    let input_callback = build_input_callback(
-        Arc::clone(&injector),
-        Arc::clone(&clipboard),
-        resize_tx.clone(),
-        Arc::clone(&last_input_time),
-        clipboard_read_tx.clone(),
-        Arc::clone(&capture_wake_for_input),
-        capture_cmd_tx.clone(),
-        args.display.clone(),
-    );
+    let input_callback = build_input_callback(InputCallbackCtx {
+        injector: Arc::clone(&injector),
+        clipboard: Arc::clone(&clipboard),
+        resize_tx: resize_tx.clone(),
+        last_input_time: Arc::clone(&last_input_time),
+        clipboard_read_tx: clipboard_read_tx.clone(),
+        capture_wake: Arc::clone(&capture_wake_for_input),
+        capture_cmd_tx: capture_cmd_tx.clone(),
+        display: args.display.clone(),
+    });
 
     // Create initial WebRTC peer with all callbacks
     let initial_peer = peer::create_peer(
@@ -932,6 +938,19 @@ async fn main() -> anyhow::Result<()> {
     // Set up SIGTERM handler
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
+    let signaling_ctx = SignalingCtx {
+        server_url: &server_url,
+        session_id,
+        agent_token: args.agent_token.as_deref(),
+        tls_cert_path: args.tls_cert_path.as_deref(),
+        shared_peer: &shared_peer,
+        peer_config: &peer_config,
+        signal_tx: &signal_tx,
+        force_keyframe: kf_flag_for_signal,
+        input_callback: Arc::clone(&input_callback),
+        capture_cmd_tx: &cmd_tx_for_signal,
+    };
+
     tokio::select! {
         // Write encoded video frames to WebRTC (only when connected)
         _ = async {
@@ -1125,17 +1144,8 @@ async fn main() -> anyhow::Result<()> {
 
         // Handle signaling WebSocket
         _ = run_signaling(
-            &server_url,
-            session_id,
-            args.agent_token.as_deref(),
-            args.tls_cert_path.as_deref(),
-            &shared_peer,
-            &peer_config,
-            &signal_tx,
+            &signaling_ctx,
             &mut signal_rx,
-            kf_flag_for_signal,
-            Arc::clone(&input_callback),
-            &cmd_tx_for_signal,
         ) => {}
 
         // Forward resize requests from input handler to capture thread
@@ -1325,20 +1335,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_signaling(
-    server_url: &str,
+/// Shared context for signaling WebSocket connection.
+struct SignalingCtx<'a> {
+    server_url: &'a str,
     session_id: Uuid,
-    agent_token: Option<&str>,
-    tls_cert_path: Option<&str>,
-    shared_peer: &SharedPeer,
-    peer_config: &PeerConfig,
-    signal_tx: &mpsc::Sender<SignalingMessage>,
-    signal_rx: &mut mpsc::Receiver<SignalingMessage>,
+    agent_token: Option<&'a str>,
+    tls_cert_path: Option<&'a str>,
+    shared_peer: &'a SharedPeer,
+    peer_config: &'a PeerConfig,
+    signal_tx: &'a mpsc::Sender<SignalingMessage>,
     force_keyframe: Arc<AtomicBool>,
     input_callback: Arc<dyn Fn(InputEvent) + Send + Sync>,
-    capture_cmd_tx: &std::sync::mpsc::Sender<CaptureCommand>,
-) {
-    if server_url.is_empty() {
+    capture_cmd_tx: &'a std::sync::mpsc::Sender<CaptureCommand>,
+}
+
+async fn run_signaling(ctx: &SignalingCtx<'_>, signal_rx: &mut mpsc::Receiver<SignalingMessage>) {
+    if ctx.server_url.is_empty() {
         info!("No server URL provided, waiting for signaling via stdin or other mechanism");
         while let Some(msg) = signal_rx.recv().await {
             debug!(?msg, "Outgoing signal (no server connected)");
@@ -1350,23 +1362,9 @@ async fn run_signaling(
     let mut backoff = Duration::from_secs(2);
     let max_backoff = Duration::from_secs(60);
     loop {
-        info!(url = server_url, "Connecting to signaling server");
+        info!(url = ctx.server_url, "Connecting to signaling server");
 
-        match connect_and_handle(
-            server_url,
-            session_id,
-            agent_token,
-            tls_cert_path,
-            shared_peer,
-            peer_config,
-            signal_tx,
-            signal_rx,
-            &force_keyframe,
-            Arc::clone(&input_callback),
-            capture_cmd_tx,
-        )
-        .await
-        {
+        match connect_and_handle(ctx, signal_rx).await {
             Ok(()) => {
                 info!("Signaling connection closed cleanly");
                 break;
@@ -1422,30 +1420,23 @@ fn build_tls_connector(tls_cert_path: Option<&str>) -> tokio_tungstenite::Connec
 }
 
 async fn connect_and_handle(
-    server_url: &str,
-    session_id: Uuid,
-    agent_token: Option<&str>,
-    tls_cert_path: Option<&str>,
-    shared_peer: &SharedPeer,
-    peer_config: &PeerConfig,
-    signal_tx: &mpsc::Sender<SignalingMessage>,
+    ctx: &SignalingCtx<'_>,
     signal_rx: &mut mpsc::Receiver<SignalingMessage>,
-    force_keyframe: &Arc<AtomicBool>,
-    input_callback: Arc<dyn Fn(InputEvent) + Send + Sync>,
-    capture_cmd_tx: &std::sync::mpsc::Sender<CaptureCommand>,
 ) -> anyhow::Result<()> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let url = match agent_token {
+    let url = match ctx.agent_token {
         Some(token) => format!(
-            "{server_url}/ws/agent/{session_id}?token={}",
+            "{}/ws/agent/{}?token={}",
+            ctx.server_url,
+            ctx.session_id,
             urlencoding::encode(token)
         ),
-        None => format!("{server_url}/ws/agent/{session_id}"),
+        None => format!("{}/ws/agent/{}", ctx.server_url, ctx.session_id),
     };
 
-    let connector = build_tls_connector(tls_cert_path);
+    let connector = build_tls_connector(ctx.tls_cert_path);
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(65_536); // 64KB max, matching server-side limit
     let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
@@ -1485,11 +1476,10 @@ async fn connect_and_handle(
                                         let offer_ufrag = sdp.lines()
                                             .find(|l| l.starts_with("a=ice-ufrag:"))
                                             .map(|l| l.trim_start_matches("a=ice-ufrag:").to_string());
-                                        if let Some(ref ufrag) = offer_ufrag {
-                                            if last_offer_ufrag.as_deref() == Some(ufrag) {
-                                                info!(ufrag, "Ignoring duplicate SDP Offer (same ICE ufrag)");
-                                                continue;
-                                            }
+                                        if let Some(ref ufrag) = offer_ufrag
+                                            && last_offer_ufrag.as_deref() == Some(ufrag) {
+                                            info!(ufrag, "Ignoring duplicate SDP Offer (same ICE ufrag)");
+                                            continue;
                                         }
                                         last_offer_ufrag = offer_ufrag;
 
@@ -1498,32 +1488,32 @@ async fn connect_and_handle(
                                         // state — the only reliable way to handle browser
                                         // reconnects (refresh, new tab, etc.).
                                         info!("Received SDP Offer — creating new WebRTC peer");
-                                        let old_peer = peer::snapshot(shared_peer).await;
+                                        let old_peer = peer::snapshot(ctx.shared_peer).await;
                                         // Close old peer (non-blocking best-effort)
                                         let _ = old_peer.close().await;
 
                                         match peer::create_peer(
-                                            peer_config, signal_tx, session_id,
-                                            force_keyframe, Arc::clone(&input_callback),
+                                            ctx.peer_config, ctx.signal_tx, ctx.session_id,
+                                            &ctx.force_keyframe, Arc::clone(&ctx.input_callback),
                                         ).await {
                                             Ok(new_peer) => {
                                                 // Handle the offer on the new peer
                                                 match new_peer.handle_offer(&sdp).await {
                                                     Ok(answer_sdp) => {
                                                         // Swap the peer atomically
-                                                        *shared_peer.write().await = new_peer;
+                                                        *ctx.shared_peer.write().await = new_peer;
                                                         info!("New peer installed, sending SDP answer");
                                                         let reply = SignalingMessage::Answer {
                                                             sdp: answer_sdp,
-                                                            session_id,
+                                                            session_id: ctx.session_id,
                                                         };
                                                         let text = serde_json::to_string(&reply)?;
                                                         ws_tx.send(Message::Text(text.into())).await?;
                                                         // Recreate encoder to guarantee IDR on first frame.
                                                         // ForceKeyUnit events are unreliable on nvh264enc
                                                         // after long P-frame runs with gop-size=MAX.
-                                                        let _ = capture_cmd_tx.send(CaptureCommand::ResetEncoder);
-                                                        force_keyframe.store(true, Ordering::Relaxed);
+                                                        let _ = ctx.capture_cmd_tx.send(CaptureCommand::ResetEncoder);
+                                                        ctx.force_keyframe.store(true, Ordering::Relaxed);
                                                     }
                                                     Err(e) => {
                                                         error!("Failed to handle offer on new peer: {e:#}");
@@ -1538,7 +1528,7 @@ async fn connect_and_handle(
                                     SignalingMessage::IceCandidate {
                                         candidate, sdp_mid, sdp_mline_index, ..
                                     } => {
-                                        let current_peer = peer::snapshot(shared_peer).await;
+                                        let current_peer = peer::snapshot(ctx.shared_peer).await;
                                         if let Err(e) = current_peer
                                             .add_ice_candidate(&candidate, sdp_mid.as_deref(), sdp_mline_index)
                                             .await
