@@ -24,18 +24,22 @@ impl ClipboardBridge {
         })
     }
 
-    pub fn set_text(&self, text: &str) -> anyhow::Result<()> {
+    /// Strip terminal control characters that could execute commands
+    /// when pasted into a terminal emulator. Keep \t (0x09), \n (0x0A), \r (0x0D).
+    fn sanitize(text: &str) -> String {
+        text.chars()
+            .filter(|&c| c == '\t' || c == '\n' || c == '\r' || (c >= ' ' && c != '\x7f'))
+            .collect()
+    }
+
+    /// Write text to an X11 selection via xclip.
+    fn set_selection(&self, selection: &str, text: &str) -> anyhow::Result<()> {
         use std::io::Write;
 
-        // Strip terminal control characters that could execute commands
-        // when pasted into a terminal emulator. Keep \t (0x09), \n (0x0A), \r (0x0D).
-        let sanitized: String = text
-            .chars()
-            .filter(|&c| c == '\t' || c == '\n' || c == '\r' || (c >= ' ' && c != '\x7f'))
-            .collect();
+        let sanitized = Self::sanitize(text);
 
         let mut child = Command::new("xclip")
-            .args(["-selection", "clipboard"])
+            .args(["-selection", selection])
             .env("DISPLAY", &self.x_display)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
@@ -54,8 +58,17 @@ impl ClipboardBridge {
             anyhow::bail!("xclip exited with status {status}");
         }
 
-        debug!(len = text.len(), "Clipboard text set");
+        debug!(len = text.len(), selection, "Clipboard text set");
         Ok(())
+    }
+
+    pub fn set_text(&self, text: &str) -> anyhow::Result<()> {
+        self.set_selection("clipboard", text)
+    }
+
+    /// Write text to the X11 PRIMARY selection (used by middle-click paste).
+    pub fn set_primary_text(&self, text: &str) -> anyhow::Result<()> {
+        self.set_selection("primary", text)
     }
 
     pub fn get_text(&self) -> anyhow::Result<Option<String>> {

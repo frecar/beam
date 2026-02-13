@@ -36,6 +36,7 @@ struct InputCallbackCtx {
     clipboard_read_tx: mpsc::Sender<()>,
     capture_wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     capture_cmd_tx: std::sync::mpsc::Sender<CaptureCommand>,
+    tab_backgrounded: Arc<AtomicBool>,
     display: String,
     max_width: u32,
     max_height: u32,
@@ -52,6 +53,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
         clipboard_read_tx,
         capture_wake,
         capture_cmd_tx,
+        tab_backgrounded,
         display,
         max_width,
         max_height,
@@ -151,6 +153,22 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                     warn!("Clipboard set error: {e:#}");
                 }
             }
+            InputEvent::ClipboardPrimary { ref text } => {
+                const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
+                if text.len() > MAX_CLIPBOARD_BYTES {
+                    warn!(
+                        len = text.len(),
+                        max = MAX_CLIPBOARD_BYTES,
+                        "Primary clipboard text too large, ignoring"
+                    );
+                } else if let Err(e) = clipboard
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .set_primary_text(text)
+                {
+                    warn!("Primary clipboard set error: {e:#}");
+                }
+            }
             InputEvent::Resize { w, h } => {
                 if (320..=7680).contains(&w) && (240..=4320).contains(&h) {
                     // Clamp to configured max resolution (0 = unlimited)
@@ -206,6 +224,17 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 let is_high = mode == "high";
                 info!(mode = %mode, "Quality mode changed");
                 let _ = capture_cmd_tx.send(CaptureCommand::SetQualityHigh(is_high));
+            }
+            InputEvent::VisibilityState { visible } => {
+                debug!(visible, "Browser tab visibility changed");
+                tab_backgrounded.store(!visible, Ordering::Relaxed);
+                if visible {
+                    // Wake capture thread immediately to restore full framerate
+                    let (lock, cvar) = &*capture_wake;
+                    let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    *woken = true;
+                    cvar.notify_one();
+                }
             }
         }
     })
@@ -585,6 +614,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Tab backgrounded flag: set by visibility state events from browser,
+    // checked by capture thread to reduce framerate when tab is hidden.
+    let tab_backgrounded = Arc::new(AtomicBool::new(false));
+    let tab_backgrounded_for_capture = Arc::clone(&tab_backgrounded);
+
     // Build the reusable input callback (Arc<dyn Fn>) so it survives peer recreation
     let input_callback = build_input_callback(InputCallbackCtx {
         injector: Arc::clone(&injector),
@@ -594,6 +628,7 @@ async fn main() -> anyhow::Result<()> {
         clipboard_read_tx: clipboard_read_tx.clone(),
         capture_wake: Arc::clone(&capture_wake_for_input),
         capture_cmd_tx: capture_cmd_tx.clone(),
+        tab_backgrounded: Arc::clone(&tab_backgrounded),
         display: args.display.clone(),
         max_width: args.max_width,
         max_height: args.max_height,
@@ -618,6 +653,7 @@ async fn main() -> anyhow::Result<()> {
     // Capture + encode thread
     const IDLE_TIMEOUT_MS: u64 = 300_000; // 5 minutes of no input → idle mode
     const IDLE_FRAMERATE: u32 = 5; // Low framerate when no input — saves GPU/CPU
+    const BACKGROUND_FRAMERATE: u32 = 1; // Minimal framerate when browser tab is hidden
 
     let display_for_capture = args.display.clone();
     let kf_flag_for_capture = Arc::clone(&force_keyframe);
@@ -646,10 +682,12 @@ async fn main() -> anyhow::Result<()> {
             let mut current_framerate = config_framerate;
             let mut active_frame_duration_ns = 1_000_000_000u64 / config_framerate as u64;
             let idle_frame_duration_ns = 1_000_000_000u64 / IDLE_FRAMERATE as u64;
+            let background_frame_duration_ns = 1_000_000_000u64 / BACKGROUND_FRAMERATE as u64;
             let mut frame_count: u64 = 0;
             let mut encoded_count: u64 = 0;
             let start = Instant::now();
             let mut was_idle = false;
+            let mut was_backgrounded = false;
             let mut first_capture_logged = false;
             let mut first_encode_logged = false;
 
@@ -771,6 +809,9 @@ async fn main() -> anyhow::Result<()> {
                 let frame_start = Instant::now();
                 let pts = start.elapsed().as_nanos() as u64;
 
+                // Check background state: browser tab hidden → minimal framerate
+                let is_backgrounded = tab_backgrounded_for_capture.load(Ordering::Relaxed);
+
                 // Check idle state: if no input for IDLE_TIMEOUT_MS, reduce framerate
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -778,13 +819,26 @@ async fn main() -> anyhow::Result<()> {
                     .as_millis() as u64;
                 let last_input_ms = last_input_for_capture.load(Ordering::Relaxed);
                 let is_idle = last_input_ms > 0 && (now_ms - last_input_ms) > IDLE_TIMEOUT_MS;
-                let frame_duration_ns = if is_idle {
+
+                // Background mode takes priority over idle mode (even lower framerate)
+                let frame_duration_ns = if is_backgrounded {
+                    background_frame_duration_ns
+                } else if is_idle {
                     idle_frame_duration_ns
                 } else {
                     active_frame_duration_ns
                 };
 
-                if is_idle != was_idle {
+                if is_backgrounded != was_backgrounded {
+                    if is_backgrounded {
+                        debug!("Tab backgrounded, reducing to {BACKGROUND_FRAMERATE}fps");
+                    } else {
+                        debug!(fps = current_framerate, "Tab foregrounded, restoring framerate");
+                    }
+                    was_backgrounded = is_backgrounded;
+                }
+
+                if is_idle != was_idle && !is_backgrounded {
                     if is_idle {
                         debug!("Entering idle mode ({IDLE_FRAMERATE}fps)");
                     } else {
@@ -886,20 +940,21 @@ async fn main() -> anyhow::Result<()> {
 
                 // Frame pacing: use condvar wait so input can wake us immediately.
                 // During active mode (60fps), use sleep+spin-wait for precise timing.
-                // During idle mode, use condvar wait that input can interrupt instantly.
+                // During idle/background mode, use condvar wait that can be interrupted.
                 let target = Duration::from_nanos(frame_duration_ns);
                 let elapsed = frame_start.elapsed();
                 if elapsed < target {
                     let remaining = target - elapsed;
-                    if is_idle {
-                        // Idle mode: interruptible wait — input wakes us immediately
+                    if is_idle || is_backgrounded {
+                        // Idle/background mode: interruptible wait — visibility change
+                        // or input wakes us immediately
                         let (lock, cvar) = &*capture_wake_for_thread;
                         let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
                         *woken = false; // clear any stale wake signal
                         let result = cvar.wait_timeout(woken, remaining)
                             .unwrap_or_else(|e| e.into_inner());
                         if *result.0 {
-                            debug!("Capture thread woken by input (idle → active)");
+                            debug!("Capture thread woken by input/visibility change");
                         }
                     } else {
                         // Active mode: precise sleep+spin-wait for frame timing
