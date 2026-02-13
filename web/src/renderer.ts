@@ -62,6 +62,11 @@ export class Renderer {
     this.muteChangeCallback?.(muted);
   }
 
+  /** Return the video element (used for screenshot canvas capture) */
+  getVideoElement(): HTMLVideoElement {
+    return this.videoElement;
+  }
+
   /** Attach a remote MediaStream to the video element */
   hasStream(): boolean {
     return this.videoElement.srcObject !== null;

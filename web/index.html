@@ -403,6 +403,19 @@
       .status-dot.connecting { background: #facc15; animation: pulse 1s ease-in-out infinite; }
       .status-dot.error { background: #ff6b6b; }
 
+      .bandwidth-indicator {
+        display: none;
+        font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+        font-size: 11px;
+        color: #888;
+        margin-left: 6px;
+        white-space: nowrap;
+      }
+      .bandwidth-indicator.visible { display: inline; }
+      .bandwidth-indicator.bw-green { color: #4ade80; }
+      .bandwidth-indicator.bw-yellow { color: #facc15; }
+      .bandwidth-indicator.bw-red { color: #ff6b6b; }
+
       /* Idle timeout warning banner */
       #idle-warning {
         display: none;
@@ -617,6 +630,24 @@
         outline: 2px solid #4a9eff;
         outline-offset: 2px;
       }
+
+      /* Screenshot flash overlay (camera shutter feedback) */
+      #screenshot-flash {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(255, 255, 255, 0.6);
+        z-index: 10001;
+        pointer-events: none;
+      }
+      #screenshot-flash.active {
+        display: block;
+        animation: flash-fade 200ms ease-out forwards;
+      }
+      @keyframes flash-fade {
+        from { opacity: 1; }
+        to { opacity: 0; }
+      }
     </style>
   </head>
   <body>
@@ -656,7 +687,8 @@
             <kbd>F8</kbd> Toggle audio &middot;
             <kbd>F11</kbd> Toggle fullscreen &middot;
             <kbd>Esc</kbd> Exit fullscreen &middot;
-            <kbd>F9</kbd> Performance overlay
+            <kbd>F9</kbd> Performance overlay &middot;
+            <kbd>F12</kbd> Screenshot
           </div>
         </div>
         <div id="login-loading" class="login-loading" style="display: none;">
@@ -707,9 +739,13 @@
         <div><kbd>F8</kbd> Toggle audio mute</div>
         <div><kbd>F9</kbd> Performance overlay</div>
         <div><kbd>F11</kbd> Toggle fullscreen</div>
+        <div><kbd>F12</kbd> Screenshot</div>
         <div><kbd>Esc</kbd> Exit fullscreen</div>
       </div>
     </div>
+
+    <!-- Screenshot Flash Overlay -->
+    <div id="screenshot-flash"></div>
 
     <!-- Notification Container -->
     <div id="notifications"></div>
@@ -719,6 +755,7 @@
       <div class="status-left">
         <div class="status-dot" id="status-dot"></div>
         <span id="status-text">Disconnected</span>
+        <span id="bandwidth-indicator" class="bandwidth-indicator"></span>
       </div>
       <div class="status-right">
         <div class="status-stats">
@@ -748,6 +785,13 @@
         <select class="status-select" id="quality-select" title="Quality mode">
           <option value="high">High</option>
           <option value="low">Low</option>
+        </select>
+        <div class="status-separator"></div>
+        <select class="status-select" id="scroll-speed-select" title="Scroll speed">
+          <option value="0.5">Scroll 0.5x</option>
+          <option value="1" selected>Scroll 1x</option>
+          <option value="2">Scroll 2x</option>
+          <option value="3">Scroll 3x</option>
         </select>
         <div class="status-separator"></div>
         <button class="status-btn" id="btn-mute">Unmute</button>

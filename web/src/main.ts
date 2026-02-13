@@ -19,6 +19,7 @@ interface StoredSession extends LoginResponse {
 const SESSION_KEY = "beam_session";
 const SESSION_MAX_AGE_MS = 3600_000; // 1 hour — matches server reaper
 const AUDIO_MUTED_KEY = "beam_audio_muted";
+const SCROLL_SPEED_KEY = "beam_scroll_speed";
 
 // Idle timeout warning: server default is 3600s. We warn 2 minutes before.
 // The idle_timeout is not sent in the login response, so we use the server
@@ -72,6 +73,7 @@ const statusDot = document.getElementById("status-dot") as HTMLDivElement;
 const statusText = document.getElementById("status-text") as HTMLSpanElement;
 const statusVersion = document.getElementById("status-version") as HTMLSpanElement;
 
+const bandwidthIndicator = document.getElementById("bandwidth-indicator") as HTMLSpanElement;
 const faviconLink = document.querySelector("link[rel='icon']") as HTMLLinkElement;
 
 const btnMute = document.getElementById("btn-mute") as HTMLButtonElement;
@@ -115,6 +117,9 @@ let isReturningToLogin = false;
 // For calculating received video bitrate from inbound-rtp stats
 let prevBytesReceived = 0;
 let prevStatsTimestamp = 0;
+
+// Cumulative bytes received during this session (for bandwidth indicator)
+let sessionBytesReceived = 0;
 
 // Performance overlay state (updated from stats poll + renderer)
 let perfFps = 0;
@@ -185,6 +190,50 @@ function updateConnectionQuality(rttMs: number): void {
     statusDot.style.backgroundColor = "#4ade80";
     statusText.textContent = "Connected";
   }
+}
+
+/** Format a byte count as a human-readable string (KB, MB, GB) */
+function formatTransferred(bytes: number): string {
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(0)} KB`;
+  } else if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  } else {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+}
+
+/** Update the bandwidth indicator in the status bar */
+function updateBandwidthIndicator(bitrateKbps: number | null, totalBytes: number): void {
+  if (currentConnectionState !== "connected" || bitrateKbps === null) {
+    bandwidthIndicator.classList.remove("visible");
+    return;
+  }
+
+  // Format bitrate
+  let bitrateStr: string;
+  if (bitrateKbps >= 1000) {
+    bitrateStr = `${(bitrateKbps / 1000).toFixed(1)} Mbps`;
+  } else {
+    bitrateStr = `${bitrateKbps} kbps`;
+  }
+
+  // Format total transferred
+  const totalStr = formatTransferred(totalBytes);
+
+  bandwidthIndicator.textContent = `\u25BC ${bitrateStr} \u00B7 ${totalStr}`;
+
+  // Color based on bandwidth: green <5 Mbps, yellow 5-15 Mbps, red >15 Mbps
+  bandwidthIndicator.classList.remove("bw-green", "bw-yellow", "bw-red");
+  if (bitrateKbps < 5000) {
+    bandwidthIndicator.classList.add("bw-green");
+  } else if (bitrateKbps <= 15000) {
+    bandwidthIndicator.classList.add("bw-yellow");
+  } else {
+    bandwidthIndicator.classList.add("bw-red");
+  }
+
+  bandwidthIndicator.classList.add("visible");
 }
 
 function setToken(token: string): void {
@@ -378,6 +427,7 @@ async function pollWebRTCStats(): Promise<void> {
     if (deltaSec > 0) {
       bitrateKbps = Math.round((deltaBytes * 8) / deltaSec / 1000);
     }
+    sessionBytesReceived += deltaBytes;
   }
   prevBytesReceived = currentBytesReceived;
   prevStatsTimestamp = currentTimestamp;
@@ -401,6 +451,9 @@ async function pollWebRTCStats(): Promise<void> {
 
   // Update status bar connection quality indicator based on latency
   if (rttMs !== null) updateConnectionQuality(rttMs);
+
+  // Update bandwidth indicator in status bar
+  updateBandwidthIndicator(bitrateKbps, sessionBytesReceived);
 
   // Warn if video element has no frames decoded yet (debugging aid)
   if (remoteVideo.srcObject && remoteVideo.videoWidth === 0 && remoteVideo.videoHeight === 0) {
@@ -567,6 +620,12 @@ function handleDisconnect(): void {
   currentToken = null;
   currentReleaseToken = null;
   currentSessionId = null;
+  prevBytesReceived = 0;
+  prevStatsTimestamp = 0;
+  sessionBytesReceived = 0;
+
+  // Hide bandwidth indicator
+  bandwidthIndicator.classList.remove("visible");
 
   // Clear saved session
   clearSession();
@@ -700,6 +759,33 @@ function handleEndSession(): void {
 
   handleDisconnect();
   ui?.showNotification("Session ended", "info");
+}
+
+/** Capture the current video frame and download it as a PNG */
+function captureScreenshot(): void {
+  const video = renderer?.getVideoElement();
+  if (!video || video.videoWidth === 0) return;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.drawImage(video, 0, 0);
+
+  const link = document.createElement("a");
+  link.download = `beam-screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+  link.href = canvas.toDataURL("image/png");
+  link.click();
+
+  // Brief white flash for visual feedback (camera shutter effect)
+  const flash = document.getElementById("screenshot-flash");
+  if (flash) {
+    flash.classList.add("active");
+    setTimeout(() => flash.classList.remove("active"), 200);
+  }
+
+  ui?.showNotification("Screenshot saved", "success");
 }
 
 function toggleFullscreen(): void {
@@ -912,6 +998,21 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
           connection?.sendInput({ t: "q", mode });
         };
       }
+
+      // Wire up scroll speed selector
+      const scrollSpeedSelect = document.getElementById("scroll-speed-select") as HTMLSelectElement | null;
+      if (scrollSpeedSelect) {
+        const savedScrollSpeed = localStorage.getItem(SCROLL_SPEED_KEY);
+        if (savedScrollSpeed) {
+          scrollSpeedSelect.value = savedScrollSpeed;
+          inputHandler?.setScrollMultiplier(parseFloat(savedScrollSpeed));
+        }
+        scrollSpeedSelect.onchange = () => {
+          const speed = scrollSpeedSelect.value;
+          localStorage.setItem(SCROLL_SPEED_KEY, speed);
+          inputHandler?.setScrollMultiplier(parseFloat(speed));
+        };
+      }
     }
 
     // Always re-send layout, quality, and current dimensions on (re)connect.
@@ -1023,7 +1124,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   await connection.connect();
 }
 
-// F1 help overlay, F8 mute toggle, F9 performance overlay, F11 fullscreen
+// F1 help overlay, F8 mute toggle, F9 performance overlay, F11 fullscreen, F12 screenshot
 document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "F1") {
     e.preventDefault();
@@ -1040,6 +1141,10 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "F9") {
     e.preventDefault();
     perfOverlay.classList.toggle("visible");
+  }
+  if (e.key === "F12") {
+    e.preventDefault();
+    captureScreenshot();
   }
 });
 

@@ -102,6 +102,7 @@ export class InputHandler {
   private sendInput: (event: InputEvent) => void;
   private active = false;
   private pointerLocked = false;
+  private scrollMultiplier = 1.0;
 
   // Resize gating: Chrome's WebRTC H.264 decoder can't handle mid-stream
   // resolution changes. We suppress resize events until the first video
@@ -188,6 +189,11 @@ export class InputHandler {
   /** Send a specific keyboard layout to remote agent */
   sendSpecificLayout(layout: string): void {
     this.sendInput({ t: "l", layout });
+  }
+
+  /** Set the scroll speed multiplier (applied to wheel deltas before sending) */
+  setScrollMultiplier(multiplier: number): void {
+    this.scrollMultiplier = multiplier;
   }
 
   enable(): void {
@@ -455,6 +461,9 @@ export class InputHandler {
       dx *= 300;
       dy *= 300;
     }
+
+    dx *= this.scrollMultiplier;
+    dy *= this.scrollMultiplier;
 
     this.sendInput({ t: "s", dx, dy });
   }
