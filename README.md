@@ -47,6 +47,35 @@ Rust and Node.js are installed automatically if not present.
 make doctor
 ```
 
+### TLS Certificate
+
+Beam auto-generates a self-signed certificate on first run. Browsers will show a security warning — click through it or set up a trusted certificate:
+
+**Option A: mkcert (recommended for LAN/dev)**
+```bash
+# Install mkcert (creates a local CA trusted by your browser)
+sudo apt install libnss3-tools
+curl -JLO "https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v*-linux-amd64"
+sudo mv mkcert-* /usr/local/bin/mkcert && sudo chmod +x /usr/local/bin/mkcert
+mkcert -install
+
+# Generate cert for your hostname
+mkcert -cert-file /etc/beam/cert.pem -key-file /etc/beam/key.pem "$(hostname)" "$(hostname -I | awk '{print $1}')"
+sudo systemctl restart beam
+```
+
+**Option B: Let's Encrypt (internet-facing servers)**
+```bash
+sudo apt install certbot
+sudo certbot certonly --standalone -d beam.example.com
+# Update /etc/beam/beam.toml:
+# tls_cert = "/etc/letsencrypt/live/beam.example.com/fullchain.pem"
+# tls_key = "/etc/letsencrypt/live/beam.example.com/privkey.pem"
+sudo systemctl restart beam
+```
+
+**Option C: Existing certificate** — set `tls_cert` and `tls_key` in `/etc/beam/beam.toml`.
+
 ## Configuration
 
 Edit `/etc/beam/beam.toml` (installed) or `config/beam.toml` (development):
