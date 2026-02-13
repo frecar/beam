@@ -287,6 +287,16 @@ impl SessionManager {
                 }
             }
 
+            // Wait for Xorg lock file cleanup before recycling the display number.
+            // The agent exits before Xorg, so the lock file may linger briefly.
+            let lock_path = format!("/tmp/.X{display_num}-lock");
+            for _ in 0..20 {
+                if !std::path::Path::new(&lock_path).exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+
             // Clean up agent log file
             let log_path = format!("/tmp/beam-agent-{session_id}.log");
             let _ = std::fs::remove_file(&log_path);
