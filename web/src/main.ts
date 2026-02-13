@@ -60,6 +60,7 @@ const remoteVideo = document.getElementById("remote-video") as HTMLVideoElement;
 const statusBar = document.getElementById("status-bar") as HTMLDivElement;
 const statusDot = document.getElementById("status-dot") as HTMLDivElement;
 const statusText = document.getElementById("status-text") as HTMLSpanElement;
+const statusVersion = document.getElementById("status-version") as HTMLSpanElement;
 
 const perfOverlay = document.getElementById("perf-overlay") as HTMLDivElement;
 const reconnectOverlay = document.getElementById("reconnect-overlay") as HTMLDivElement;
@@ -237,6 +238,13 @@ function showDesktop(): void {
     clearTimeout(connectionTimeout);
     connectionTimeout = null;
   }
+  // Fetch and display server version (best-effort, non-blocking)
+  fetch("/api/health")
+    .then((r) => r.json())
+    .then((data: { version?: string }) => {
+      if (data.version) statusVersion.textContent = `v${data.version}`;
+    })
+    .catch(() => {});
 }
 
 function showLogin(): void {
