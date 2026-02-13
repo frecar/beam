@@ -159,19 +159,31 @@ async fn login(
             .into_response();
     }
 
-    // Run PAM authentication in a blocking task to avoid blocking the async runtime
+    // Run PAM authentication in a blocking task with timeout to avoid hanging
+    // on misconfigured LDAP/SSSD backends
     let username = req.username.clone();
     let password = req.password.clone();
-    let pam_result =
-        tokio::task::spawn_blocking(move || auth::authenticate_pam(&username, &password)).await;
+    let pam_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || auth::authenticate_pam(&username, &password)),
+    )
+    .await;
 
     match pam_result {
-        Ok(Ok(())) => {
+        Err(_) => {
+            tracing::warn!(username = %req.username, "PAM authentication timed out (10s)");
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({ "error": "Authentication timed out" })),
+            )
+                .into_response();
+        }
+        Ok(Ok(Ok(()))) => {
             // Successful auth — clear rate limit so legitimate users aren't affected
             // by earlier failed attempts (e.g., typos or attacker lockout attempts)
             state.login_limiter.clear(&req.username);
         }
-        Ok(Err(e)) => {
+        Ok(Ok(Err(e))) => {
             tracing::warn!(username = %req.username, "Authentication failed: {e}");
             return (
                 StatusCode::UNAUTHORIZED,
@@ -179,7 +191,7 @@ async fn login(
             )
                 .into_response();
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::error!("PAM task panicked: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
