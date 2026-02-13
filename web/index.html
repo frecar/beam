@@ -236,6 +236,43 @@
         color: var(--text-placeholder);
       }
 
+      .password-wrapper {
+        position: relative;
+      }
+
+      .password-wrapper input {
+        padding-right: 48px;
+      }
+
+      .password-toggle {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: none;
+        border: none;
+        color: var(--text-secondary);
+        font-size: 12px;
+        font-family: inherit;
+        cursor: pointer;
+        padding: 2px 4px;
+        transition: color 0.15s;
+      }
+
+      .password-toggle:hover {
+        color: var(--text-primary);
+      }
+
+      @keyframes shake {
+        0%, 100% { transform: translateX(0); }
+        10%, 30%, 50%, 70%, 90% { transform: translateX(-4px); }
+        20%, 40%, 60%, 80% { transform: translateX(4px); }
+      }
+
+      .login-card.shake {
+        animation: shake 0.4s ease-in-out;
+      }
+
       button#connect-btn {
         width: 100%;
         padding: 10px;
@@ -538,6 +575,12 @@
       .status-select option {
         background: var(--select-option-bg);
         color: var(--text-primary);
+      }
+
+      .status-btn.active {
+        background: rgba(74, 222, 128, 0.15);
+        border-color: rgba(74, 222, 128, 0.4);
+        color: #4ade80;
       }
 
       .status-btn-disconnect {
@@ -935,14 +978,17 @@
             </div>
             <div class="form-group">
               <label for="password">Password</label>
-              <input
-                type="password"
-                id="password"
-                name="password"
-                placeholder=""
-                autocomplete="current-password"
-                required
-              />
+              <div class="password-wrapper">
+                <input
+                  type="password"
+                  id="password"
+                  name="password"
+                  placeholder=""
+                  autocomplete="current-password"
+                  required
+                />
+                <button type="button" class="password-toggle" id="password-toggle" aria-label="Show password">Show</button>
+              </div>
             </div>
             <button type="submit" id="connect-btn">Connect</button>
           </form>
@@ -1101,6 +1147,7 @@
           <option value="3">Scroll 3x</option>
         </select>
         <div class="status-separator" aria-hidden="true"></div>
+        <button class="status-btn" id="btn-forward-keys" aria-label="Forward browser shortcuts to remote desktop">Fwd Keys</button>
         <button class="status-btn" id="btn-mute" aria-label="Unmute audio">Unmute</button>
         <button class="status-btn" id="btn-fullscreen" aria-label="Toggle fullscreen">Fullscreen</button>
         <button class="status-btn" id="btn-theme" aria-label="Toggle color theme">Light</button>

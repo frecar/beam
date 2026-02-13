@@ -104,6 +104,9 @@ export class InputHandler {
   private pointerLocked = false;
   private scrollMultiplier = 1.0;
 
+  /** When true, intercept browser shortcuts (Ctrl+W, Ctrl+T, etc.) and forward them to remote */
+  forwardBrowserShortcuts = false;
+
   // Resize gating: Chrome's WebRTC H.264 decoder can't handle mid-stream
   // resolution changes. We suppress resize events until the first video
   // frame is decoded, and trigger a WebRTC reconnect for large resizes.
@@ -259,8 +262,12 @@ export class InputHandler {
   // --- Keyboard ---
 
   private handleKeyDown(e: KeyboardEvent): void {
-    // Let browser shortcuts through (Mac Cmd+T, Cmd+W, etc.)
-    if (isBrowserShortcut(e)) return;
+    // Browser shortcuts: forward to remote when enabled, otherwise let browser handle them
+    if (isBrowserShortcut(e)) {
+      if (!this.forwardBrowserShortcuts) return;
+      e.preventDefault();
+      // Fall through to send the key event to the remote desktop
+    }
 
     // Don't capture when typing in input fields
     if (this.isInputElement(e.target)) return;
@@ -310,7 +317,10 @@ export class InputHandler {
   }
 
   private handleKeyUp(e: KeyboardEvent): void {
-    if (isBrowserShortcut(e)) return;
+    if (isBrowserShortcut(e)) {
+      if (!this.forwardBrowserShortcuts) return;
+      e.preventDefault();
+    }
     if (this.isInputElement(e.target)) return;
 
     // On Mac, suppress Meta key release (never sent to remote)

@@ -21,6 +21,7 @@ const SESSION_MAX_AGE_MS = 3600_000; // 1 hour — matches server reaper
 const AUDIO_MUTED_KEY = "beam_audio_muted";
 const SCROLL_SPEED_KEY = "beam_scroll_speed";
 const THEME_KEY = "beam_theme";
+const FORWARD_KEYS_KEY = "beam_forward_keys";
 
 // Idle timeout warning: server default is 3600s. We warn 2 minutes before.
 // The idle_timeout is not sent in the login response, so we use the server
@@ -63,6 +64,8 @@ const usernameInput = document.getElementById("username") as HTMLInputElement;
 const passwordInput = document.getElementById("password") as HTMLInputElement;
 const connectBtn = document.getElementById("connect-btn") as HTMLButtonElement;
 const loginError = document.getElementById("login-error") as HTMLDivElement;
+const loginCard = document.querySelector(".login-card") as HTMLDivElement;
+const passwordToggle = document.getElementById("password-toggle") as HTMLButtonElement;
 const loginFormContent = document.getElementById("login-form-content") as HTMLDivElement;
 const loginLoading = document.getElementById("login-loading") as HTMLDivElement;
 const loadingSpinner = document.getElementById("loading-spinner") as HTMLDivElement;
@@ -78,6 +81,7 @@ const bandwidthIndicator = document.getElementById("bandwidth-indicator") as HTM
 const faviconLink = document.querySelector("link[rel='icon']") as HTMLLinkElement;
 
 const btnMute = document.getElementById("btn-mute") as HTMLButtonElement;
+const btnForwardKeys = document.getElementById("btn-forward-keys") as HTMLButtonElement;
 const btnTheme = document.getElementById("btn-theme") as HTMLButtonElement;
 const perfOverlay = document.getElementById("perf-overlay") as HTMLDivElement;
 const helpOverlay = document.getElementById("help-overlay") as HTMLDivElement;
@@ -414,10 +418,19 @@ function updateLoadingStatus(message: string): void {
   }, 150);
 }
 
+function shakeLoginCard(): void {
+  loginCard.classList.remove("shake");
+  // Force reflow so re-adding the class restarts the animation
+  void loginCard.offsetWidth;
+  loginCard.classList.add("shake");
+  loginCard.addEventListener("animationend", () => loginCard.classList.remove("shake"), { once: true });
+}
+
 function showLoadingError(message: string): void {
   loadingSpinner.classList.add("error");
   loadingStatus.textContent = message;
   loadingStatus.classList.add("error");
+  shakeLoginCard();
   loadingCancel.textContent = "Back to login";
 }
 
@@ -1215,6 +1228,22 @@ function toggleFullscreen(): void {
   }
 }
 
+/** Update the forward keys button to reflect current state */
+function updateForwardKeysButton(enabled: boolean): void {
+  btnForwardKeys.textContent = enabled ? "Fwd Keys: On" : "Fwd Keys";
+  btnForwardKeys.classList.toggle("active", enabled);
+  btnForwardKeys.setAttribute("aria-pressed", String(enabled));
+}
+
+/** Toggle forwarding of browser shortcuts to the remote desktop */
+function toggleForwardKeys(): void {
+  if (!inputHandler) return;
+  const enabled = !inputHandler.forwardBrowserShortcuts;
+  inputHandler.forwardBrowserShortcuts = enabled;
+  localStorage.setItem(FORWARD_KEYS_KEY, enabled ? "true" : "false");
+  updateForwardKeysButton(enabled);
+}
+
 /** Update the mute button text to reflect current audio state */
 function updateMuteButton(muted: boolean): void {
   btnMute.textContent = muted ? "Unmute" : "Mute";
@@ -1237,9 +1266,12 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
 
   if (!username || !password) {
     showLoginError("Username and password are required.");
+    shakeLoginCard();
     return;
   }
 
+  connectBtn.disabled = true;
+  connectBtn.textContent = "Signing in...";
   showLoading("Authenticating...");
   setStatus("connecting", "Authenticating...");
 
@@ -1390,6 +1422,10 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     if (!inputHandler) {
       // First connection: set up input capture
       inputHandler = new InputHandler(desktopView, sendInput);
+      // Restore forward keys preference
+      const savedForwardKeys = localStorage.getItem(FORWARD_KEYS_KEY) === "true";
+      inputHandler.forwardBrowserShortcuts = savedForwardKeys;
+      updateForwardKeysButton(savedForwardKeys);
       inputHandler.enable();
 
       // Schedule a WebRTC soft reconnect when a significant resize happens.
@@ -1587,6 +1623,14 @@ loginForm.addEventListener("submit", (e: SubmitEvent) => {
   handleLogin(e);
 });
 
+// Password show/hide toggle
+passwordToggle.addEventListener("click", () => {
+  const isPassword = passwordInput.type === "password";
+  passwordInput.type = isPassword ? "text" : "password";
+  passwordToggle.textContent = isPassword ? "Hide" : "Show";
+  passwordToggle.setAttribute("aria-label", isPassword ? "Hide password" : "Show password");
+});
+
 // Reconnect overlay buttons
 reconnectBtn.addEventListener("click", () => {
   handleReconnectClick();
@@ -1605,6 +1649,11 @@ sipCloseBtn.addEventListener("click", () => {
 const sipCopyStatsBtn = document.getElementById("sip-copy-stats") as HTMLButtonElement;
 sipCopyStatsBtn.addEventListener("click", () => {
   copyStatsToClipboard();
+});
+
+// Forward browser shortcuts toggle
+btnForwardKeys.addEventListener("click", () => {
+  toggleForwardKeys();
 });
 
 // Mute/unmute button
