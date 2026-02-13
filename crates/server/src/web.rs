@@ -126,6 +126,10 @@ async fn security_headers(
     let headers = response.headers_mut();
 
     headers.insert(
+        "strict-transport-security",
+        HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+    );
+    headers.insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
@@ -245,6 +249,7 @@ async fn login(
     // by sending bad requests with their username).
     if !state.login_limiter.check(&req.username) {
         tracing::warn!(username = %req.username, "Login rate limited");
+        tracing::warn!(target: "audit", event = "rate_limited", "Rate limit exceeded");
         state
             .metrics_logins_failed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -281,9 +286,11 @@ async fn login(
             // Successful auth — clear rate limit so legitimate users aren't affected
             // by earlier failed attempts (e.g., typos or attacker lockout attempts)
             state.login_limiter.clear(&req.username);
+            tracing::info!(target: "audit", event = "login_success", username = %req.username, "User logged in");
         }
         Ok(Ok(Err(e))) => {
             tracing::warn!(username = %req.username, "Authentication failed: {e}");
+            tracing::info!(target: "audit", event = "login_failure", username = %req.username, "Login failed");
             state
                 .metrics_logins_failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -393,6 +400,7 @@ async fn login(
         display = session.display,
         "Session created"
     );
+    tracing::info!(target: "audit", event = "session_created", session_id = %session.id, username = %req.username, "Session created");
 
     (
         StatusCode::OK,
@@ -867,6 +875,7 @@ async fn delete_session(
     // Clean up signaling channel
     signaling::remove_channel(&state.channels, id).await;
 
+    tracing::info!(target: "audit", event = "session_destroyed", session_id = %id, "Session destroyed");
     (StatusCode::OK, "Session destroyed").into_response()
 }
 
@@ -920,6 +929,8 @@ async fn release_session(
         tracing::info!(%id, "Grace period expired — destroying session");
         if let Err(e) = state_clone.session_manager.destroy_session(id).await {
             tracing::error!(%id, "Failed to destroy session after grace period: {e}");
+        } else {
+            tracing::info!(target: "audit", event = "session_destroyed", session_id = %id, "Session destroyed");
         }
         signaling::remove_channel(&state_clone.channels, id).await;
     });
@@ -957,8 +968,18 @@ async fn health_check_detailed(
     .into_response()
 }
 
-/// GET /metrics - Prometheus-compatible metrics endpoint (no auth required)
-async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// GET /metrics - Prometheus-compatible metrics endpoint (auth configurable)
+async fn metrics(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<WsQuery>,
+) -> impl IntoResponse {
+    if state.config.server.metrics_require_auth
+        && let Err((status, msg)) = extract_claims_from_headers(&headers, &query, &state.jwt_secret)
+    {
+        return (status, msg).into_response();
+    }
+
     let active_sessions = state.session_manager.list_sessions().await.len();
     let uptime_secs = state.started_at.elapsed().as_secs();
     let logins_attempted = state
@@ -1000,6 +1021,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         )],
         body,
     )
+        .into_response()
 }
 
 /// GET /api/ice-config - return ICE/TURN server configuration (requires JWT)
@@ -1486,6 +1508,13 @@ mod tests {
         let headers = response.headers();
 
         assert_eq!(
+            headers
+                .get("strict-transport-security")
+                .map(|v| v.as_bytes()),
+            Some(b"max-age=63072000; includeSubDomains".as_slice()),
+            "missing or wrong Strict-Transport-Security"
+        );
+        assert_eq!(
             headers.get("x-content-type-options").map(|v| v.as_bytes()),
             Some(b"nosniff".as_slice()),
             "missing or wrong X-Content-Type-Options"
@@ -1538,8 +1567,11 @@ mod tests {
 
         let app = build_router(state);
 
+        let token = crate::auth::generate_jwt("testuser", TEST_JWT_SECRET).unwrap();
+
         let request = Request::builder()
             .uri("/metrics")
+            .header("authorization", format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap();
 
@@ -1577,5 +1609,61 @@ mod tests {
         assert!(body.contains("# HELP beam_agent_restarts_total"));
         assert!(body.contains("# TYPE beam_agent_restarts_total counter"));
         assert!(body.contains("beam_agent_restarts_total 2"));
+    }
+
+    #[tokio::test]
+    async fn metrics_requires_auth_when_configured() {
+        // Default config has metrics_require_auth=true
+        let state = test_app_state();
+        assert!(state.config.server.metrics_require_auth);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn metrics_accessible_without_auth_when_disabled() {
+        let mut config: BeamConfig = toml::from_str("").expect("default config");
+        config.server.metrics_require_auth = false;
+
+        let session_manager = crate::session::SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let state = Arc::new(AppState {
+            config,
+            session_manager,
+            channels: crate::signaling::new_channel_registry(),
+            jwt_secret: TEST_JWT_SECRET.to_string(),
+            login_limiter: LoginRateLimiter::new(5, 60),
+            started_at: std::time::Instant::now(),
+            metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
+            metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
+            metrics_agent_restarts: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(body.contains("beam_active_sessions"));
     }
 }

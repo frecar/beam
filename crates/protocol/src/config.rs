@@ -32,6 +32,9 @@ pub struct ServerConfig {
     /// Path to web client static files
     #[serde(default = "default_web_root")]
     pub web_root: String,
+    /// Require JWT auth for the /metrics endpoint (default: true)
+    #[serde(default = "default_true")]
+    pub metrics_require_auth: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +116,7 @@ impl Default for ServerConfig {
             tls_key: None,
             jwt_secret: None,
             web_root: default_web_root(),
+            metrics_require_auth: true,
         }
     }
 }
@@ -369,6 +373,7 @@ mod tests {
         assert!(config.server.tls_key.is_none());
         assert!(config.server.jwt_secret.is_none());
         assert_eq!(config.server.web_root, "web/dist");
+        assert!(config.server.metrics_require_auth);
 
         // Video defaults
         assert_eq!(config.video.bitrate, 5000);
@@ -476,6 +481,7 @@ tls_cert = "/etc/beam/cert.pem"
 tls_key = "/etc/beam/key.pem"
 jwt_secret = "supersecret"
 web_root = "/usr/share/beam/web/dist"
+metrics_require_auth = false
 
 [video]
 bitrate = 10000
@@ -516,6 +522,7 @@ turn_credential = "pass"
         assert_eq!(config.server.tls_key.as_deref(), Some("/etc/beam/key.pem"));
         assert_eq!(config.server.jwt_secret.as_deref(), Some("supersecret"));
         assert_eq!(config.server.web_root, "/usr/share/beam/web/dist");
+        assert!(!config.server.metrics_require_auth);
 
         // Video
         assert_eq!(config.video.bitrate, 10000);
@@ -562,6 +569,10 @@ turn_credential = "pass"
         assert_eq!(server.tls_key, from_toml.server.tls_key);
         assert_eq!(server.jwt_secret, from_toml.server.jwt_secret);
         assert_eq!(server.web_root, from_toml.server.web_root);
+        assert_eq!(
+            server.metrics_require_auth,
+            from_toml.server.metrics_require_auth
+        );
 
         let video = VideoConfig::default();
         assert_eq!(video.bitrate, from_toml.video.bitrate);
