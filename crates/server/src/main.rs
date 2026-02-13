@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::trace::TraceLayer;
+use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
 use crate::session::SessionManager;
@@ -65,6 +68,25 @@ async fn main() -> Result<()> {
     if let Some(p) = port_override {
         config.server.port = p;
     }
+    // Validate configuration semantics
+    if let Err(issues) = config.validate() {
+        let has_errors = issues.iter().any(|i| i.starts_with("ERROR:"));
+        for issue in &issues {
+            if issue.starts_with("ERROR:") {
+                tracing::error!("{}", issue);
+            } else {
+                tracing::warn!("{}", issue);
+            }
+        }
+        if has_errors {
+            tracing::error!(
+                "Configuration has {} issue(s). Fix the ERROR(s) above and restart.",
+                issues.len()
+            );
+            std::process::exit(1);
+        }
+    }
+
     // Validate web root exists so we don't silently serve 404
     if !std::path::Path::new(&config.server.web_root).is_dir() {
         tracing::warn!(
@@ -180,7 +202,40 @@ async fn main() -> Result<()> {
         );
     }
 
-    let app = web::build_router(Arc::clone(&state));
+    let app = web::build_router(Arc::clone(&state))
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::http::Request<_>| {
+                    let request_id = request
+                        .headers()
+                        .get("x-request-id")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("-");
+                    tracing::info_span!(
+                        "request",
+                        method = %request.method(),
+                        path = %request.uri().path(),
+                        request_id = %request_id,
+                    )
+                })
+                .on_request(|_request: &axum::http::Request<_>, _span: &tracing::Span| {
+                    tracing::event!(Level::INFO, "started");
+                })
+                .on_response(
+                    |response: &axum::http::Response<_>,
+                     latency: std::time::Duration,
+                     _span: &tracing::Span| {
+                        tracing::event!(
+                            Level::INFO,
+                            status = %response.status().as_u16(),
+                            duration_ms = %latency.as_millis(),
+                            "completed"
+                        );
+                    },
+                ),
+        )
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
 
     // Print startup banner
     tracing::info!("===========================================");

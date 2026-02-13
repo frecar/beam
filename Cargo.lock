@@ -354,6 +354,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "beam-protocol",
+ "http-body-util",
  "hyper-util",
  "jsonwebtoken",
  "libc",
@@ -3276,6 +3277,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
