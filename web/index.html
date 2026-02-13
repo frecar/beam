@@ -12,6 +12,26 @@
         box-sizing: border-box;
       }
 
+      /* Skip link for keyboard navigation */
+      .skip-link {
+        position: absolute;
+        top: -100%;
+        left: 16px;
+        padding: 8px 16px;
+        background: #4a9eff;
+        color: #fff;
+        font-size: 14px;
+        font-family: inherit;
+        text-decoration: none;
+        border-radius: 0 0 4px 4px;
+        z-index: 99999;
+        transition: top 0.15s ease;
+      }
+
+      .skip-link:focus {
+        top: 0;
+      }
+
       body {
         font-family: -apple-system, BlinkMacSystemFont, "SF Mono", "Fira Code",
           "Fira Mono", "Roboto Mono", monospace;
@@ -230,10 +250,10 @@
         cursor: default;
       }
 
-      /* Notifications */
-      #notifications {
+      /* Toast Notifications */
+      #toast-container {
         position: fixed;
-        top: 16px;
+        bottom: 36px; /* above the 28px status bar + 8px gap */
         right: 16px;
         display: flex;
         flex-direction: column;
@@ -242,39 +262,56 @@
         pointer-events: none;
       }
 
-      .notification {
-        padding: 10px 16px;
+      .toast {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
         border-radius: 6px;
         font-size: 13px;
         font-family: inherit;
         backdrop-filter: blur(12px);
+        background: rgba(26, 26, 46, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-left: 3px solid #4a9eff;
+        color: #e0e0e0;
+        max-width: 360px;
+        pointer-events: auto;
         opacity: 0;
         transform: translateX(20px);
         transition: opacity 0.3s ease, transform 0.3s ease;
-        max-width: 320px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
       }
 
-      .notification.visible {
+      .toast.visible {
         opacity: 1;
         transform: translateX(0);
       }
 
-      .notification-info {
-        background: rgba(74, 158, 255, 0.15);
-        border: 1px solid rgba(74, 158, 255, 0.25);
-        color: #8ec5ff;
+      .toast-info { border-left-color: #4a9eff; }
+      .toast-success { border-left-color: #4ade80; }
+      .toast-warning { border-left-color: #facc15; }
+      .toast-error { border-left-color: #ff6b6b; }
+
+      .toast-message {
+        flex: 1;
+        line-height: 1.4;
       }
 
-      .notification-success {
-        background: rgba(74, 222, 128, 0.15);
-        border: 1px solid rgba(74, 222, 128, 0.25);
-        color: #4ade80;
+      .toast-close {
+        flex-shrink: 0;
+        background: none;
+        border: none;
+        color: #666;
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0 2px;
+        transition: color 0.15s;
       }
 
-      .notification-error {
-        background: rgba(255, 107, 107, 0.15);
-        border: 1px solid rgba(255, 107, 107, 0.25);
-        color: #ff6b6b;
+      .toast-close:hover {
+        color: #ccc;
       }
 
       /* Status Bar - merged bar with stats, controls, and connection status */
@@ -651,8 +688,11 @@
     </style>
   </head>
   <body>
+    <!-- Skip link for keyboard navigation -->
+    <a href="#login-form" class="skip-link" id="skip-link">Skip to content</a>
+
     <!-- Login View -->
-    <div id="login-view">
+    <main id="login-view">
       <div class="login-card">
         <div id="login-form-content">
           <h1>Beam</h1>
@@ -667,6 +707,7 @@
                 placeholder=""
                 autocomplete="username"
                 required
+                autofocus
               />
             </div>
             <div class="form-group">
@@ -682,7 +723,7 @@
             </div>
             <button type="submit" id="connect-btn">Connect</button>
           </form>
-          <div class="login-error" id="login-error"></div>
+          <div class="login-error" id="login-error" role="alert" aria-live="assertive"></div>
           <div class="login-hints">
             <kbd>F8</kbd> Toggle audio &middot;
             <kbd>F11</kbd> Toggle fullscreen &middot;
@@ -693,18 +734,18 @@
         </div>
         <div id="login-loading" class="login-loading" style="display: none;">
           <div class="loading-spinner" id="loading-spinner"></div>
-          <p class="loading-status" id="loading-status">Authenticating...</p>
+          <p class="loading-status" id="loading-status" aria-live="polite">Authenticating...</p>
           <button type="button" class="loading-cancel" id="loading-cancel">Cancel</button>
         </div>
       </div>
-    </div>
+    </main>
 
     <!-- Desktop View -->
-    <div id="desktop-view">
+    <div id="desktop-view" role="application" aria-label="Remote desktop" tabindex="-1">
       <video id="remote-video" autoplay playsinline></video>
 
       <!-- Reconnect Overlay (shown when reconnect attempts exhausted) -->
-      <div id="reconnect-overlay" role="alertdialog" aria-labelledby="reconnect-title" aria-describedby="reconnect-desc">
+      <div id="reconnect-overlay" role="alertdialog" aria-label="Connection lost" aria-labelledby="reconnect-title" aria-describedby="reconnect-desc" aria-modal="true">
         <div class="reconnect-card">
           <div class="reconnect-icon" aria-hidden="true">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -719,7 +760,7 @@
           </div>
           <h2 id="reconnect-title">Connection lost</h2>
           <p id="reconnect-desc">Your session is still running on the server.</p>
-          <button type="button" id="reconnect-btn" class="reconnect-btn-primary">Reconnect</button>
+          <button type="button" id="reconnect-btn" class="reconnect-btn-primary" aria-label="Reconnect to session">Reconnect</button>
           <button type="button" id="reconnect-disconnect-btn" class="reconnect-btn-secondary">Disconnect</button>
         </div>
       </div>
@@ -729,10 +770,10 @@
     <div id="idle-warning" role="alert">Session will expire due to inactivity. Move mouse or press a key to stay connected.</div>
 
     <!-- Performance Overlay (F9 toggle) -->
-    <div id="perf-overlay"></div>
+    <div id="perf-overlay" aria-hidden="true"></div>
 
     <!-- Help Overlay (F1 toggle) -->
-    <div id="help-overlay">
+    <div id="help-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
       <div class="help-card">
         <h2>Keyboard Shortcuts</h2>
         <div><kbd>F1</kbd> Toggle this help</div>
@@ -745,17 +786,17 @@
     </div>
 
     <!-- Screenshot Flash Overlay -->
-    <div id="screenshot-flash"></div>
+    <div id="screenshot-flash" aria-hidden="true"></div>
 
-    <!-- Notification Container -->
-    <div id="notifications"></div>
+    <!-- Toast Container -->
+    <div id="toast-container" aria-live="polite" aria-relevant="additions"></div>
 
     <!-- Status Bar -->
-    <div id="status-bar">
+    <div id="status-bar" role="toolbar" aria-label="Session controls">
       <div class="status-left">
-        <div class="status-dot" id="status-dot"></div>
-        <span id="status-text">Disconnected</span>
-        <span id="bandwidth-indicator" class="bandwidth-indicator"></span>
+        <div class="status-dot" id="status-dot" aria-hidden="true"></div>
+        <span id="status-text" aria-live="polite">Disconnected</span>
+        <span id="bandwidth-indicator" class="bandwidth-indicator" aria-live="off"></span>
       </div>
       <div class="status-right">
         <div class="status-stats">
@@ -763,8 +804,8 @@
           <span class="status-stat" id="stat-fps">-- FPS</span>
           <span class="status-stat" id="stat-quality">--</span>
         </div>
-        <div class="status-separator"></div>
-        <select class="status-select" id="layout-select" title="Keyboard layout">
+        <div class="status-separator" aria-hidden="true"></div>
+        <select class="status-select" id="layout-select" title="Keyboard layout" aria-label="Keyboard layout">
           <option value="us">US</option>
           <option value="gb">GB</option>
           <option value="no">NO</option>
@@ -781,23 +822,23 @@
           <option value="ru">RU</option>
           <option value="jp">JP</option>
         </select>
-        <div class="status-separator"></div>
-        <select class="status-select" id="quality-select" title="Quality mode">
+        <div class="status-separator" aria-hidden="true"></div>
+        <select class="status-select" id="quality-select" title="Quality mode" aria-label="Quality mode">
           <option value="high">High</option>
           <option value="low">Low</option>
         </select>
-        <div class="status-separator"></div>
-        <select class="status-select" id="scroll-speed-select" title="Scroll speed">
+        <div class="status-separator" aria-hidden="true"></div>
+        <select class="status-select" id="scroll-speed-select" title="Scroll speed" aria-label="Scroll speed">
           <option value="0.5">Scroll 0.5x</option>
           <option value="1" selected>Scroll 1x</option>
           <option value="2">Scroll 2x</option>
           <option value="3">Scroll 3x</option>
         </select>
-        <div class="status-separator"></div>
-        <button class="status-btn" id="btn-mute">Unmute</button>
-        <button class="status-btn" id="btn-fullscreen">Fullscreen</button>
-        <button class="status-btn status-btn-disconnect" id="btn-disconnect">Disconnect</button>
-        <button class="status-btn status-btn-disconnect" id="btn-end-session">End Session</button>
+        <div class="status-separator" aria-hidden="true"></div>
+        <button class="status-btn" id="btn-mute" aria-label="Unmute audio">Unmute</button>
+        <button class="status-btn" id="btn-fullscreen" aria-label="Toggle fullscreen">Fullscreen</button>
+        <button class="status-btn status-btn-disconnect" id="btn-disconnect" aria-label="Disconnect from session">Disconnect</button>
+        <button class="status-btn status-btn-disconnect" id="btn-end-session" aria-label="End session">End Session</button>
         <span class="status-version" id="status-version"></span>
       </div>
     </div>

@@ -5,9 +5,9 @@
  * In fullscreen the bar auto-hides and shows on mouse hover near the bottom edge.
  */
 
-type NotificationType = "info" | "error" | "success";
+type NotificationType = "info" | "error" | "success" | "warning";
 
-const NOTIFICATION_DURATION_MS = 4_000;
+const TOAST_DURATION_MS = 3_000;
 const FS_BAR_HIDE_DELAY_MS = 2_000;
 const FS_ACTIVATION_ZONE_PX = 6;
 
@@ -16,7 +16,7 @@ export class BeamUI {
   private latencyEl: HTMLElement;
   private fpsEl: HTMLElement;
   private qualityEl: HTMLElement;
-  private notificationContainer: HTMLElement;
+  private toastContainer: HTMLElement;
 
   private onFullscreen: (() => void) | null = null;
   private onDisconnect: (() => void) | null = null;
@@ -30,7 +30,7 @@ export class BeamUI {
     this.latencyEl = document.getElementById("stat-latency") as HTMLElement;
     this.fpsEl = document.getElementById("stat-fps") as HTMLElement;
     this.qualityEl = document.getElementById("stat-quality") as HTMLElement;
-    this.notificationContainer = document.getElementById("notifications") as HTMLElement;
+    this.toastContainer = document.getElementById("toast-container") as HTMLElement;
 
     this.setupButtons();
     this.setupFullscreenAutoHide();
@@ -78,20 +78,37 @@ export class BeamUI {
     this.qualityEl.textContent = parts.join(" | ");
   }
 
-  showNotification(message: string, type: NotificationType): void {
+  showNotification(message: string, type: NotificationType, durationMs: number = TOAST_DURATION_MS): void {
     const el = document.createElement("div");
-    el.className = `notification notification-${type}`;
-    el.textContent = message;
-    this.notificationContainer.appendChild(el);
+    el.className = `toast toast-${type}`;
 
+    const msgSpan = document.createElement("span");
+    msgSpan.className = "toast-message";
+    msgSpan.textContent = message;
+    el.appendChild(msgSpan);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "toast-close";
+    closeBtn.setAttribute("aria-label", "Dismiss notification");
+    closeBtn.textContent = "\u00D7";
+    closeBtn.addEventListener("click", () => dismissToast(el));
+    el.appendChild(closeBtn);
+
+    this.toastContainer.appendChild(el);
+
+    // Force reflow so the transition plays from opacity 0 -> 1
     void el.offsetWidth;
     el.classList.add("visible");
 
-    setTimeout(() => {
-      el.classList.remove("visible");
-      el.addEventListener("transitionend", () => el.remove(), { once: true });
-      setTimeout(() => el.remove(), 500);
-    }, NOTIFICATION_DURATION_MS);
+    const timer = setTimeout(() => dismissToast(el), durationMs);
+
+    function dismissToast(toast: HTMLElement): void {
+      clearTimeout(timer);
+      toast.classList.remove("visible");
+      toast.addEventListener("transitionend", () => toast.remove(), { once: true });
+      // Fallback removal if transitionend never fires
+      setTimeout(() => toast.remove(), 500);
+    }
   }
 
   private setupButtons(): void {
