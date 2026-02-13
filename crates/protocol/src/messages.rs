@@ -78,6 +78,9 @@ pub enum InputEvent {
     /// File transfer done: signals upload is complete
     #[serde(rename = "fd")]
     FileDone { id: String },
+    /// File download request: browser asks agent to send a file
+    #[serde(rename = "fdr")]
+    FileDownloadRequest { path: String },
 }
 
 /// Authentication request.
@@ -90,6 +93,10 @@ pub struct AuthRequest {
     pub viewport_width: Option<u32>,
     /// Browser viewport height in CSS pixels.
     pub viewport_height: Option<u32>,
+    /// Per-session idle timeout override in seconds. None = use global default.
+    /// Must be in range 60..=86400 (1 minute to 24 hours).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<u64>,
 }
 
 impl std::fmt::Debug for AuthRequest {
@@ -111,6 +118,10 @@ pub struct AuthResponse {
     /// set Authorization headers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_token: Option<String>,
+    /// Effective idle timeout for this session in seconds (0 = disabled).
+    /// Returned so the client can show accurate idle warnings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<u64>,
 }
 
 /// ICE server configuration returned to clients for WebRTC setup.
@@ -323,6 +334,23 @@ mod tests {
             }
             _ => panic!("Expected FileStart"),
         }
+
+        // File download request
+        let fdr = InputEvent::FileDownloadRequest {
+            path: "/home/user/file.txt".to_string(),
+        };
+        let json = serde_json::to_string(&fdr).unwrap();
+        assert!(json.contains(r#""t":"fdr""#));
+        assert!(json.contains(r#""path":"/home/user/file.txt""#));
+
+        let browser_fdr: InputEvent =
+            serde_json::from_str(r#"{"t":"fdr","path":"/home/user/doc.pdf"}"#).unwrap();
+        match browser_fdr {
+            InputEvent::FileDownloadRequest { path } => {
+                assert_eq!(path, "/home/user/doc.pdf");
+            }
+            _ => panic!("Expected FileDownloadRequest"),
+        }
     }
 
     #[test]
@@ -379,11 +407,64 @@ mod tests {
             password: "super_secret".to_string(),
             viewport_width: None,
             viewport_height: None,
+            idle_timeout: None,
         };
         let debug_str = format!("{:?}", req);
         assert!(debug_str.contains("admin"));
         assert!(debug_str.contains("[REDACTED]"));
         assert!(!debug_str.contains("super_secret"));
+    }
+
+    #[test]
+    fn auth_request_without_idle_timeout() {
+        let json = r#"{"username":"user","password":"pass"}"#;
+        let req: AuthRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.username, "user");
+        assert!(req.idle_timeout.is_none());
+    }
+
+    #[test]
+    fn auth_request_with_idle_timeout() {
+        let json = r#"{"username":"user","password":"pass","idle_timeout":7200}"#;
+        let req: AuthRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.idle_timeout, Some(7200));
+    }
+
+    #[test]
+    fn auth_request_idle_timeout_skipped_when_none() {
+        let req = AuthRequest {
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            viewport_width: None,
+            viewport_height: None,
+            idle_timeout: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("idle_timeout"));
+    }
+
+    #[test]
+    fn auth_response_with_idle_timeout() {
+        let resp = AuthResponse {
+            token: "tok".to_string(),
+            session_id: Uuid::nil(),
+            release_token: None,
+            idle_timeout: Some(3600),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""idle_timeout":3600"#));
+    }
+
+    #[test]
+    fn auth_response_idle_timeout_skipped_when_none() {
+        let resp = AuthResponse {
+            token: "tok".to_string(),
+            session_id: Uuid::nil(),
+            release_token: None,
+            idle_timeout: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("idle_timeout"));
     }
 
     #[test]

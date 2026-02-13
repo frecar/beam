@@ -33,7 +33,12 @@ export type InputEvent =
   | { t: "cur"; css: string }
   | { t: "fs"; id: string; name: string; size: number }
   | { t: "fc"; id: string; data: string }
-  | { t: "fd"; id: string };
+  | { t: "fd"; id: string }
+  | { t: "fdr"; path: string }
+  | { t: "fds"; id: string; name: string; size: number }
+  | { t: "fdc"; id: string; data: string }
+  | { t: "fdd"; id: string }
+  | { t: "fde"; id: string; error: string };
 
 type TrackCallback = (stream: MediaStream) => void;
 type VoidCallback = () => void;

@@ -36,6 +36,7 @@ struct InputCallbackCtx {
     resize_tx: mpsc::Sender<(u32, u32)>,
     last_input_time: Arc<AtomicU64>,
     clipboard_read_tx: mpsc::Sender<()>,
+    download_request_tx: mpsc::Sender<String>,
     capture_wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     capture_cmd_tx: std::sync::mpsc::Sender<CaptureCommand>,
     tab_backgrounded: Arc<AtomicBool>,
@@ -54,6 +55,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
         resize_tx,
         last_input_time,
         clipboard_read_tx,
+        download_request_tx,
         capture_wake,
         capture_cmd_tx,
         tab_backgrounded,
@@ -264,6 +266,11 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                     .handle_file_done(id)
                 {
                     warn!(id, "File done error: {e:#}");
+                }
+            }
+            InputEvent::FileDownloadRequest { ref path } => {
+                if let Err(e) = download_request_tx.try_send(path.clone()) {
+                    warn!(path, "File download request dropped: {e:#}");
                 }
             }
         }
@@ -634,6 +641,9 @@ async fn main() -> anyhow::Result<()> {
     // Channel for clipboard read requests (Ctrl+C/X detection → read X11 clipboard)
     let (clipboard_read_tx, mut clipboard_read_rx) = mpsc::channel::<()>(4);
 
+    // Channel for file download requests (browser → agent → browser via DataChannel)
+    let (download_request_tx, mut download_request_rx) = mpsc::channel::<String>(4);
+
     // Cursor shape monitor: tracks X11 cursor changes via XFixes and sends
     // CSS cursor names. Also hides the X11 cursor via XFixes HideCursor.
     let mut cursor_rx = cursor::spawn_cursor_monitor(&args.display);
@@ -656,6 +666,9 @@ async fn main() -> anyhow::Result<()> {
     let file_transfer = Arc::new(Mutex::new(filetransfer::FileTransferManager::new(home_dir)));
 
     // Build the reusable input callback (Arc<dyn Fn>) so it survives peer recreation
+    // Keep a reference to file_transfer for the download handler
+    let file_transfer_for_download = Arc::clone(&file_transfer);
+
     let input_callback = build_input_callback(InputCallbackCtx {
         injector: Arc::clone(&injector),
         clipboard: Arc::clone(&clipboard),
@@ -663,6 +676,7 @@ async fn main() -> anyhow::Result<()> {
         resize_tx: resize_tx.clone(),
         last_input_time: Arc::clone(&last_input_time),
         clipboard_read_tx: clipboard_read_tx.clone(),
+        download_request_tx,
         capture_wake: Arc::clone(&capture_wake_for_input),
         capture_cmd_tx: capture_cmd_tx.clone(),
         tab_backgrounded: Arc::clone(&tab_backgrounded),
@@ -1309,6 +1323,36 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         warn!("Failed to read clipboard: {e:#}");
+                    }
+                }
+            }
+        } => {}
+
+        // File download: read file on blocking thread, send chunks via DataChannel
+        _ = async {
+            while let Some(path) = download_request_rx.recv().await {
+                info!(path, "File download request received");
+                let ft = Arc::clone(&file_transfer_for_download);
+                let peer = peer::snapshot(&shared_peer).await;
+
+                // File I/O is blocking — run on a blocking thread
+                let messages = tokio::task::spawn_blocking(move || {
+                    let collected = std::sync::Mutex::new(Vec::new());
+                    let send_fn = |msg: String| {
+                        collected.lock().unwrap().push(msg);
+                    };
+                    let mgr = ft.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = mgr.handle_download_request(&path, &send_fn);
+                    collected.into_inner().unwrap()
+                })
+                .await;
+
+                if let Ok(messages) = messages {
+                    for msg in messages {
+                        if let Err(e) = peer.send_data_channel_message(&msg).await {
+                            warn!("Failed to send download message to browser: {e:#}");
+                            break;
+                        }
                     }
                 }
             }

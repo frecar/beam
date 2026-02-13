@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
     <title>Beam Remote Desktop</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23888'/%3E%3C/svg%3E" />
     <style>
@@ -234,6 +234,30 @@
 
       .form-group input::placeholder {
         color: var(--text-placeholder);
+      }
+
+      .form-select {
+        width: 100%;
+        padding: 10px 12px;
+        background: var(--bg-input);
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        color: var(--text-primary);
+        font-size: 14px;
+        font-family: inherit;
+        outline: none;
+        transition: border-color 0.2s;
+        cursor: pointer;
+      }
+
+      .form-select:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px var(--accent-focus);
+      }
+
+      .form-select option {
+        background: var(--select-option-bg);
+        color: var(--text-primary);
       }
 
       .password-wrapper {
@@ -993,6 +1017,192 @@
         from { opacity: 1; }
         to { opacity: 0; }
       }
+
+      /* ── Mobile Floating Action Button ─────────────────── */
+      #mobile-fab {
+        display: none;
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        z-index: 800;
+      }
+
+      #mobile-fab-toggle {
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        border: none;
+        background: var(--accent);
+        color: #fff;
+        font-size: 24px;
+        cursor: pointer;
+        box-shadow: 0 4px 12px var(--shadow-overlay);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: transform 0.2s, background 0.2s;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+
+      #mobile-fab-toggle.open {
+        transform: rotate(45deg);
+        background: var(--accent-hover);
+      }
+
+      #mobile-fab-menu {
+        display: none;
+        position: absolute;
+        bottom: 64px;
+        right: 0;
+        flex-direction: column;
+        gap: 8px;
+        align-items: flex-end;
+      }
+
+      #mobile-fab-menu.visible {
+        display: flex;
+      }
+
+      .fab-action {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 16px;
+        background: var(--bg-card-solid);
+        border: 1px solid var(--border-color);
+        border-radius: 24px;
+        color: var(--text-primary);
+        font-size: 14px;
+        font-family: inherit;
+        cursor: pointer;
+        white-space: nowrap;
+        box-shadow: 0 2px 8px var(--shadow-card);
+        min-height: 44px;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+        transition: background 0.15s;
+      }
+
+      .fab-action:hover,
+      .fab-action:active {
+        background: var(--bg-btn-hover);
+      }
+
+      .fab-action-disconnect {
+        color: #ff6b6b;
+      }
+
+      /* Hidden input for virtual keyboard on mobile */
+      #mobile-keyboard-input {
+        position: fixed;
+        left: -9999px;
+        top: 0;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        font-size: 16px; /* prevent iOS zoom on focus */
+      }
+
+      /* ── Responsive: Mobile / Tablet ───────────────────── */
+      @media (max-width: 768px) {
+        /* Login card: full width on small screens */
+        .login-card {
+          width: calc(100% - 32px);
+          max-width: 360px;
+          padding: 28px 24px;
+        }
+
+        .login-card h1 {
+          font-size: 18px;
+        }
+
+        .login-card p {
+          font-size: 12px;
+          margin-bottom: 20px;
+        }
+
+        /* Larger touch targets for form inputs */
+        .form-group input {
+          padding: 12px;
+          font-size: 16px; /* prevent iOS zoom */
+        }
+
+        button#connect-btn {
+          padding: 14px;
+          font-size: 16px;
+          min-height: 48px;
+        }
+
+        .loading-cancel {
+          padding: 10px 20px;
+          min-height: 44px;
+        }
+
+        /* Hide keyboard shortcut hints on mobile */
+        .login-hints {
+          display: none;
+        }
+
+        /* Desktop view: full height on mobile (no status bar) */
+        #desktop-view {
+          height: 100vh;
+        }
+
+        /* Hide the desktop status bar on mobile — FAB replaces it */
+        #status-bar.visible {
+          display: none;
+        }
+
+        /* Show mobile FAB when connected */
+        #mobile-fab.visible {
+          display: block;
+        }
+
+        /* Toast container: above FAB on mobile */
+        #toast-container {
+          bottom: 88px;
+          right: 12px;
+          left: 12px;
+        }
+
+        .toast {
+          max-width: 100%;
+        }
+
+        /* Session info panel: full-screen overlay on mobile */
+        #session-info-panel {
+          width: 100%;
+          bottom: 0;
+        }
+
+        /* Reconnect overlay card: more compact on mobile */
+        .reconnect-card {
+          width: calc(100% - 32px);
+          max-width: 300px;
+        }
+
+        .reconnect-btn-primary,
+        .reconnect-btn-secondary {
+          min-height: 48px;
+          font-size: 16px;
+        }
+
+        /* Help overlay: tighter padding on mobile */
+        #help-overlay .help-card {
+          padding: 20px;
+          margin: 16px;
+          min-width: auto;
+          width: calc(100% - 32px);
+          max-width: 340px;
+        }
+      }
+
+      @media (max-width: 480px) {
+        .login-card {
+          padding: 24px 20px;
+        }
+      }
     </style>
   </head>
   <body>
@@ -1031,6 +1241,16 @@
                 />
                 <button type="button" class="password-toggle" id="password-toggle" aria-label="Show password">Show</button>
               </div>
+            </div>
+            <div class="form-group">
+              <label for="session-timeout">Session timeout</label>
+              <select id="session-timeout" class="form-select">
+                <option value="">Default</option>
+                <option value="3600">1 hour</option>
+                <option value="14400">4 hours</option>
+                <option value="28800">8 hours</option>
+                <option value="86400">24 hours</option>
+              </select>
             </div>
             <button type="submit" id="connect-btn">Connect</button>
           </form>
@@ -1150,6 +1370,20 @@
     <!-- Toast Container -->
     <div id="toast-container" aria-live="polite" aria-relevant="additions"></div>
 
+    <!-- Hidden input for mobile virtual keyboard -->
+    <input type="text" id="mobile-keyboard-input" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Virtual keyboard input" />
+
+    <!-- Mobile Floating Action Button -->
+    <div id="mobile-fab" aria-label="Mobile toolbar">
+      <div id="mobile-fab-menu">
+        <button class="fab-action" id="fab-keyboard" aria-label="Toggle keyboard">Keyboard</button>
+        <button class="fab-action" id="fab-fullscreen" aria-label="Toggle fullscreen">Fullscreen</button>
+        <button class="fab-action" id="fab-screenshot" aria-label="Take screenshot">Screenshot</button>
+        <button class="fab-action fab-action-disconnect" id="fab-disconnect" aria-label="Disconnect">Disconnect</button>
+      </div>
+      <button id="mobile-fab-toggle" aria-label="Open toolbar" aria-expanded="false">+</button>
+    </div>
+
     <!-- Status Bar -->
     <div id="status-bar" role="toolbar" aria-label="Session controls">
       <div class="status-left">
@@ -1196,6 +1430,7 @@
         <div class="status-separator" aria-hidden="true"></div>
         <button class="status-btn" id="btn-upload" aria-label="Upload file to remote desktop" title="Upload file">Upload</button>
         <input type="file" id="file-upload-input" style="display:none" multiple />
+        <button class="status-btn" id="btn-download" aria-label="Download file from remote desktop" title="Download file">Download</button>
         <button class="status-btn" id="btn-forward-keys" aria-label="Forward browser shortcuts to remote desktop">Fwd Keys</button>
         <button class="status-btn" id="btn-mute" aria-label="Unmute audio">Unmute</button>
         <button class="status-btn" id="btn-fullscreen" aria-label="Toggle fullscreen">Fullscreen</button>

@@ -1,6 +1,7 @@
 import { ClipboardBridge } from "./clipboard";
 import { BeamConnection } from "./connection";
-import { FileUploader } from "./filetransfer";
+import { FileDownloader, FileUploader } from "./filetransfer";
+import type { DownloadMessage } from "./filetransfer";
 import { InputHandler } from "./input";
 import { Renderer } from "./renderer";
 import { BeamUI } from "./ui";
@@ -10,6 +11,7 @@ interface LoginResponse {
   session_id: string;
   token: string;
   release_token?: string;
+  idle_timeout?: number;
 }
 
 /** Stored session with expiry timestamp */
@@ -23,12 +25,11 @@ const AUDIO_MUTED_KEY = "beam_audio_muted";
 const SCROLL_SPEED_KEY = "beam_scroll_speed";
 const THEME_KEY = "beam_theme";
 const FORWARD_KEYS_KEY = "beam_forward_keys";
+const SESSION_TIMEOUT_KEY = "beam_session_timeout";
 
-// Idle timeout warning: server default is 3600s. We warn 2 minutes before.
-// The idle_timeout is not sent in the login response, so we use the server
-// default. If someone configures a different value server-side, the warning
-// timing will be slightly off but won't cause breakage.
-const IDLE_TIMEOUT_SECS = 3600;
+// Idle timeout warning: updated from the login response idle_timeout field.
+// We warn 2 minutes before expiry.
+let effectiveIdleTimeoutSecs = 3600; // updated from login response
 const IDLE_WARNING_BEFORE_SECS = 120; // Show warning 2 min before expiry
 const IDLE_CHECK_INTERVAL_MS = 30_000; // Check every 30s
 
@@ -67,6 +68,7 @@ const connectBtn = document.getElementById("connect-btn") as HTMLButtonElement;
 const loginError = document.getElementById("login-error") as HTMLDivElement;
 const loginCard = document.querySelector(".login-card") as HTMLDivElement;
 const passwordToggle = document.getElementById("password-toggle") as HTMLButtonElement;
+const sessionTimeoutSelect = document.getElementById("session-timeout") as HTMLSelectElement;
 const loginFormContent = document.getElementById("login-form-content") as HTMLDivElement;
 const loginLoading = document.getElementById("login-loading") as HTMLDivElement;
 const loadingSpinner = document.getElementById("loading-spinner") as HTMLDivElement;
@@ -101,6 +103,7 @@ let renderer: Renderer | null = null;
 let inputHandler: InputHandler | null = null;
 let clipboardBridge: ClipboardBridge | null = null;
 let fileUploader: FileUploader | null = null;
+let fileDownloader: FileDownloader | null = null;
 let ui: BeamUI | null = null;
 let statsInterval: ReturnType<typeof setInterval> | null = null;
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -450,6 +453,9 @@ function showDesktop(): void {
   loginView.style.display = "none";
   desktopView.style.display = "block";
   statusBar.classList.add("visible");
+  if (isTouchDevice) {
+    mobileFab.classList.add("visible");
+  }
   if (connectionTimeout) {
     clearTimeout(connectionTimeout);
     connectionTimeout = null;
@@ -467,6 +473,8 @@ function showLogin(): void {
   loginView.style.display = "flex";
   desktopView.style.display = "none";
   statusBar.classList.remove("visible");
+  mobileFab.classList.remove("visible");
+  closeFab();
   hideLoading();
 }
 
@@ -1007,11 +1015,11 @@ function startIdleCheck(): void {
   lastActivity = Date.now();
 
   // idle_timeout=0 means disabled on the server — no warning needed
-  if (IDLE_TIMEOUT_SECS <= 0) return;
+  if (effectiveIdleTimeoutSecs <= 0) return;
 
   idleCheckInterval = setInterval(() => {
     const idleSecs = (Date.now() - lastActivity) / 1000;
-    const warningThreshold = IDLE_TIMEOUT_SECS - IDLE_WARNING_BEFORE_SECS;
+    const warningThreshold = effectiveIdleTimeoutSecs - IDLE_WARNING_BEFORE_SECS;
     if (idleSecs >= warningThreshold) {
       showIdleWarning();
     }
@@ -1036,6 +1044,7 @@ function handleDisconnect(): void {
   clipboardBridge?.disable();
   clipboardBridge = null;
   fileUploader = null;
+  fileDownloader = null;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -1282,7 +1291,7 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
     const response = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(Object.assign({
         username,
         password,
         // Subtract the 28px status bar from viewport height so the remote
@@ -1290,7 +1299,7 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
         // Round down to even numbers (H.264 encoders require even dimensions).
         viewport_width: Math.floor(window.innerWidth / 2) * 2,
         viewport_height: Math.floor((window.innerHeight - 28) / 2) * 2,
-      }),
+      }, sessionTimeoutSelect.value ? { idle_timeout: parseInt(sessionTimeoutSelect.value, 10) } : {})),
     });
 
     if (!response.ok) {
@@ -1310,10 +1319,16 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
     // Persist session for reconnect on page refresh / browser crash
     saveSession(data);
     localStorage.setItem("beam_username", username);
+    // Save timeout selection for next login
+    localStorage.setItem(SESSION_TIMEOUT_KEY, sessionTimeoutSelect.value);
     currentToken = data.token;
     currentSessionId = data.session_id;
     currentReleaseToken = data.release_token ?? null;
     sessionUsername = username;
+    // Update idle timeout from server response
+    if (data.idle_timeout !== undefined) {
+      effectiveIdleTimeoutSecs = data.idle_timeout;
+    }
     scheduleTokenRefresh();
 
     updateLoadingStatus("Starting session...");
@@ -1498,6 +1513,16 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
       });
     }
 
+    if (!fileDownloader) {
+      fileDownloader = new FileDownloader();
+      fileDownloader.setCompleteCallback((filename) => {
+        ui?.showNotification(`Downloaded: ${filename}`, "success");
+      });
+      fileDownloader.setErrorCallback((error) => {
+        ui?.showNotification(`Download failed: ${error}`, "error");
+      });
+    }
+
     if (!clipboardBridge) {
       clipboardBridge = new ClipboardBridge(sendInput);
       clipboardBridge.onClipboardSync((direction, preview) => {
@@ -1509,13 +1534,16 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     clipboardBridge.enable();
   });
 
-  // Handle messages from agent (clipboard sync, cursor shape)
+  // Handle messages from agent (clipboard sync, cursor shape, file download)
   connection.onDataChannelMessage((msg) => {
     if (msg.t === "c" && "text" in msg) {
       clipboardBridge?.handleRemoteClipboard(msg.text);
     }
     if (msg.t === "cur" && "css" in msg) {
       remoteVideo.style.cursor = msg.css;
+    }
+    if (msg.t === "fds" || msg.t === "fdc" || msg.t === "fdd" || msg.t === "fde") {
+      fileDownloader?.handleMessage(msg as DownloadMessage);
     }
   });
 
@@ -1801,11 +1829,141 @@ fileUploadInput.addEventListener("change", () => {
   fileUploadInput.value = "";
 });
 
+// --- File download button ---
+
+const btnDownload = document.getElementById("btn-download") as HTMLButtonElement;
+btnDownload.addEventListener("click", () => {
+  const path = window.prompt("Enter file path on remote desktop (relative to home or absolute):");
+  if (path && connection) {
+    ui?.showNotification(`Requesting download: ${path}`, "info", 2000);
+    connection.sendInput({ t: "fdr", path } as import("./connection").InputEvent);
+  }
+});
+
+// --- Mobile FAB and virtual keyboard ---
+
+const isTouchDevice = "ontouchstart" in window || navigator.maxTouchPoints > 0;
+const mobileFab = document.getElementById("mobile-fab") as HTMLDivElement;
+const mobileFabToggle = document.getElementById("mobile-fab-toggle") as HTMLButtonElement;
+const mobileFabMenu = document.getElementById("mobile-fab-menu") as HTMLDivElement;
+const fabKeyboard = document.getElementById("fab-keyboard") as HTMLButtonElement;
+const fabFullscreen = document.getElementById("fab-fullscreen") as HTMLButtonElement;
+const fabScreenshot = document.getElementById("fab-screenshot") as HTMLButtonElement;
+const fabDisconnect = document.getElementById("fab-disconnect") as HTMLButtonElement;
+const mobileKeyboardInput = document.getElementById("mobile-keyboard-input") as HTMLInputElement;
+
+let fabOpen = false;
+
+function toggleFab(): void {
+  fabOpen = !fabOpen;
+  mobileFabToggle.classList.toggle("open", fabOpen);
+  mobileFabMenu.classList.toggle("visible", fabOpen);
+  mobileFabToggle.setAttribute("aria-expanded", String(fabOpen));
+}
+
+function closeFab(): void {
+  fabOpen = false;
+  mobileFabToggle.classList.remove("open");
+  mobileFabMenu.classList.remove("visible");
+  mobileFabToggle.setAttribute("aria-expanded", "false");
+}
+
+mobileFabToggle.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleFab();
+});
+
+fabKeyboard.addEventListener("click", () => {
+  closeFab();
+  mobileKeyboardInput.focus();
+});
+
+fabFullscreen.addEventListener("click", () => {
+  closeFab();
+  toggleFullscreen();
+});
+
+fabScreenshot.addEventListener("click", () => {
+  closeFab();
+  captureScreenshot();
+});
+
+fabDisconnect.addEventListener("click", () => {
+  closeFab();
+  handleDisconnect();
+});
+
+// Close FAB menu when tapping outside
+document.addEventListener("click", (e) => {
+  if (fabOpen && !mobileFab.contains(e.target as Node)) {
+    closeFab();
+  }
+});
+
+// Virtual keyboard: forward key events from the hidden input to the remote
+mobileKeyboardInput.addEventListener("input", () => {
+  const text = mobileKeyboardInput.value;
+  if (text && connection) {
+    // Send each character as a clipboard-paste event for reliability.
+    // Mobile keyboards produce composed text, not individual key codes,
+    // so we send the text directly via the clipboard input event.
+    connection.sendInput({ t: "c", text });
+  }
+  // Clear the input for the next character
+  mobileKeyboardInput.value = "";
+});
+
+// Handle Enter key from virtual keyboard
+mobileKeyboardInput.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    // Send Enter key (evdev code 28)
+    if (connection) {
+      connection.sendInput({ t: "k", c: 28, d: true });
+      connection.sendInput({ t: "k", c: 28, d: false });
+    }
+  } else if (e.key === "Backspace") {
+    e.preventDefault();
+    // Send Backspace key (evdev code 14)
+    if (connection) {
+      connection.sendInput({ t: "k", c: 14, d: true });
+      connection.sendInput({ t: "k", c: 14, d: false });
+    }
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    // Send Escape key (evdev code 1)
+    if (connection) {
+      connection.sendInput({ t: "k", c: 1, d: true });
+      connection.sendInput({ t: "k", c: 1, d: false });
+    }
+    mobileKeyboardInput.blur();
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    // Send Tab key (evdev code 15)
+    if (connection) {
+      connection.sendInput({ t: "k", c: 15, d: true });
+      connection.sendInput({ t: "k", c: 15, d: false });
+    }
+  }
+});
+
+// Track touch events for idle timeout
+if (isTouchDevice) {
+  desktopView.addEventListener("touchstart", recordActivity);
+  desktopView.addEventListener("touchmove", recordActivity);
+}
+
 // Pre-fill username from last successful login
 const savedUsername = localStorage.getItem("beam_username");
 if (savedUsername) {
   usernameInput.value = savedUsername;
   passwordInput.focus();
+}
+
+// Restore saved session timeout selection
+const savedTimeout = localStorage.getItem(SESSION_TIMEOUT_KEY);
+if (savedTimeout !== null) {
+  sessionTimeoutSelect.value = savedTimeout;
 }
 
 // Attempt to resume previous session on page load
@@ -1816,6 +1974,9 @@ if (savedSession) {
     currentSessionId = savedSession.session_id;
     currentReleaseToken = savedSession.release_token ?? null;
     sessionUsername = localStorage.getItem("beam_username");
+    if (savedSession.idle_timeout !== undefined) {
+      effectiveIdleTimeoutSecs = savedSession.idle_timeout;
+    }
     scheduleTokenRefresh();
     showLoading("Reconnecting...");
     startConnection(savedSession.session_id, savedSession.token);
