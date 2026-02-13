@@ -133,6 +133,8 @@ struct ManagedSession {
     /// Set to true when a browser WebSocket reconnects, cancelling any
     /// pending grace-period cleanup spawned by the release endpoint.
     pub grace_cancel: Arc<AtomicBool>,
+    /// Number of times the agent has been restarted after unexpected exits
+    pub restart_count: u32,
 }
 
 impl SessionManager {
@@ -215,6 +217,7 @@ impl SessionManager {
                 agent_token: agent_token.clone(),
                 release_token: release_token.clone(),
                 grace_cancel: Arc::new(AtomicBool::new(false)),
+                restart_count: 0,
             };
             sessions.insert(session_id, managed);
         }
@@ -442,6 +445,66 @@ impl SessionManager {
         if let Some(s) = sessions.get(&session_id) {
             s.grace_cancel.store(true, Ordering::SeqCst);
         }
+    }
+
+    /// Increment the restart count for a session and return the new count.
+    /// Returns `None` if the session does not exist.
+    pub async fn increment_restart_count(&self, session_id: Uuid) -> Option<u32> {
+        let mut sessions = self.sessions.write().await;
+        sessions.get_mut(&session_id).map(|s| {
+            s.restart_count += 1;
+            s.restart_count
+        })
+    }
+
+    /// Get the current restart count for a session.
+    #[cfg(test)]
+    pub async fn get_restart_count(&self, session_id: Uuid) -> Option<u32> {
+        let sessions = self.sessions.read().await;
+        sessions.get(&session_id).map(|s| s.restart_count)
+    }
+
+    /// Respawn the agent for an existing session after a crash.
+    ///
+    /// Generates a new agent token, spawns a new agent process, and updates
+    /// the session with the new process handle and PID. Returns the new
+    /// `Child` handle (already stored in the session) so the caller can
+    /// monitor it.
+    ///
+    /// Returns `None` if the session does not exist.
+    pub async fn respawn_agent(&self, session_id: Uuid, server_url: &str) -> Result<Option<()>> {
+        // Read session info under a read lock first
+        let info = {
+            let sessions = self.sessions.read().await;
+            match sessions.get(&session_id) {
+                Some(s) => s.info.clone(),
+                None => return Ok(None),
+            }
+        };
+
+        let new_token = generate_agent_token();
+
+        // Clean up stale temp files before respawn
+        let display_num = info.display;
+        let _ = std::fs::remove_file(format!("/tmp/beam-xorg-{display_num}.conf"));
+        let _ = std::fs::remove_file(format!("/tmp/beam-pulse-{display_num}.pa"));
+        let _ = std::fs::remove_dir_all(format!("/tmp/beam-pulse-{display_num}"));
+        let _ = std::fs::remove_file(format!("/tmp/.X{display_num}-lock"));
+
+        let child = self.spawn_agent(&info, server_url, &new_token).await?;
+        let new_pid = child.id();
+
+        // Update the session with the new agent process and token
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.agent_process = Some(child);
+                session.agent_pid = new_pid;
+                session.agent_token = new_token;
+            }
+        }
+
+        Ok(Some(()))
     }
 
     async fn spawn_agent(
@@ -724,6 +787,7 @@ impl SessionManager {
                 agent_token: persisted.agent_token,
                 release_token,
                 grace_cancel: Arc::new(AtomicBool::new(false)),
+                restart_count: 0,
             };
 
             let mut sessions = self.sessions.write().await;
@@ -887,5 +951,171 @@ mod tests {
         // Single byte vs empty
         assert!(!constant_time_eq(b"x", b""));
         assert!(!constant_time_eq(b"", b"x"));
+    }
+
+    #[tokio::test]
+    async fn increment_restart_count_returns_new_count() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let id = Uuid::new_v4();
+
+        // Insert a session manually
+        {
+            let mut sessions = manager.sessions.write().await;
+            sessions.insert(
+                id,
+                ManagedSession {
+                    info: SessionInfo {
+                        id,
+                        username: "test".to_string(),
+                        display: 100,
+                        width: 1920,
+                        height: 1080,
+                        created_at: 0,
+                    },
+                    agent_process: None,
+                    agent_pid: None,
+                    last_activity: 0,
+                    agent_token: "token".to_string(),
+                    release_token: "release".to_string(),
+                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    restart_count: 0,
+                },
+            );
+        }
+
+        // First increment: 0 -> 1
+        assert_eq!(manager.increment_restart_count(id).await, Some(1));
+        // Second increment: 1 -> 2
+        assert_eq!(manager.increment_restart_count(id).await, Some(2));
+        // Third increment: 2 -> 3
+        assert_eq!(manager.increment_restart_count(id).await, Some(3));
+        // Verify via get
+        assert_eq!(manager.get_restart_count(id).await, Some(3));
+    }
+
+    #[tokio::test]
+    async fn increment_restart_count_nonexistent_session() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let id = Uuid::new_v4();
+        assert_eq!(manager.increment_restart_count(id).await, None);
+    }
+
+    #[tokio::test]
+    async fn get_restart_count_nonexistent_session() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let id = Uuid::new_v4();
+        assert_eq!(manager.get_restart_count(id).await, None);
+    }
+
+    #[tokio::test]
+    async fn restart_count_starts_at_zero() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let id = Uuid::new_v4();
+
+        // Insert a session
+        {
+            let mut sessions = manager.sessions.write().await;
+            sessions.insert(
+                id,
+                ManagedSession {
+                    info: SessionInfo {
+                        id,
+                        username: "test".to_string(),
+                        display: 100,
+                        width: 1920,
+                        height: 1080,
+                        created_at: 0,
+                    },
+                    agent_process: None,
+                    agent_pid: None,
+                    last_activity: 0,
+                    agent_token: "token".to_string(),
+                    release_token: "release".to_string(),
+                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    restart_count: 0,
+                },
+            );
+        }
+
+        assert_eq!(manager.get_restart_count(id).await, Some(0));
+    }
+
+    #[tokio::test]
+    async fn restart_count_independent_per_session() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+
+        // Insert two sessions
+        {
+            let mut sessions = manager.sessions.write().await;
+            for id in [id1, id2] {
+                sessions.insert(
+                    id,
+                    ManagedSession {
+                        info: SessionInfo {
+                            id,
+                            username: "test".to_string(),
+                            display: 100,
+                            width: 1920,
+                            height: 1080,
+                            created_at: 0,
+                        },
+                        agent_process: None,
+                        agent_pid: None,
+                        last_activity: 0,
+                        agent_token: "token".to_string(),
+                        release_token: "release".to_string(),
+                        grace_cancel: Arc::new(AtomicBool::new(false)),
+                        restart_count: 0,
+                    },
+                );
+            }
+        }
+
+        // Increment session 1 twice
+        manager.increment_restart_count(id1).await;
+        manager.increment_restart_count(id1).await;
+
+        // Increment session 2 once
+        manager.increment_restart_count(id2).await;
+
+        assert_eq!(manager.get_restart_count(id1).await, Some(2));
+        assert_eq!(manager.get_restart_count(id2).await, Some(1));
     }
 }

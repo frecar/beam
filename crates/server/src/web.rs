@@ -454,26 +454,137 @@ async fn refresh_token(
     }
 }
 
+/// Maximum number of agent restart attempts before giving up.
+const MAX_AGENT_RESTARTS: u32 = 3;
+
 /// Spawn a background task that monitors the agent process for unexpected exit.
+/// On non-zero exit, attempts to restart the agent up to `MAX_AGENT_RESTARTS`
+/// times with exponential backoff (2s, 4s, 8s). If all retries are exhausted,
+/// destroys the session and notifies the browser.
 async fn spawn_agent_monitor(state: Arc<AppState>, session_id: Uuid) {
     if let Some(mut child) = state.session_manager.take_agent_child(session_id).await {
         tokio::spawn(async move {
-            let status = child.wait().await;
-            match status {
-                Ok(exit_status) if exit_status.success() => {
-                    tracing::info!(%session_id, "Agent exited cleanly");
+            loop {
+                let status = child.wait().await;
+                let should_restart = match &status {
+                    Ok(exit_status) if exit_status.success() => {
+                        tracing::info!(%session_id, "Agent exited cleanly");
+                        false
+                    }
+                    Ok(exit_status) => {
+                        tracing::error!(
+                            %session_id,
+                            ?exit_status,
+                            "Agent crashed unexpectedly"
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        tracing::error!(%session_id, "Failed to wait for agent: {e}");
+                        true
+                    }
+                };
+
+                if !should_restart {
+                    break;
                 }
-                Ok(exit_status) => {
-                    tracing::error!(%session_id, ?exit_status, "Agent exited unexpectedly");
-                    // Agent stderr/stdout goes to /tmp/beam-agent-{session_id}.log
+
+                // Attempt restart with exponential backoff
+                let restart_count = state
+                    .session_manager
+                    .increment_restart_count(session_id)
+                    .await;
+
+                let restart_count = match restart_count {
+                    Some(c) => c,
+                    None => {
+                        // Session was already destroyed externally
+                        tracing::info!(
+                            %session_id,
+                            "Session gone during restart attempt, nothing to do"
+                        );
+                        return;
+                    }
+                };
+
+                if restart_count > MAX_AGENT_RESTARTS {
+                    tracing::error!(
+                        %session_id,
+                        restart_count,
+                        "Agent restart limit reached ({MAX_AGENT_RESTARTS}), giving up"
+                    );
+                    break;
                 }
-                Err(e) => {
-                    tracing::error!(%session_id, "Failed to wait for agent: {e}");
+
+                // Exponential backoff: 2^restart_count seconds (2s, 4s, 8s)
+                let delay_secs = 1u64 << restart_count; // 2, 4, 8
+                tracing::warn!(
+                    %session_id,
+                    restart_count,
+                    delay_secs,
+                    "Attempting agent restart ({restart_count}/{MAX_AGENT_RESTARTS})"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+
+                // Check that session still exists before respawning
+                if state
+                    .session_manager
+                    .get_session(session_id)
+                    .await
+                    .is_none()
+                {
+                    tracing::info!(
+                        %session_id,
+                        "Session destroyed during backoff, aborting restart"
+                    );
+                    return;
+                }
+
+                let server_url = format!("wss://127.0.0.1:{}", state.config.server.port);
+                match state
+                    .session_manager
+                    .respawn_agent(session_id, &server_url)
+                    .await
+                {
+                    Ok(Some(())) => {
+                        tracing::info!(
+                            %session_id,
+                            restart_count,
+                            "Agent restarted successfully"
+                        );
+                        // Take the new child handle and continue monitoring
+                        match state.session_manager.take_agent_child(session_id).await {
+                            Some(new_child) => {
+                                child = new_child;
+                                continue;
+                            }
+                            None => {
+                                tracing::error!(
+                                    %session_id,
+                                    "Failed to take new agent child handle after restart"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::info!(
+                            %session_id,
+                            "Session gone during respawn, aborting restart"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            %session_id,
+                            "Failed to respawn agent: {e}"
+                        );
+                        break;
+                    }
                 }
             }
 
-            // Notify the browser before destroying the session so it
-            // gets a clear error instead of 30s of failed reconnect attempts.
+            // All retries exhausted or clean exit — notify browser and destroy session
             {
                 let channels = state.channels.read().await;
                 if let Some(channel) = channels.get(&session_id) {
@@ -483,7 +594,6 @@ async fn spawn_agent_monitor(state: Arc<AppState>, session_id: Uuid) {
                 }
             }
 
-            // Clean up the session
             if let Err(e) = state.session_manager.destroy_session(session_id).await {
                 tracing::error!(%session_id, "Failed to clean up after agent exit: {e}");
             }
@@ -495,7 +605,8 @@ async fn spawn_agent_monitor(state: Arc<AppState>, session_id: Uuid) {
 
 /// Monitor a restored agent by polling kill(pid, 0).
 /// Unlike spawn_agent_monitor, this works for orphaned processes
-/// where we don't have a Child handle.
+/// where we don't have a Child handle. On agent exit, attempts restart
+/// with the same retry logic as `spawn_agent_monitor`.
 pub async fn spawn_orphan_agent_monitor(state: Arc<AppState>, session_id: Uuid, pid: u32) {
     tokio::spawn(async move {
         loop {
@@ -510,7 +621,87 @@ pub async fn spawn_orphan_agent_monitor(state: Arc<AppState>, session_id: Uuid, 
             }
         }
 
-        // Notify browser
+        // Agent died — attempt restart with exponential backoff
+        let restart_count = state
+            .session_manager
+            .increment_restart_count(session_id)
+            .await;
+
+        let restart_count = match restart_count {
+            Some(c) => c,
+            None => {
+                tracing::info!(
+                    %session_id,
+                    "Session gone during orphan restart attempt"
+                );
+                return;
+            }
+        };
+
+        if restart_count <= MAX_AGENT_RESTARTS {
+            let delay_secs = 1u64 << restart_count; // 2, 4, 8
+            tracing::warn!(
+                %session_id,
+                restart_count,
+                delay_secs,
+                "Attempting orphan agent restart ({restart_count}/{MAX_AGENT_RESTARTS})"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+
+            // Check that session still exists before respawning
+            if state
+                .session_manager
+                .get_session(session_id)
+                .await
+                .is_none()
+            {
+                tracing::info!(
+                    %session_id,
+                    "Session destroyed during backoff, aborting restart"
+                );
+                return;
+            }
+
+            let server_url = format!("wss://127.0.0.1:{}", state.config.server.port);
+            match state
+                .session_manager
+                .respawn_agent(session_id, &server_url)
+                .await
+            {
+                Ok(Some(())) => {
+                    tracing::info!(
+                        %session_id,
+                        restart_count,
+                        "Orphan agent restarted successfully, switching to child monitor"
+                    );
+                    // Now we have a Child handle — delegate to the normal monitor
+                    spawn_agent_monitor(Arc::clone(&state), session_id).await;
+                    return;
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        %session_id,
+                        "Session gone during orphan respawn"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        %session_id,
+                        "Failed to respawn orphan agent: {e}"
+                    );
+                    // Fall through to cleanup
+                }
+            }
+        } else {
+            tracing::error!(
+                %session_id,
+                restart_count,
+                "Orphan agent restart limit reached ({MAX_AGENT_RESTARTS}), giving up"
+            );
+        }
+
+        // Notify browser and clean up
         {
             let channels = state.channels.read().await;
             if let Some(channel) = channels.get(&session_id) {
@@ -520,7 +711,6 @@ pub async fn spawn_orphan_agent_monitor(state: Arc<AppState>, session_id: Uuid, 
             }
         }
 
-        // Clean up
         if let Err(e) = state.session_manager.destroy_session(session_id).await {
             tracing::error!(%session_id, "Failed to clean up restored agent: {e}");
         }
