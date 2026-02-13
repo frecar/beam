@@ -1,29 +1,31 @@
 use crate::encoder::EncoderType;
 use anyhow::Context;
 use beam_protocol::{InputEvent, SignalingMessage};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
 use webrtc::api::APIBuilder;
+use webrtc::api::interceptor_registry::register_default_interceptors;
+use webrtc::api::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS, MediaEngine};
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType};
-use webrtc::rtp_transceiver::rtp_sender::RTCRtpSender;
 use webrtc::rtp_transceiver::RTCPFeedback;
+use webrtc::rtp_transceiver::rtp_codec::{
+    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
+};
+use webrtc::rtp_transceiver::rtp_sender::RTCRtpSender;
 use webrtc::stats::StatsReport;
-use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
+use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
 /// Monotonically increasing counter so the video loop can detect peer swaps.
 /// Each call to `create_peer` bumps this. The video loop compares its cached
@@ -63,7 +65,10 @@ pub struct WebRTCPeer {
 }
 
 impl WebRTCPeer {
-    pub async fn new(ice_servers: Vec<IceServerConfig>, encoder_type: EncoderType) -> anyhow::Result<Self> {
+    pub async fn new(
+        ice_servers: Vec<IceServerConfig>,
+        encoder_type: EncoderType,
+    ) -> anyhow::Result<Self> {
         let mut media_engine = MediaEngine::default();
 
         // Register ONLY H.264 + Opus. Do NOT use register_default_codecs()
@@ -75,11 +80,26 @@ impl WebRTCPeer {
         // If the SDP profile doesn't match the actual H.264 bitstream, Chrome's
         // decoder may refuse to decode (black screen).
         let h264_feedback = vec![
-            RTCPFeedback { typ: "goog-remb".into(), parameter: "".into() },
-            RTCPFeedback { typ: "ccm".into(), parameter: "fir".into() },
-            RTCPFeedback { typ: "nack".into(), parameter: "".into() },
-            RTCPFeedback { typ: "nack".into(), parameter: "pli".into() },
-            RTCPFeedback { typ: "transport-cc".into(), parameter: "".into() },
+            RTCPFeedback {
+                typ: "goog-remb".into(),
+                parameter: "".into(),
+            },
+            RTCPFeedback {
+                typ: "ccm".into(),
+                parameter: "fir".into(),
+            },
+            RTCPFeedback {
+                typ: "nack".into(),
+                parameter: "".into(),
+            },
+            RTCPFeedback {
+                typ: "nack".into(),
+                parameter: "pli".into(),
+            },
+            RTCPFeedback {
+                typ: "transport-cc".into(),
+                parameter: "".into(),
+            },
         ];
 
         // Register H.264 profiles matching encoder output.
@@ -125,7 +145,10 @@ impl WebRTCPeer {
                 "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
             }
             _ => {
-                info!("Registering H.264 Constrained Baseline profile for {:?} encoder", encoder_type);
+                info!(
+                    "Registering H.264 Constrained Baseline profile for {:?} encoder",
+                    encoder_type
+                );
                 media_engine.register_codec(
                     RTCRtpCodecParameters {
                         capability: RTCRtpCodecCapability {
@@ -289,17 +312,20 @@ impl WebRTCPeer {
         // Log SDP at debug level (verbose, only needed for codec negotiation issues)
         debug!("=== OFFER SDP START ===");
         for line in sdp.lines() {
-            if line.starts_with("m=") || line.starts_with("a=rtpmap:")
-                || line.starts_with("a=fmtp:") || line.starts_with("a=group:")
-                || line.starts_with("a=mid:") || line.starts_with("a=ssrc:")
+            if line.starts_with("m=")
+                || line.starts_with("a=rtpmap:")
+                || line.starts_with("a=fmtp:")
+                || line.starts_with("a=group:")
+                || line.starts_with("a=mid:")
+                || line.starts_with("a=ssrc:")
             {
                 debug!(sdp_line = line, "Offer SDP");
             }
         }
         debug!("=== OFFER SDP END ===");
 
-        let offer = RTCSessionDescription::offer(sdp.to_string())
-            .context("Failed to parse SDP offer")?;
+        let offer =
+            RTCSessionDescription::offer(sdp.to_string()).context("Failed to parse SDP offer")?;
 
         self.peer_connection
             .set_remote_description(offer)
@@ -320,9 +346,12 @@ impl WebRTCPeer {
         // Log SDP at debug level
         debug!("=== ANSWER SDP START ===");
         for line in answer.sdp.lines() {
-            if line.starts_with("m=") || line.starts_with("a=rtpmap:")
-                || line.starts_with("a=fmtp:") || line.starts_with("a=group:")
-                || line.starts_with("a=mid:") || line.starts_with("a=ssrc:")
+            if line.starts_with("m=")
+                || line.starts_with("a=rtpmap:")
+                || line.starts_with("a=fmtp:")
+                || line.starts_with("a=group:")
+                || line.starts_with("a=mid:")
+                || line.starts_with("a=ssrc:")
                 || line.starts_with("a=bundle")
             {
                 debug!(sdp_line = line, "Answer SDP");
@@ -354,11 +383,7 @@ impl WebRTCPeer {
         Ok(())
     }
 
-    pub async fn write_video_sample(
-        &self,
-        data: Vec<u8>,
-        duration_ns: u64,
-    ) -> anyhow::Result<()> {
+    pub async fn write_video_sample(&self, data: Vec<u8>, duration_ns: u64) -> anyhow::Result<()> {
         self.video_track
             .write_sample(&webrtc::media::Sample {
                 data: bytes::Bytes::from(data),
@@ -371,11 +396,7 @@ impl WebRTCPeer {
         Ok(())
     }
 
-    pub async fn write_audio_sample(
-        &self,
-        data: &[u8],
-        duration_ns: u64,
-    ) -> anyhow::Result<()> {
+    pub async fn write_audio_sample(&self, data: &[u8], duration_ns: u64) -> anyhow::Result<()> {
         self.audio_track
             .write_sample(&webrtc::media::Sample {
                 data: bytes::Bytes::copy_from_slice(data),
@@ -399,11 +420,7 @@ impl WebRTCPeer {
                     match c.to_json() {
                         Ok(json) => {
                             let cb = Arc::clone(&callback);
-                            cb(
-                                json.candidate,
-                                json.sdp_mid,
-                                json.sdp_mline_index,
-                            );
+                            cb(json.candidate, json.sdp_mid, json.sdp_mline_index);
                         }
                         Err(e) => {
                             tracing::warn!("Failed to serialize ICE candidate: {e}");
@@ -414,10 +431,7 @@ impl WebRTCPeer {
             }));
     }
 
-    pub fn on_input_event(
-        &self,
-        callback: impl Fn(InputEvent) + Send + Sync + 'static,
-    ) {
+    pub fn on_input_event(&self, callback: impl Fn(InputEvent) + Send + Sync + 'static) {
         let callback = Arc::new(callback);
         let dc_storage = Arc::clone(&self.data_channel);
 

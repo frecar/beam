@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rcgen::{CertificateParams, KeyPair, SanType};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 /// Result of TLS configuration build, including the cert DER for agent pinning.
 pub struct TlsConfigResult {
@@ -57,8 +57,8 @@ fn load_certs_from_files(
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     let cert_pem = std::fs::read(cert_path)
         .with_context(|| format!("Failed to read TLS cert: {cert_path}"))?;
-    let key_pem = std::fs::read(key_path)
-        .with_context(|| format!("Failed to read TLS key: {key_path}"))?;
+    let key_pem =
+        std::fs::read(key_path).with_context(|| format!("Failed to read TLS key: {key_path}"))?;
 
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
         .collect::<std::result::Result<Vec<_>, _>>()

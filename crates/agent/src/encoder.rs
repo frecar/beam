@@ -4,7 +4,7 @@ use gstreamer::prelude::*;
 use gstreamer::{self as gst, ClockTime, ElementFactory, FlowError};
 use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use tracing::{debug, info, warn};
 
 /// Detected encoder type, exposed so peer.rs can register the matching H.264 profile.
@@ -27,12 +27,7 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    pub fn new(
-        width: u32,
-        height: u32,
-        framerate: u32,
-        bitrate: u32,
-    ) -> anyhow::Result<Self> {
+    pub fn new(width: u32, height: u32, framerate: u32, bitrate: u32) -> anyhow::Result<Self> {
         let (encoder_type, encoder_name) = detect_encoder()?;
         info!(?encoder_type, encoder_name, "Selected H.264 encoder");
 
@@ -197,45 +192,53 @@ impl Encoder {
         let pipeline_error = Arc::new(AtomicBool::new(false));
         let pipeline_error_flag = Arc::clone(&pipeline_error);
         let bus = pipeline.bus().context("Failed to get pipeline bus")?;
-        let _bus_watch = bus.add_watch(move |_, msg| {
-            use gst::MessageView;
-            match msg.view() {
-                MessageView::Error(err) => {
-                    tracing::error!(
-                        source = ?err.src().map(|s| s.name().to_string()),
-                        error = %err.error(),
-                        debug = ?err.debug(),
-                        "GStreamer pipeline error"
-                    );
-                    pipeline_error_flag.store(true, Ordering::Relaxed);
-                }
-                MessageView::Warning(warn) => {
-                    tracing::warn!(
-                        source = ?warn.src().map(|s| s.name().to_string()),
-                        warning = %warn.error(),
-                        "GStreamer pipeline warning"
-                    );
-                }
-                MessageView::StateChanged(state) => {
-                    if state.src().map(|s| s.name().as_str() == "pipeline0").unwrap_or(false) {
-                        tracing::debug!(
-                            old = ?state.old(),
-                            new = ?state.current(),
-                            "Pipeline state changed"
+        let _bus_watch = bus
+            .add_watch(move |_, msg| {
+                use gst::MessageView;
+                match msg.view() {
+                    MessageView::Error(err) => {
+                        tracing::error!(
+                            source = ?err.src().map(|s| s.name().to_string()),
+                            error = %err.error(),
+                            debug = ?err.debug(),
+                            "GStreamer pipeline error"
+                        );
+                        pipeline_error_flag.store(true, Ordering::Relaxed);
+                    }
+                    MessageView::Warning(warn) => {
+                        tracing::warn!(
+                            source = ?warn.src().map(|s| s.name().to_string()),
+                            warning = %warn.error(),
+                            "GStreamer pipeline warning"
                         );
                     }
+                    MessageView::StateChanged(state) => {
+                        if state
+                            .src()
+                            .map(|s| s.name().as_str() == "pipeline0")
+                            .unwrap_or(false)
+                        {
+                            tracing::debug!(
+                                old = ?state.old(),
+                                new = ?state.current(),
+                                "Pipeline state changed"
+                            );
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
-            gst::glib::ControlFlow::Continue
-        })
-        .context("Failed to add bus watch")?;
+                gst::glib::ControlFlow::Continue
+            })
+            .context("Failed to add bus watch")?;
 
         pipeline
             .set_state(gst::State::Playing)
             .context("Failed to set pipeline to Playing")?;
 
-        info!(width, height, framerate, bitrate, "Encoder pipeline started");
+        info!(
+            width,
+            height, framerate, bitrate, "Encoder pipeline started"
+        );
 
         Ok(Self {
             pipeline,
@@ -295,7 +298,10 @@ impl Encoder {
                 return;
             }
         }
-        warn!(bitrate_kbps, "No encoder element found in pipeline, bitrate unchanged");
+        warn!(
+            bitrate_kbps,
+            "No encoder element found in pipeline, bitrate unchanged"
+        );
     }
 
     /// Returns true if the GStreamer pipeline has encountered an error.

@@ -10,12 +10,12 @@ mod peer;
 
 use anyhow::Context;
 use audio::AudioCapture;
+use beam_protocol::{AgentCommand, InputEvent, SignalingMessage};
 use capture::ScreenCapture;
 use clipboard::ClipboardBridge;
 use encoder::Encoder;
 use input::InputInjector;
 use peer::{PeerConfig, SharedPeer};
-use beam_protocol::{AgentCommand, InputEvent, SignalingMessage};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -33,7 +33,10 @@ const LOW_FRAMERATE: u32 = 30; // 30fps for low quality mode
 /// the Encoder and ScreenCapture during dynamic resolution changes.
 enum CaptureCommand {
     SetBitrate(u32),
-    Resize { width: u32, height: u32 },
+    Resize {
+        width: u32,
+        height: u32,
+    },
     /// Switch quality mode: true = high (LAN), false = low (WAN)
     SetQualityHigh(bool),
     /// Recreate the encoder pipeline to guarantee a fresh IDR frame.
@@ -86,37 +89,32 @@ fn parse_args() -> anyhow::Result<Args> {
             }
             "--ice-servers" => {
                 i += 1;
-                ice_servers_json = Some(
-                    args.get(i)
-                        .context("Missing --ice-servers value")?
-                        .clone(),
-                );
+                ice_servers_json =
+                    Some(args.get(i).context("Missing --ice-servers value")?.clone());
             }
             "--agent-token" => {
                 // Legacy CLI support (prefer BEAM_AGENT_TOKEN env var)
                 i += 1;
-                agent_token = Some(
-                    args.get(i)
-                        .context("Missing --agent-token value")?
-                        .clone(),
-                );
+                agent_token = Some(args.get(i).context("Missing --agent-token value")?.clone());
             }
             "--tls-cert" => {
                 i += 1;
-                tls_cert_path = Some(
-                    args.get(i)
-                        .context("Missing --tls-cert value")?
-                        .clone(),
-                );
+                tls_cert_path = Some(args.get(i).context("Missing --tls-cert value")?.clone());
             }
             "--width" => {
                 i += 1;
-                width = args.get(i).context("Missing --width value")?.parse()
+                width = args
+                    .get(i)
+                    .context("Missing --width value")?
+                    .parse()
                     .context("Invalid --width value")?;
             }
             "--height" => {
                 i += 1;
-                height = args.get(i).context("Missing --height value")?.parse()
+                height = args
+                    .get(i)
+                    .context("Missing --height value")?
+                    .parse()
                     .context("Invalid --height value")?;
             }
             other => anyhow::bail!("Unknown argument: {other}"),
@@ -173,11 +171,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => {
             warn!(display = %args.display, "Display not available ({e:#}), starting virtual display");
-            let display_num: u32 = args
-                .display
-                .trim_start_matches(':')
-                .parse()
-                .unwrap_or(10);
+            let display_num: u32 = args.display.trim_start_matches(':').parse().unwrap_or(10);
             match display::VirtualDisplay::start(display_num, args.width, args.height) {
                 Ok(mut vd) => {
                     info!(display = %args.display, "Virtual display started");
@@ -359,37 +353,59 @@ async fn main() -> anyhow::Result<()> {
                     if !d && (c == 46 || c == 45) && ctrl_down.load(Ordering::Relaxed) {
                         let _ = clipboard_read_tx.try_send(());
                     }
-                    if let Err(e) = injector.lock().unwrap_or_else(|e| e.into_inner()).inject_key(c, d) {
+                    if let Err(e) = injector
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .inject_key(c, d)
+                    {
                         warn!("Key inject error: {e:#}");
                     }
                 }
                 InputEvent::MouseMove { x, y } => {
-                    if let Err(e) = injector.lock().unwrap_or_else(|e| e.into_inner()).inject_mouse_move_abs(x, y) {
+                    if let Err(e) = injector
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .inject_mouse_move_abs(x, y)
+                    {
                         warn!("Mouse move inject error: {e:#}");
                     }
                 }
                 InputEvent::RelativeMouseMove { dx, dy } => {
-                    if dx.is_finite() && dy.is_finite()
+                    if dx.is_finite()
+                        && dy.is_finite()
                         && (-10000.0..=10000.0).contains(&dx)
                         && (-10000.0..=10000.0).contains(&dy)
                     {
-                        if let Err(e) = injector.lock().unwrap_or_else(|e| e.into_inner()).inject_mouse_move_rel(dx, dy) {
+                        if let Err(e) = injector
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .inject_mouse_move_rel(dx, dy)
+                        {
                             warn!("Relative mouse move inject error: {e:#}");
                         }
                     }
                 }
                 InputEvent::Button { b, d } => {
-                    if let Err(e) = injector.lock().unwrap_or_else(|e| e.into_inner()).inject_button(b, d) {
+                    if let Err(e) = injector
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .inject_button(b, d)
+                    {
                         warn!("Button inject error: {e:#}");
                     }
                 }
                 InputEvent::Scroll { dx, dy } => {
                     // Validate scroll values: reject NaN/Infinity (would poison accumulator)
-                    if dx.is_finite() && dy.is_finite()
+                    if dx.is_finite()
+                        && dy.is_finite()
                         && (-10000.0..=10000.0).contains(&dx)
                         && (-10000.0..=10000.0).contains(&dy)
                     {
-                        if let Err(e) = injector.lock().unwrap_or_else(|e| e.into_inner()).inject_scroll(dx, dy) {
+                        if let Err(e) = injector
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .inject_scroll(dx, dy)
+                        {
                             warn!("Scroll inject error: {e:#}");
                         }
                     }
@@ -397,8 +413,16 @@ async fn main() -> anyhow::Result<()> {
                 InputEvent::Clipboard { ref text } => {
                     const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
                     if text.len() > MAX_CLIPBOARD_BYTES {
-                        warn!(len = text.len(), max = MAX_CLIPBOARD_BYTES, "Clipboard text too large, ignoring");
-                    } else if let Err(e) = clipboard.lock().unwrap_or_else(|e| e.into_inner()).set_text(text) {
+                        warn!(
+                            len = text.len(),
+                            max = MAX_CLIPBOARD_BYTES,
+                            "Clipboard text too large, ignoring"
+                        );
+                    } else if let Err(e) = clipboard
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .set_text(text)
+                    {
                         warn!("Clipboard set error: {e:#}");
                     }
                 }
@@ -413,7 +437,9 @@ async fn main() -> anyhow::Result<()> {
                     // Validate: only allow alphanumeric, hyphen, underscore (prevent injection)
                     if layout.len() <= 20
                         && !layout.is_empty()
-                        && layout.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                        && layout
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
                     {
                         // Debounce: skip if layout hasn't changed (prevents unbounded thread spawning)
                         let mut prev = last_layout.lock().unwrap_or_else(|e| e.into_inner());
@@ -458,8 +484,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Create initial WebRTC peer with all callbacks
     let initial_peer = peer::create_peer(
-        &peer_config, &signal_tx, session_id, &force_keyframe, Arc::clone(&input_callback),
-    ).await?;
+        &peer_config,
+        &signal_tx,
+        session_id,
+        &force_keyframe,
+        Arc::clone(&input_callback),
+    )
+    .await?;
     let shared_peer: SharedPeer = Arc::new(tokio::sync::RwLock::new(initial_peer));
 
     // Shutdown flag for capture/audio threads
@@ -822,8 +853,7 @@ async fn main() -> anyhow::Result<()> {
     let clipboard_for_sync = Arc::clone(&clipboard);
 
     // Set up SIGTERM handler
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     tokio::select! {
         // Write encoded video frames to WebRTC (only when connected)
@@ -1246,11 +1276,20 @@ async fn run_signaling(
         info!(url = server_url, "Connecting to signaling server");
 
         match connect_and_handle(
-            server_url, session_id, agent_token, tls_cert_path,
-            shared_peer, peer_config, signal_tx,
-            signal_rx, &force_keyframe, Arc::clone(&input_callback),
+            server_url,
+            session_id,
+            agent_token,
+            tls_cert_path,
+            shared_peer,
+            peer_config,
+            signal_tx,
+            signal_rx,
+            &force_keyframe,
+            Arc::clone(&input_callback),
             capture_cmd_tx,
-        ).await {
+        )
+        .await
+        {
             Ok(()) => {
                 info!("Signaling connection closed cleanly");
                 break;
@@ -1267,15 +1306,11 @@ async fn run_signaling(
 
 /// Build a TLS connector, pinning the server certificate if a cert path is provided.
 /// Falls back to system roots if no cert path is given.
-fn build_tls_connector(
-    tls_cert_path: Option<&str>,
-) -> tokio_tungstenite::Connector {
+fn build_tls_connector(tls_cert_path: Option<&str>) -> tokio_tungstenite::Connector {
     let mut root_store = rustls::RootCertStore::empty();
 
     // Load system roots as baseline
-    for cert in
-        rustls_native_certs::load_native_certs().expect("Could not load platform certs")
-    {
+    for cert in rustls_native_certs::load_native_certs().expect("Could not load platform certs") {
         let _ = root_store.add(cert);
     }
 
@@ -1295,7 +1330,9 @@ fn build_tls_connector(
                 }
             }
             Err(e) => {
-                warn!("Failed to read TLS cert from {cert_path}: {e}, falling back to system roots");
+                warn!(
+                    "Failed to read TLS cert from {cert_path}: {e}, falling back to system roots"
+                );
             }
         }
     }

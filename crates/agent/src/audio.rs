@@ -36,14 +36,14 @@ impl AudioCapture {
         };
 
         let simple = Simple::new(
-            None,                          // Default server
-            "beam-agent",                  // Application name
+            None,         // Default server
+            "beam-agent", // Application name
             pulse::stream::Direction::Record,
-            Some("@DEFAULT_MONITOR@"),     // Capture system audio output
-            "audio-capture",               // Stream description
+            Some("@DEFAULT_MONITOR@"), // Capture system audio output
+            "audio-capture",           // Stream description
             &spec,
-            None,                          // Default channel map
-            Some(&buf_attr),               // Low-latency buffer (20ms fragments)
+            None,            // Default channel map
+            Some(&buf_attr), // Low-latency buffer (20ms fragments)
         )
         .map_err(|e| anyhow::anyhow!("PulseAudio connection failed: {e}"))?;
 

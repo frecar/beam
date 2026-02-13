@@ -64,9 +64,15 @@ pub fn extract_nals(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
             // Find the start code before the next NAL
             let next = nal_starts[idx + 1];
             // Back up past the start code (3 or 4 bytes)
-            if next >= 4 && data[next - 4] == 0 && data[next - 3] == 0 && data[next - 2] == 0 && data[next - 1] == 1 {
+            if next >= 4
+                && data[next - 4] == 0
+                && data[next - 3] == 0
+                && data[next - 2] == 0
+                && data[next - 1] == 1
+            {
                 next - 4
-            } else if next >= 3 && data[next - 3] == 0 && data[next - 2] == 0 && data[next - 1] == 1 {
+            } else if next >= 3 && data[next - 3] == 0 && data[next - 2] == 0 && data[next - 1] == 1
+            {
                 next - 3
             } else {
                 next
@@ -100,7 +106,11 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, byte_offset: 0, bit_offset: 0 }
+        Self {
+            data,
+            byte_offset: 0,
+            bit_offset: 0,
+        }
     }
 
     fn read_bit(&mut self) -> Option<u8> {
@@ -186,9 +196,18 @@ pub fn parse_sps(nal_data: &[u8]) -> Option<SpsInfo> {
     reader.read_ue()?;
 
     // For High profile and above, skip additional fields
-    if profile_idc == 100 || profile_idc == 110 || profile_idc == 122 || profile_idc == 244
-        || profile_idc == 44 || profile_idc == 83 || profile_idc == 86 || profile_idc == 118
-        || profile_idc == 128 || profile_idc == 138 || profile_idc == 139 || profile_idc == 134
+    if profile_idc == 100
+        || profile_idc == 110
+        || profile_idc == 122
+        || profile_idc == 244
+        || profile_idc == 44
+        || profile_idc == 83
+        || profile_idc == 86
+        || profile_idc == 118
+        || profile_idc == 128
+        || profile_idc == 138
+        || profile_idc == 139
+        || profile_idc == 134
     {
         let chroma_format_idc = reader.read_ue()?;
         if chroma_format_idc == 3 {
@@ -212,7 +231,11 @@ pub fn parse_sps(nal_data: &[u8]) -> Option<SpsInfo> {
                             let delta = reader.read_se()?;
                             next_scale = (last_scale + delta + 256) % 256;
                         }
-                        last_scale = if next_scale == 0 { last_scale } else { next_scale };
+                        last_scale = if next_scale == 0 {
+                            last_scale
+                        } else {
+                            next_scale
+                        };
                     }
                 }
             }
@@ -341,9 +364,8 @@ mod tests {
     fn sps_pps_without_idr() {
         // SPS + PPS + non-IDR slice
         let data = [
-            0x00, 0x00, 0x00, 0x01, 0x67, 0x4d, 0x40, 0x28,
-            0x00, 0x00, 0x00, 0x01, 0x68, 0xEE, 0x3C, 0x80,
-            0x00, 0x00, 0x00, 0x01, 0x61, 0x88, 0x80, 0x40,
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x4d, 0x40, 0x28, 0x00, 0x00, 0x00, 0x01, 0x68, 0xEE,
+            0x3C, 0x80, 0x00, 0x00, 0x00, 0x01, 0x61, 0x88, 0x80, 0x40,
         ];
         assert!(!h264_contains_idr(&data));
     }
@@ -371,9 +393,8 @@ mod tests {
     #[test]
     fn extract_multiple_nals() {
         let data = [
-            0x00, 0x00, 0x00, 0x01, 0x67, 0x4d, 0x40, 0x28,
-            0x00, 0x00, 0x00, 0x01, 0x68, 0xEE, 0x3C, 0x80,
-            0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x80, 0x40,
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x4d, 0x40, 0x28, 0x00, 0x00, 0x00, 0x01, 0x68, 0xEE,
+            0x3C, 0x80, 0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x80, 0x40,
         ];
         let nals = extract_nals(&data);
         assert_eq!(nals.len(), 3);
@@ -385,8 +406,7 @@ mod tests {
     #[test]
     fn extract_with_3byte_start_codes() {
         let data = [
-            0x00, 0x00, 0x01, 0x67, 0x4d, 0x40,
-            0x00, 0x00, 0x01, 0x68, 0xEE, 0x3C,
+            0x00, 0x00, 0x01, 0x67, 0x4d, 0x40, 0x00, 0x00, 0x01, 0x68, 0xEE, 0x3C,
         ];
         let nals = extract_nals(&data);
         assert_eq!(nals.len(), 2);
@@ -449,10 +469,8 @@ mod tests {
         // 67 4d 00 28 ac d9 40 78 02 27 e5 c0 44 00 00 03 00 04 00 00 03 00 f0 3c 60 c6 58
         // This SPS should NOT have colour_description_present_flag set
         let sps_bytes: Vec<u8> = vec![
-            0x67, 0x4d, 0x00, 0x28, 0xac, 0xd9, 0x40, 0x78,
-            0x02, 0x27, 0xe5, 0xc0, 0x44, 0x00, 0x00, 0x03,
-            0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x3c,
-            0x60, 0xc6, 0x58,
+            0x67, 0x4d, 0x00, 0x28, 0xac, 0xd9, 0x40, 0x78, 0x02, 0x27, 0xe5, 0xc0, 0x44, 0x00,
+            0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x3c, 0x60, 0xc6, 0x58,
         ];
         if let Some(sps) = parse_sps(&sps_bytes) {
             assert_eq!(sps.profile_idc, 0x4d, "Expected Main profile");

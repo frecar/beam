@@ -88,45 +88,41 @@ async fn main() -> Result<()> {
     let tls_cert_path = tls_result.cert_pem_path;
 
     // JWT secret — persist to /var/lib/beam/jwt_secret so tokens survive restarts
-    let jwt_secret = config
-        .server
-        .jwt_secret
-        .clone()
-        .unwrap_or_else(|| {
-            let secret_path = std::path::Path::new("/var/lib/beam/jwt_secret");
-            // Try to read existing persisted secret
-            if let Ok(existing) = std::fs::read_to_string(secret_path) {
-                let trimmed = existing.trim().to_string();
-                if !trimmed.is_empty() {
-                    tracing::info!("Loaded JWT secret from {}", secret_path.display());
-                    return trimmed;
+    let jwt_secret = config.server.jwt_secret.clone().unwrap_or_else(|| {
+        let secret_path = std::path::Path::new("/var/lib/beam/jwt_secret");
+        // Try to read existing persisted secret
+        if let Ok(existing) = std::fs::read_to_string(secret_path) {
+            let trimmed = existing.trim().to_string();
+            if !trimmed.is_empty() {
+                tracing::info!("Loaded JWT secret from {}", secret_path.display());
+                return trimmed;
+            }
+        }
+        // Generate and persist a new secret
+        let secret = auth::generate_secret();
+        if let Err(e) = std::fs::create_dir_all("/var/lib/beam") {
+            tracing::warn!("Failed to create /var/lib/beam: {e}");
+        } else {
+            use std::os::unix::fs::OpenOptionsExt;
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(secret_path)
+            {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    let _ = f.write_all(secret.as_bytes());
+                    tracing::info!("Persisted JWT secret to {}", secret_path.display());
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to persist JWT secret: {e}");
                 }
             }
-            // Generate and persist a new secret
-            let secret = auth::generate_secret();
-            if let Err(e) = std::fs::create_dir_all("/var/lib/beam") {
-                tracing::warn!("Failed to create /var/lib/beam: {e}");
-            } else {
-                use std::os::unix::fs::OpenOptionsExt;
-                match std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(secret_path)
-                {
-                    Ok(mut f) => {
-                        use std::io::Write;
-                        let _ = f.write_all(secret.as_bytes());
-                        tracing::info!("Persisted JWT secret to {}", secret_path.display());
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to persist JWT secret: {e}");
-                    }
-                }
-            }
-            secret
-        });
+        }
+        secret
+    });
 
     // Build ICE server JSON for agents
     let ice_servers_json = {
@@ -176,7 +172,10 @@ async fn main() -> Result<()> {
         web::spawn_orphan_agent_monitor(Arc::clone(&state), *session_id, *pid).await;
     }
     if !restored.is_empty() {
-        tracing::info!("Restored {} sessions from previous shutdown", restored.len());
+        tracing::info!(
+            "Restored {} sessions from previous shutdown",
+            restored.len()
+        );
     }
 
     let app = web::build_router(Arc::clone(&state));
@@ -200,10 +199,17 @@ async fn main() -> Result<()> {
         let max_idle_secs: u64 = 3600; // 1 hour
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let stale = reaper_state.session_manager.stale_sessions(max_idle_secs).await;
+            let stale = reaper_state
+                .session_manager
+                .stale_sessions(max_idle_secs)
+                .await;
             for session_id in stale {
                 tracing::info!(%session_id, "Reaping stale session (idle > {max_idle_secs}s)");
-                if let Err(e) = reaper_state.session_manager.destroy_session(session_id).await {
+                if let Err(e) = reaper_state
+                    .session_manager
+                    .destroy_session(session_id)
+                    .await
+                {
                     tracing::error!(%session_id, "Failed to reap session: {e}");
                 }
                 signaling::remove_channel(&reaper_state.channels, session_id).await;
@@ -213,8 +219,7 @@ async fn main() -> Result<()> {
 
     // Set up graceful shutdown
     let shutdown_state = Arc::clone(&state);
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     // Accept TLS connections and serve with axum
     loop {
@@ -277,7 +282,10 @@ async fn main() -> Result<()> {
         // Fallback: destroy all sessions if persistence fails
         let sessions = shutdown_state.session_manager.list_sessions().await;
         for session in &sessions {
-            let _ = shutdown_state.session_manager.destroy_session(session.id).await;
+            let _ = shutdown_state
+                .session_manager
+                .destroy_session(session.id)
+                .await;
             signaling::remove_channel(&shutdown_state.channels, session.id).await;
         }
     }

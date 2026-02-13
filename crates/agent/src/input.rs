@@ -24,7 +24,8 @@ impl InputInjector {
     pub fn new() -> anyhow::Result<Self> {
         let keyboard = Self::create_keyboard().context("Failed to create virtual keyboard")?;
         let mouse = Self::create_mouse().context("Failed to create virtual mouse")?;
-        let rel_mouse = Self::create_rel_mouse().context("Failed to create virtual relative mouse")?;
+        let rel_mouse =
+            Self::create_rel_mouse().context("Failed to create virtual relative mouse")?;
         debug!("Input injector initialized");
         Ok(Self {
             keyboard,
@@ -163,8 +164,7 @@ impl InputInjector {
     }
 
     pub fn inject_key(&mut self, code: u16, pressed: bool) -> anyhow::Result<()> {
-        let key =
-            Key::from_code(code).map_err(|_| anyhow::anyhow!("Invalid key code: {code}"))?;
+        let key = Key::from_code(code).map_err(|_| anyhow::anyhow!("Invalid key code: {code}"))?;
         let time = EventTime::default();
         let events = [
             KeyEvent::new(time, key, KeyState::pressed(pressed))
@@ -181,11 +181,7 @@ impl InputInjector {
         (v.clamp(0.0, 1.0) * ABS_MAX as f64) as i32
     }
 
-    pub fn inject_mouse_move_abs(
-        &mut self,
-        x: f64,
-        y: f64,
-    ) -> anyhow::Result<()> {
+    pub fn inject_mouse_move_abs(&mut self, x: f64, y: f64) -> anyhow::Result<()> {
         let abs_x = Self::normalize_to_abs(x);
         let abs_y = Self::normalize_to_abs(y);
         let time = EventTime::default();
@@ -382,10 +378,7 @@ mod tests {
 
     #[test]
     fn button_right() {
-        assert!(matches!(
-            InputInjector::map_button(2),
-            Ok(Key::ButtonRight)
-        ));
+        assert!(matches!(InputInjector::map_button(2), Ok(Key::ButtonRight)));
     }
 
     #[test]

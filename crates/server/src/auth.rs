@@ -21,8 +21,8 @@ const TOKEN_EXPIRY_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// Returns `Ok(())` if credentials are valid, or an error describing the failure.
 /// NOTE: This is a blocking call. Wrap in `tokio::task::spawn_blocking`.
 pub fn authenticate_pam(username: &str, password: &str) -> Result<()> {
-    let mut client = pam::Client::with_password("beam")
-        .map_err(|e| anyhow::anyhow!("PAM init failed: {e}"))?;
+    let mut client =
+        pam::Client::with_password("beam").map_err(|e| anyhow::anyhow!("PAM init failed: {e}"))?;
 
     client
         .conversation_mut()
@@ -115,7 +115,8 @@ pub fn generate_secret() -> String {
     let mut bytes = [0u8; 32];
     let f = std::fs::File::open("/dev/urandom").expect("Failed to open /dev/urandom");
     use std::io::Read;
-    (&f).read_exact(&mut bytes).expect("Failed to read random bytes");
+    (&f).read_exact(&mut bytes)
+        .expect("Failed to read random bytes");
     let mut hex = String::with_capacity(64);
     for b in &bytes {
         write!(hex, "{b:02x}").unwrap();

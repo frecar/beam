@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use x11rb::connection::Connection;
-use x11rb::protocol::xfixes;
 use x11rb::protocol::Event;
+use x11rb::protocol::xfixes;
 use x11rb::rust_connection::RustConnection;
 
 /// Spawn a thread that monitors X11 cursor shape changes via XFixes
@@ -162,12 +162,7 @@ fn build_cursor_map() -> HashMap<&'static str, &'static str> {
     ] {
         m.insert(name, "ns-resize");
     }
-    for name in [
-        "top_left_corner",
-        "nw-resize",
-        "size_fdiag",
-        "nwse-resize",
-    ] {
+    for name in ["top_left_corner", "nw-resize", "size_fdiag", "nwse-resize"] {
         m.insert(name, "nw-resize");
     }
     for name in ["top_right_corner", "ne-resize", "size_bdiag", "nesw-resize"] {

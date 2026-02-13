@@ -258,7 +258,10 @@ impl VirtualDisplay {
                         .spawn()
                     {
                         Ok(child) => {
-                            info!(pid = child.id(), "gnome-keyring-daemon started (secrets) on session bus");
+                            info!(
+                                pid = child.id(),
+                                "gnome-keyring-daemon started (secrets) on session bus"
+                            );
                         }
                         Err(e) => {
                             warn!("Failed to start gnome-keyring-daemon: {e}");
@@ -372,11 +375,18 @@ impl VirtualDisplay {
             } else if which_exists("xterm") {
                 let _ = Command::new("xterm")
                     .env("DISPLAY", &display)
-                    .args(["-geometry", "100x35+100+100", "-fa", "Monospace", "-fs", "14"])
+                    .args([
+                        "-geometry",
+                        "100x35+100+100",
+                        "-fa",
+                        "Monospace",
+                        "-fs",
+                        "14",
+                    ])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn();
-                }
+            }
 
             return Ok(());
         }
@@ -482,7 +492,6 @@ impl VirtualDisplay {
         self.pulse_child = Some(child);
         Ok(())
     }
-
 }
 
 impl Drop for VirtualDisplay {
@@ -498,7 +507,9 @@ impl Drop for VirtualDisplay {
             }
             let pid = child.id();
             debug!(display = display_num, pid, name, "Stopping process");
-            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
             let _ = child.wait();
         }
 
@@ -574,7 +585,10 @@ pub fn set_display_resolution(x_display: &str, width: u32, height: u32) -> Resul
         bail!("Failed to set resolution to {mode_name}: {stderr}");
     }
 
-    info!(x_display, width, height, "Display resolution changed via xrandr");
+    info!(
+        x_display,
+        width, height, "Display resolution changed via xrandr"
+    );
     Ok(())
 }
 
@@ -671,7 +685,11 @@ fn which_exists(program: &str) -> bool {
 /// but doesn't always export it as an X11 root window property. We read it
 /// from /proc/<pid>/environ of the panel process.
 fn find_dbus_address_for_display(x_display: &str) -> Option<String> {
-    let output = Command::new("pgrep").arg("-x").arg("xfce4-panel").output().ok()?;
+    let output = Command::new("pgrep")
+        .arg("-x")
+        .arg("xfce4-panel")
+        .output()
+        .ok()?;
     let pids = String::from_utf8_lossy(&output.stdout);
     for pid_str in pids.lines() {
         let pid = pid_str.trim();
@@ -694,12 +712,18 @@ fn find_dbus_address_for_display(x_display: &str) -> Option<String> {
         }
         if has_display {
             if let Some(ref addr) = dbus_addr {
-                debug!(x_display, addr, "Found DBUS session address from panel process");
+                debug!(
+                    x_display,
+                    addr, "Found DBUS session address from panel process"
+                );
             }
             return dbus_addr;
         }
     }
-    warn!(x_display, "Could not find DBUS_SESSION_BUS_ADDRESS for display");
+    warn!(
+        x_display,
+        "Could not find DBUS_SESSION_BUS_ADDRESS for display"
+    );
     None
 }
 
@@ -713,9 +737,15 @@ mod tests {
         // for fullscreen (e.g. 4K). Otherwise xrandr --output fails with
         // BadMatch when the user enters fullscreen.
         let config = generate_xorg_config(800, 600);
-        assert!(config.contains("VideoRam    262144"), "VRAM should be 256MB");
+        assert!(
+            config.contains("VideoRam    262144"),
+            "VRAM should be 256MB"
+        );
         // Check Virtual max size is set for dynamic resolution
-        assert!(config.contains("Virtual 7680 4320"), "Virtual screen should support up to 8K");
+        assert!(
+            config.contains("Virtual 7680 4320"),
+            "Virtual screen should support up to 8K"
+        );
     }
 
     #[test]

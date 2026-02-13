@@ -9,7 +9,10 @@ pub use beam_protocol::{AudioConfig, IceConfig, ServerConfig, SessionConfig, Vid
 /// If the file doesn't exist, returns default configuration.
 pub fn load_config(path: &Path) -> Result<BeamConfig> {
     if !path.exists() {
-        tracing::warn!("Config file not found at {}, using defaults", path.display());
+        tracing::warn!(
+            "Config file not found at {}, using defaults",
+            path.display()
+        );
         return Ok(BeamConfig {
             server: ServerConfig::default(),
             video: VideoConfig::default(),

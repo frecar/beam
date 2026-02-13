@@ -81,13 +81,7 @@ impl ScreenCapture {
         let shm_size = (width * height * BYTES_PER_PIXEL) as usize;
 
         // Create POSIX shared memory segment
-        let shm_id = unsafe {
-            libc::shmget(
-                libc::IPC_PRIVATE,
-                shm_size,
-                libc::IPC_CREAT | 0o600,
-            )
-        };
+        let shm_id = unsafe { libc::shmget(libc::IPC_PRIVATE, shm_size, libc::IPC_CREAT | 0o600) };
         if shm_id < 0 {
             bail!("shmget failed: {}", std::io::Error::last_os_error());
         }
@@ -101,7 +95,9 @@ impl ScreenCapture {
         // Mark segment for removal once all processes detach
         unsafe { libc::shmctl(shm_id, libc::IPC_RMID, std::ptr::null_mut()) };
 
-        let shm_seg = conn.generate_id().context("Failed to generate SHM seg id")?;
+        let shm_seg = conn
+            .generate_id()
+            .context("Failed to generate SHM seg id")?;
         shm::attach(&conn, shm_seg, shm_id as u32, false)
             .context("SHM attach request failed")?
             .check()
@@ -115,7 +111,11 @@ impl ScreenCapture {
         for _ in 0..POOL_SIZE {
             let _ = pool_tx.send(vec![0u8; shm_size]);
         }
-        info!(pool_size = POOL_SIZE, frame_bytes = shm_size, "Frame buffer pool initialized");
+        info!(
+            pool_size = POOL_SIZE,
+            frame_bytes = shm_size,
+            "Frame buffer pool initialized"
+        );
 
         Ok(Self {
             conn,
@@ -155,7 +155,10 @@ impl ScreenCapture {
 
         // Check out a buffer from the pool. Falls back to fresh allocation
         // if all pooled buffers are still in-flight in the GStreamer pipeline.
-        let mut data = self.pool_rx.try_recv().unwrap_or_else(|_| vec![0u8; self.shm_size]);
+        let mut data = self
+            .pool_rx
+            .try_recv()
+            .unwrap_or_else(|_| vec![0u8; self.shm_size]);
 
         // Ensure buffer is the right size (may differ after resize)
         data.resize(self.shm_size, 0);

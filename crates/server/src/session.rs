@@ -43,7 +43,8 @@ fn generate_agent_token() -> String {
     use std::io::Read;
     let mut bytes = [0u8; 32];
     let f = std::fs::File::open("/dev/urandom").expect("Failed to open /dev/urandom");
-    (&f).read_exact(&mut bytes).expect("Failed to read random bytes");
+    (&f).read_exact(&mut bytes)
+        .expect("Failed to read random bytes");
     let mut hex = String::with_capacity(64);
     for b in &bytes {
         write!(hex, "{b:02x}").unwrap();
@@ -204,10 +205,7 @@ impl SessionManager {
         let _ = std::fs::remove_file(format!("/tmp/.X{display_num}-lock"));
 
         // Spawn the agent process (outside the write lock to avoid holding it during spawn)
-        let agent_process = match self
-            .spawn_agent(&info, server_url, &agent_token)
-            .await
-        {
+        let agent_process = match self.spawn_agent(&info, server_url, &agent_token).await {
             Ok(child) => child,
             Err(e) => {
                 // Clean up the reserved slot on spawn failure
@@ -260,12 +258,7 @@ impl SessionManager {
 
             // If we still own the Child handle, wait for graceful shutdown
             if let Some(ref mut child) = session.agent_process {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    child.wait(),
-                )
-                .await
-                {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
                     Ok(Ok(status)) => {
                         tracing::info!(%session_id, ?status, "Agent exited");
                     }
@@ -369,7 +362,12 @@ impl SessionManager {
             .map(|s| s.info.clone())
     }
 
-    async fn spawn_agent(&self, info: &SessionInfo, server_url: &str, agent_token: &str) -> Result<Child> {
+    async fn spawn_agent(
+        &self,
+        info: &SessionInfo,
+        server_url: &str,
+        agent_token: &str,
+    ) -> Result<Child> {
         let display_str = format!(":{}", info.display);
 
         let mut cmd = Command::new("beam-agent");
@@ -468,7 +466,8 @@ impl SessionManager {
         let log_path = format!("/tmp/beam-agent-{}.log", info.id);
         let log_file = std::fs::File::create(&log_path)
             .with_context(|| format!("Failed to create agent log at {log_path}"))?;
-        let log_file_clone = log_file.try_clone()
+        let log_file_clone = log_file
+            .try_clone()
             .context("Failed to clone agent log file")?;
         tracing::info!(%log_path, "Agent log file created");
 
@@ -476,12 +475,7 @@ impl SessionManager {
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_clone))
             .spawn()
-            .with_context(|| {
-                format!(
-                    "Failed to spawn beam-agent for display {}",
-                    display_str
-                )
-            })?;
+            .with_context(|| format!("Failed to spawn beam-agent for display {}", display_str))?;
 
         tracing::info!(
             session_id = %info.id,
@@ -497,8 +491,7 @@ impl SessionManager {
     /// Agents are left running — the new server process re-adopts them.
     pub async fn persist_sessions(&self) -> Result<()> {
         let dir = Path::new(SESSION_DIR);
-        std::fs::create_dir_all(dir)
-            .context("Failed to create session persistence directory")?;
+        std::fs::create_dir_all(dir).context("Failed to create session persistence directory")?;
 
         // Clean old files
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -510,7 +503,9 @@ impl SessionManager {
         let sessions = self.sessions.read().await;
         let mut count = 0;
         for (id, managed) in sessions.iter() {
-            let Some(pid) = managed.agent_pid else { continue };
+            let Some(pid) = managed.agent_pid else {
+                continue;
+            };
             let persisted = PersistedSession {
                 session_id: *id,
                 username: managed.info.username.clone(),

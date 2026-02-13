@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use beam_protocol::{AuthRequest, AuthResponse, IceServerInfo, BeamConfig, SignalingMessage};
+use beam_protocol::{AuthRequest, AuthResponse, BeamConfig, IceServerInfo, SignalingMessage};
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::services::ServeDir;
@@ -129,7 +129,10 @@ fn extract_claims_from_headers(
 
     auth::validate_jwt(token, jwt_secret).map_err(|e| {
         tracing::warn!("Invalid JWT: {e}");
-        (StatusCode::UNAUTHORIZED, "Invalid or expired token".to_string())
+        (
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired token".to_string(),
+        )
     })
 }
 
@@ -157,10 +160,8 @@ async fn login(
     // Run PAM authentication in a blocking task to avoid blocking the async runtime
     let username = req.username.clone();
     let password = req.password.clone();
-    let pam_result = tokio::task::spawn_blocking(move || {
-        auth::authenticate_pam(&username, &password)
-    })
-    .await;
+    let pam_result =
+        tokio::task::spawn_blocking(move || auth::authenticate_pam(&username, &password)).await;
 
     match pam_result {
         Ok(Ok(())) => {
@@ -222,15 +223,18 @@ async fn login(
     }
 
     // No existing session — create a new one
-    let server_url = format!(
-        "wss://127.0.0.1:{}",
-        state.config.server.port
-    );
+    let server_url = format!("wss://127.0.0.1:{}", state.config.server.port);
     let max_sessions = state.config.session.max_sessions as usize;
 
     let session = match state
         .session_manager
-        .create_session(&req.username, &server_url, max_sessions, req.viewport_width, req.viewport_height)
+        .create_session(
+            &req.username,
+            &server_url,
+            max_sessions,
+            req.viewport_width,
+            req.viewport_height,
+        )
         .await
     {
         Ok(s) => s,
@@ -661,10 +665,7 @@ mod tests {
         let token = crate::auth::generate_jwt("alice", secret).unwrap();
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "authorization",
-            format!("Bearer {token}").parse().unwrap(),
-        );
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
         let query = WsQuery { token: None };
 
         let claims = extract_claims_from_headers(&headers, &query, secret).unwrap();
@@ -677,9 +678,7 @@ mod tests {
         let token = crate::auth::generate_jwt("bob", secret).unwrap();
 
         let headers = HeaderMap::new();
-        let query = WsQuery {
-            token: Some(token),
-        };
+        let query = WsQuery { token: Some(token) };
 
         let claims = extract_claims_from_headers(&headers, &query, secret).unwrap();
         assert_eq!(claims.sub, "bob");

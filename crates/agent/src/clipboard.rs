@@ -70,8 +70,8 @@ impl ClipboardBridge {
             return Ok(None);
         }
 
-        let text = String::from_utf8(output.stdout)
-            .context("Clipboard content is not valid UTF-8")?;
+        let text =
+            String::from_utf8(output.stdout).context("Clipboard content is not valid UTF-8")?;
         Ok(Some(text))
     }
 }

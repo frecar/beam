@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use beam_protocol::{AgentCommand, SignalingMessage};
-use tokio::sync::{broadcast, Notify, RwLock};
+use tokio::sync::{Notify, RwLock, broadcast};
 use uuid::Uuid;
 
 /// Per-session signaling channel with separate paths for browser→agent and agent→browser.

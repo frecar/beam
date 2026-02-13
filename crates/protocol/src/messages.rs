@@ -36,16 +36,10 @@ pub enum InputEvent {
     },
     /// Mouse move: normalized coordinates (0.0 - 1.0)
     #[serde(rename = "m")]
-    MouseMove {
-        x: f64,
-        y: f64,
-    },
+    MouseMove { x: f64, y: f64 },
     /// Relative mouse move (pointer lock mode): raw pixel deltas
     #[serde(rename = "rm")]
-    RelativeMouseMove {
-        dx: f64,
-        dy: f64,
-    },
+    RelativeMouseMove { dx: f64, dy: f64 },
     /// Mouse button press/release
     #[serde(rename = "b")]
     Button {
@@ -56,31 +50,19 @@ pub enum InputEvent {
     },
     /// Scroll event
     #[serde(rename = "s")]
-    Scroll {
-        dx: f64,
-        dy: f64,
-    },
+    Scroll { dx: f64, dy: f64 },
     /// Clipboard text
     #[serde(rename = "c")]
-    Clipboard {
-        text: String,
-    },
+    Clipboard { text: String },
     /// Resolution change request
     #[serde(rename = "r")]
-    Resize {
-        w: u32,
-        h: u32,
-    },
+    Resize { w: u32, h: u32 },
     /// Keyboard layout hint (XKB layout name, e.g. "no", "us", "de")
     #[serde(rename = "l")]
-    Layout {
-        layout: String,
-    },
+    Layout { layout: String },
     /// Quality mode: "high" (LAN) or "low" (WAN)
     #[serde(rename = "q")]
-    Quality {
-        mode: String,
-    },
+    Quality { mode: String },
 }
 
 /// Authentication request.
@@ -188,7 +170,12 @@ mod tests {
 
         let parsed: SignalingMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            SignalingMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index, .. } => {
+            SignalingMessage::IceCandidate {
+                candidate,
+                sdp_mid,
+                sdp_mline_index,
+                ..
+            } => {
                 assert!(candidate.starts_with("candidate:"));
                 assert_eq!(sdp_mid, Some("0".to_string()));
                 assert_eq!(sdp_mline_index, Some(0));
@@ -232,7 +219,9 @@ mod tests {
         let json = serde_json::to_string(&scroll).unwrap();
         assert!(json.contains(r#""t":"s""#));
 
-        let clip = InputEvent::Clipboard { text: "hello".to_string() };
+        let clip = InputEvent::Clipboard {
+            text: "hello".to_string(),
+        };
         let json = serde_json::to_string(&clip).unwrap();
         assert!(json.contains(r#""t":"c""#));
 
@@ -240,7 +229,9 @@ mod tests {
         let json = serde_json::to_string(&resize).unwrap();
         assert!(json.contains(r#""t":"r""#));
 
-        let layout = InputEvent::Layout { layout: "no".to_string() };
+        let layout = InputEvent::Layout {
+            layout: "no".to_string(),
+        };
         let json = serde_json::to_string(&layout).unwrap();
         assert!(json.contains(r#""t":"l""#));
         assert!(json.contains(r#""layout":"no""#));
