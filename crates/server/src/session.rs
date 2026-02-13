@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -22,16 +24,18 @@ struct PersistedSession {
     created_at: u64,
     agent_pid: u32,
     agent_token: String,
+    #[serde(default)]
+    release_token: String,
 }
 
 /// Constant-time byte comparison to prevent timing side-channel attacks.
-/// Returns true only if both slices have equal length and identical contents.
+/// Always iterates over the full max(a.len(), b.len()) range so that
+/// differing lengths cannot be detected via timing.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
         diff |= x ^ y;
     }
     diff == 0
@@ -46,6 +50,23 @@ fn generate_agent_token() -> String {
     (&f).read_exact(&mut bytes)
         .expect("Failed to read random bytes");
     let mut hex = String::with_capacity(64);
+    for b in &bytes {
+        write!(hex, "{b:02x}").unwrap();
+    }
+    hex
+}
+
+/// Generate a short random hex token for session release (16 hex chars = 8 bytes).
+/// Used by `navigator.sendBeacon()` on tab close — shorter than agent tokens
+/// since it only needs to be unpredictable, not cryptographically strong.
+fn generate_release_token() -> String {
+    use std::fmt::Write;
+    use std::io::Read;
+    let mut bytes = [0u8; 8];
+    let f = std::fs::File::open("/dev/urandom").expect("Failed to open /dev/urandom");
+    (&f).read_exact(&mut bytes)
+        .expect("Failed to read random bytes");
+    let mut hex = String::with_capacity(16);
     for b in &bytes {
         write!(hex, "{b:02x}").unwrap();
     }
@@ -107,6 +128,11 @@ struct ManagedSession {
     pub last_activity: u64,
     /// Secret token the agent must present on WebSocket upgrade
     pub agent_token: String,
+    /// Short token for browser tab close release (sent via sendBeacon)
+    pub release_token: String,
+    /// Set to true when a browser WebSocket reconnects, cancelling any
+    /// pending grace-period cleanup spawned by the release endpoint.
+    pub grace_cancel: Arc<AtomicBool>,
 }
 
 impl SessionManager {
@@ -160,6 +186,7 @@ impl SessionManager {
             .unwrap_or_default()
             .as_secs();
         let agent_token = generate_agent_token();
+        let release_token = generate_release_token();
         let display_num;
 
         {
@@ -186,6 +213,8 @@ impl SessionManager {
                 agent_pid: None,
                 last_activity: now,
                 agent_token: agent_token.clone(),
+                release_token: release_token.clone(),
+                grace_cancel: Arc::new(AtomicBool::new(false)),
             };
             sessions.insert(session_id, managed);
         }
@@ -376,6 +405,45 @@ impl SessionManager {
             .map(|s| s.info.clone())
     }
 
+    /// Get the release token for a session.
+    pub async fn get_release_token(&self, session_id: Uuid) -> Option<String> {
+        let sessions = self.sessions.read().await;
+        sessions.get(&session_id).map(|s| s.release_token.clone())
+    }
+
+    /// Verify the release token for a session. Returns true if valid.
+    /// Uses constant-time comparison to prevent timing side-channel attacks.
+    pub async fn verify_release_token(&self, session_id: Uuid, token: &str) -> bool {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .map(|s| constant_time_eq(s.release_token.as_bytes(), token.as_bytes()))
+            .unwrap_or(false)
+    }
+
+    /// Prepare a grace-period cleanup for a session. Resets the cancel flag
+    /// and returns it so the caller can spawn a background cleanup task.
+    ///
+    /// Returns the `Arc<AtomicBool>` cancel flag. Setting it to `true`
+    /// (e.g., when a browser WebSocket reconnects) cancels the cleanup.
+    pub async fn start_grace_period(&self, session_id: Uuid) -> Option<Arc<AtomicBool>> {
+        let sessions = self.sessions.read().await;
+        sessions.get(&session_id).map(|s| {
+            // Reset cancel flag for a fresh grace period
+            s.grace_cancel.store(false, Ordering::SeqCst);
+            Arc::clone(&s.grace_cancel)
+        })
+    }
+
+    /// Cancel any pending grace-period cleanup for a session.
+    /// Called when a browser WebSocket reconnects.
+    pub async fn cancel_grace_period(&self, session_id: Uuid) {
+        let sessions = self.sessions.read().await;
+        if let Some(s) = sessions.get(&session_id) {
+            s.grace_cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
     async fn spawn_agent(
         &self,
         info: &SessionInfo,
@@ -546,6 +614,7 @@ impl SessionManager {
                 created_at: managed.info.created_at,
                 agent_pid: pid,
                 agent_token: managed.agent_token.clone(),
+                release_token: managed.release_token.clone(),
             };
             let path = dir.join(format!("{id}.json"));
             let tmp_path = dir.join(format!("{id}.json.tmp"));
@@ -640,12 +709,21 @@ impl SessionManager {
                 created_at: persisted.created_at,
             };
 
+            // If restoring an old session file without release_token, generate one
+            let release_token = if persisted.release_token.is_empty() {
+                generate_release_token()
+            } else {
+                persisted.release_token
+            };
+
             let managed = ManagedSession {
                 info,
                 agent_process: None, // orphaned — no Child handle
                 agent_pid: Some(persisted.agent_pid),
                 last_activity: now,
                 agent_token: persisted.agent_token,
+                release_token,
+                grace_cancel: Arc::new(AtomicBool::new(false)),
             };
 
             let mut sessions = self.sessions.write().await;
@@ -760,5 +838,54 @@ mod tests {
         assert!(!constant_time_eq(b"hello", b"hell"));
         assert!(!constant_time_eq(b"", b"a"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn release_token_is_16_hex_chars() {
+        let token = generate_release_token();
+        assert_eq!(token.len(), 16);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn release_token_is_unique() {
+        let t1 = generate_release_token();
+        let t2 = generate_release_token();
+        assert_ne!(t1, t2);
+    }
+
+    #[tokio::test]
+    async fn verify_release_token_rejects_wrong_token() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let id = Uuid::new_v4();
+        // Non-existent session should reject
+        assert!(!manager.verify_release_token(id, "fake-token").await);
+    }
+
+    #[tokio::test]
+    async fn grace_cancel_flag_works() {
+        let flag = Arc::new(AtomicBool::new(false));
+        assert!(!flag.load(Ordering::SeqCst));
+        flag.store(true, Ordering::SeqCst);
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        // Short vs long — must return false without short-circuiting
+        assert!(!constant_time_eq(b"abc", b"abcdef"));
+        assert!(!constant_time_eq(b"abcdef", b"abc"));
+        // Same prefix, different length
+        assert!(!constant_time_eq(b"token", b"token_extra"));
+        // Single byte vs empty
+        assert!(!constant_time_eq(b"x", b""));
+        assert!(!constant_time_eq(b"", b"x"));
     }
 }

@@ -30,12 +30,17 @@ pub struct AppState {
 /// Simple per-key rate limiter for login attempts.
 /// Allows at most `max_attempts` in `window_secs`.
 /// Bounded to prevent memory exhaustion from enumeration attacks.
+/// Performs automatic TTL cleanup every `ttl_cleanup_interval` calls to `check()`.
 pub struct LoginRateLimiter {
     attempts: std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Instant>>>,
     max_attempts: usize,
     window: std::time::Duration,
     /// Maximum number of unique keys to track (prevents unbounded growth)
     max_keys: usize,
+    /// Counter for periodic TTL cleanup (every Nth call to check())
+    call_count: std::sync::atomic::AtomicU64,
+    /// Run TTL cleanup every this many calls to check()
+    ttl_cleanup_interval: u64,
 }
 
 impl LoginRateLimiter {
@@ -45,6 +50,8 @@ impl LoginRateLimiter {
             max_attempts,
             window: std::time::Duration::from_secs(window_secs),
             max_keys: 10_000,
+            call_count: std::sync::atomic::AtomicU64::new(0),
+            ttl_cleanup_interval: 100,
         }
     }
 
@@ -54,8 +61,13 @@ impl LoginRateLimiter {
         let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
 
-        // Periodic cleanup: prune all stale entries when map is getting large
-        if attempts.len() > self.max_keys / 2 {
+        // Periodic TTL cleanup: prune all expired entries every N calls.
+        // This prevents unbounded memory growth from enumeration attacks
+        // where many unique keys are used but never repeated.
+        let count = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count.is_multiple_of(self.ttl_cleanup_interval) || attempts.len() > self.max_keys / 2 {
             attempts.retain(|_k, timestamps| {
                 timestamps.retain(|t| now.duration_since(*t) < self.window);
                 !timestamps.is_empty()
@@ -85,6 +97,20 @@ impl LoginRateLimiter {
         let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
         attempts.remove(key);
     }
+
+    /// Return the number of unique keys currently tracked.
+    #[cfg(test)]
+    fn key_count(&self) -> usize {
+        let attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
+        attempts.len()
+    }
+
+    /// Create a limiter with a custom TTL cleanup interval (for testing).
+    #[cfg(test)]
+    fn with_cleanup_interval(mut self, interval: u64) -> Self {
+        self.ttl_cleanup_interval = interval;
+        self
+    }
 }
 
 /// Build the Axum router with all routes.
@@ -94,9 +120,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/auth/refresh", post(refresh_token))
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", delete(delete_session))
+        .route("/api/sessions/{id}/release", post(release_session))
         .route("/api/sessions/{id}/heartbeat", post(session_heartbeat))
         .route("/api/sessions/{id}/ws", get(browser_ws_upgrade))
         .route("/api/health", get(health_check))
+        .route("/api/health/detailed", get(health_check_detailed))
         .route("/api/ice-config", get(ice_config))
         .route("/ws/agent/{id}", get(agent_ws_upgrade))
         .layer(RequestBodyLimitLayer::new(65_536)) // 64KB max request body
@@ -139,6 +167,16 @@ fn extract_claims_from_headers(
     })
 }
 
+/// Validate that a username is non-empty, at most 64 chars, and contains only
+/// alphanumeric ASCII characters plus `_`, `-`, and `.`.
+fn is_valid_username(username: &str) -> bool {
+    !username.is_empty()
+        && username.len() <= 64
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
 /// POST /api/auth/login
 ///
 /// Authenticate via PAM and return a JWT + session.
@@ -147,6 +185,16 @@ async fn login(
     Json(req): Json<AuthRequest>,
 ) -> impl IntoResponse {
     tracing::info!(username = %req.username, "Login request");
+
+    // Validate username before anything else (before rate limiter to avoid
+    // polluting the limiter with garbage keys from fuzzing/scanning).
+    if !is_valid_username(&req.username) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid username" })),
+        )
+            .into_response();
+    }
 
     // Rate limit: check BEFORE auth to avoid wasting PAM calls, but only
     // count failed attempts (so attackers can't lock out legitimate users
@@ -227,11 +275,17 @@ async fn login(
         // Ensure signaling channel exists (may have been cleaned up)
         signaling::get_or_create_channel(&state.channels, existing.id).await;
 
+        // Cancel any pending grace-period cleanup since the user is reconnecting
+        state.session_manager.cancel_grace_period(existing.id).await;
+
+        let release_token = state.session_manager.get_release_token(existing.id).await;
+
         return (
             StatusCode::OK,
             Json(json!(AuthResponse {
                 token,
                 session_id: existing.id,
+                release_token,
             })),
         )
             .into_response();
@@ -278,6 +332,8 @@ async fn login(
     // Monitor agent process in the background
     spawn_agent_monitor(Arc::clone(&state), session.id).await;
 
+    let release_token = state.session_manager.get_release_token(session.id).await;
+
     tracing::info!(
         session_id = %session.id,
         username = %req.username,
@@ -290,6 +346,7 @@ async fn login(
         Json(json!(AuthResponse {
             token,
             session_id: session.id,
+            release_token,
         })),
     )
         .into_response()
@@ -487,6 +544,9 @@ async fn browser_ws_upgrade(
         }
     }
 
+    // Cancel any pending grace-period cleanup since a browser is reconnecting
+    state.session_manager.cancel_grace_period(id).await;
+
     tracing::info!(%id, "Browser WebSocket upgrade");
     let channels = state.channels.clone();
     ws.max_message_size(65_536) // 64KB max for signaling messages
@@ -561,8 +621,83 @@ async fn delete_session(
     (StatusCode::OK, "Session destroyed").into_response()
 }
 
-/// GET /api/health - server health check (no auth required, minimal info)
-async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// POST /api/sessions/:id/release - graceful session release on browser tab close.
+///
+/// Called via `navigator.sendBeacon()` which cannot set Authorization headers,
+/// so this endpoint uses a separate release token in the request body instead
+/// of JWT auth. The release token is returned alongside the JWT at login time.
+///
+/// Starts a 60-second grace period. If no browser WebSocket reconnects within
+/// that window, the session is destroyed. This handles the common case of
+/// closing a tab without clicking "End Session".
+async fn release_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    body: String,
+) -> impl IntoResponse {
+    // sendBeacon sends as text/plain — the body IS the release token.
+    // Trim whitespace/newlines that browsers or proxies might add.
+    let token = body.trim();
+
+    if token.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing release token").into_response();
+    }
+
+    if !state.session_manager.verify_release_token(id, token).await {
+        // Don't reveal whether the session exists or the token is wrong
+        return (StatusCode::UNAUTHORIZED, "Invalid release token").into_response();
+    }
+
+    tracing::info!(%id, "Session release requested, starting 60s grace period");
+
+    // Get the cancel flag and spawn the grace-period cleanup task
+    let cancel = match state.session_manager.start_grace_period(id).await {
+        Some(c) => c,
+        None => {
+            return (StatusCode::NOT_FOUND, "Session not found").into_response();
+        }
+    };
+
+    let state_clone = Arc::clone(&state);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+        // Check if the grace period was cancelled (browser reconnected)
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!(%id, "Grace period cancelled — browser reconnected");
+            return;
+        }
+
+        tracing::info!(%id, "Grace period expired — destroying session");
+        if let Err(e) = state_clone.session_manager.destroy_session(id).await {
+            tracing::error!(%id, "Failed to destroy session after grace period: {e}");
+        }
+        signaling::remove_channel(&state_clone.channels, id).await;
+    });
+
+    (StatusCode::OK, "Release accepted").into_response()
+}
+
+/// GET /api/health - server health check (no auth required, minimal info for load balancers)
+async fn health_check() -> impl IntoResponse {
+    Json(json!({ "status": "ok" }))
+}
+
+/// GET /api/health/detailed - full health info (requires JWT auth)
+async fn health_check_detailed(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<WsQuery>,
+) -> impl IntoResponse {
+    let claims = match extract_claims_from_headers(&headers, &query, &state.jwt_secret) {
+        Ok(c) => c,
+        Err((status, msg)) => {
+            return (status, Json(json!({ "error": msg }))).into_response();
+        }
+    };
+
+    let _ = claims; // authenticated — no further authorization needed
+
     let sessions = state.session_manager.list_sessions().await;
     Json(json!({
         "status": "ok",
@@ -570,6 +705,7 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "uptime_secs": state.started_at.elapsed().as_secs(),
         "sessions": sessions.len(),
     }))
+    .into_response()
 }
 
 /// GET /api/ice-config - return ICE/TURN server configuration (requires JWT)
@@ -678,6 +814,50 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_ttl_cleanup_removes_expired_entries() {
+        // window=0s means entries expire immediately; cleanup_interval=1
+        // means every call to check() triggers a full TTL sweep.
+        let limiter = LoginRateLimiter::new(5, 0).with_cleanup_interval(1);
+
+        // Simulate an enumeration attack: 50 unique keys
+        for i in 0..50 {
+            limiter.check(&format!("attacker-{i}"));
+        }
+
+        // Wait for all entries to expire (window=0s, so any delay suffices)
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Next check() triggers TTL cleanup, pruning all 50 expired keys
+        limiter.check("trigger-cleanup");
+
+        // Only the freshly-inserted key should remain
+        assert_eq!(
+            limiter.key_count(),
+            1,
+            "Expired entries should be pruned by TTL cleanup"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_ttl_cleanup_preserves_active_entries() {
+        // Use a 60-second window with cleanup on every call
+        let limiter = LoginRateLimiter::new(5, 60).with_cleanup_interval(1);
+
+        limiter.check("active-user-1");
+        limiter.check("active-user-2");
+        limiter.check("active-user-3");
+
+        // Trigger another cleanup — all entries are within window, none should be pruned
+        limiter.check("active-user-4");
+
+        assert_eq!(
+            limiter.key_count(),
+            4,
+            "Active entries should not be pruned"
+        );
+    }
+
+    #[test]
     fn extract_claims_from_bearer_header() {
         let secret = "test-secret";
         let token = crate::auth::generate_jwt("alice", secret).unwrap();
@@ -738,5 +918,258 @@ mod tests {
         };
         let result = extract_claims_from_headers(&headers, &query, "secret");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn username_validation_rejects_empty() {
+        assert!(!is_valid_username(""));
+    }
+
+    #[test]
+    fn username_validation_rejects_too_long() {
+        let long = "a".repeat(65);
+        assert!(!is_valid_username(&long));
+    }
+
+    #[test]
+    fn username_validation_rejects_invalid_chars() {
+        assert!(!is_valid_username("user name")); // space
+        assert!(!is_valid_username("user@host")); // @
+        assert!(!is_valid_username("user/root")); // path traversal
+        assert!(!is_valid_username("user\x00")); // null byte
+        assert!(!is_valid_username("user;id")); // shell injection
+    }
+
+    #[test]
+    fn username_validation_accepts_valid() {
+        assert!(is_valid_username("alice"));
+        assert!(is_valid_username("bob_smith"));
+        assert!(is_valid_username("user-123"));
+        assert!(is_valid_username("test.user"));
+        assert!(is_valid_username("A"));
+        assert!(is_valid_username(&"a".repeat(64))); // exactly 64 chars
+    }
+
+    // --- HTTP-level integration tests ---
+    //
+    // These use `tower::ServiceExt::oneshot` to send requests through the axum
+    // router without starting a real HTTP server or TLS listener.
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    const TEST_JWT_SECRET: &str = "test-secret-for-integration-tests";
+
+    /// Build a test `AppState` with defaults suitable for unit/integration tests.
+    fn test_app_state() -> Arc<AppState> {
+        let config: BeamConfig = toml::from_str("").expect("default config");
+        let session_manager = crate::session::SessionManager::new(
+            100, // display_start (high to avoid conflicts)
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        Arc::new(AppState {
+            config,
+            session_manager,
+            channels: crate::signaling::new_channel_registry(),
+            jwt_secret: TEST_JWT_SECRET.to_string(),
+            login_limiter: LoginRateLimiter::new(5, 60),
+            started_at: std::time::Instant::now(),
+        })
+    }
+
+    /// Helper: parse a response body as `serde_json::Value`.
+    async fn body_json(response: axum::response::Response<Body>) -> serde_json::Value {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("failed to read response body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("response body is not valid JSON")
+    }
+
+    #[tokio::test]
+    async fn health_returns_ok_unauthenticated() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = body_json(response).await;
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn health_detailed_requires_auth() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/api/health/detailed")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn health_detailed_with_valid_jwt() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let token = crate::auth::generate_jwt("testuser", TEST_JWT_SECRET).unwrap();
+
+        let request = Request::builder()
+            .uri("/api/health/detailed")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = body_json(response).await;
+        assert_eq!(json["status"], "ok");
+        assert!(json["version"].is_string(), "expected version string");
+        assert!(json["uptime_secs"].is_number(), "expected uptime number");
+        assert!(json["sessions"].is_number(), "expected sessions count");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_requires_auth() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/api/sessions")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_with_valid_jwt() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let token = crate::auth::generate_jwt("testuser", TEST_JWT_SECRET).unwrap();
+
+        let request = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = body_json(response).await;
+        assert!(json.is_array(), "expected JSON array of sessions");
+        // No sessions created, so the array should be empty
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn login_returns_401_for_invalid_creds() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "username": "nonexistent",
+            "password": "wrongpassword"
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        // PAM auth will fail (no such user) — expect 401 or 504 (timeout)
+        // depending on PAM backend speed. Either way, NOT 200.
+        let status = response.status();
+        assert!(
+            status == StatusCode::UNAUTHORIZED
+                || status == StatusCode::GATEWAY_TIMEOUT
+                || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "expected auth failure status, got {status}"
+        );
+
+        let json = body_json(response).await;
+        assert!(json["error"].is_string(), "expected error message in body");
+    }
+
+    #[tokio::test]
+    async fn invalid_jwt_rejected() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        // Generate a JWT signed with a different secret
+        let wrong_token =
+            crate::auth::generate_jwt("testuser", "completely-different-secret").unwrap();
+
+        let request = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {wrong_token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn username_validation_rejects_bad_input() {
+        let bad_usernames = vec![
+            "../etc/passwd", // path traversal
+            "user\x00admin", // null byte
+            "user name",     // space
+            "user;id",       // shell injection
+            "",              // empty
+        ];
+
+        for bad_username in bad_usernames {
+            let state = test_app_state();
+            let app = build_router(state);
+
+            let body = serde_json::json!({
+                "username": bad_username,
+                "password": "anything"
+            });
+
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "username {bad_username:?} should be rejected with 400"
+            );
+
+            let json = body_json(response).await;
+            assert_eq!(json["error"], "Invalid username");
+        }
     }
 }

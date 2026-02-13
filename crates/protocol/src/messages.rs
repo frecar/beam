@@ -51,9 +51,12 @@ pub enum InputEvent {
     /// Scroll event
     #[serde(rename = "s")]
     Scroll { dx: f64, dy: f64 },
-    /// Clipboard text
+    /// Clipboard text (CLIPBOARD selection)
     #[serde(rename = "c")]
     Clipboard { text: String },
+    /// Clipboard text for X11 PRIMARY selection (middle-click paste)
+    #[serde(rename = "cp")]
+    ClipboardPrimary { text: String },
     /// Resolution change request
     #[serde(rename = "r")]
     Resize { w: u32, h: u32 },
@@ -63,6 +66,9 @@ pub enum InputEvent {
     /// Quality mode: "high" (LAN) or "low" (WAN)
     #[serde(rename = "q")]
     Quality { mode: String },
+    /// Browser tab visibility state (true = visible, false = hidden/backgrounded)
+    #[serde(rename = "vs")]
+    VisibilityState { visible: bool },
 }
 
 /// Authentication request.
@@ -91,6 +97,11 @@ impl std::fmt::Debug for AuthRequest {
 pub struct AuthResponse {
     pub token: String,
     pub session_id: Uuid,
+    /// Short token for graceful session release via `navigator.sendBeacon()`
+    /// on browser tab close. Separate from the JWT since sendBeacon cannot
+    /// set Authorization headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_token: Option<String>,
 }
 
 /// ICE server configuration returned to clients for WebRTC setup.
@@ -225,6 +236,13 @@ mod tests {
         let json = serde_json::to_string(&clip).unwrap();
         assert!(json.contains(r#""t":"c""#));
 
+        let clip_primary = InputEvent::ClipboardPrimary {
+            text: "primary".to_string(),
+        };
+        let json = serde_json::to_string(&clip_primary).unwrap();
+        assert!(json.contains(r#""t":"cp""#));
+        assert!(json.contains(r#""text":"primary""#));
+
         let resize = InputEvent::Resize { w: 1920, h: 1080 };
         let json = serde_json::to_string(&resize).unwrap();
         assert!(json.contains(r#""t":"r""#));
@@ -241,6 +259,23 @@ mod tests {
         assert!(json.contains(r#""t":"rm""#));
         assert!(json.contains(r#""dx""#));
         assert!(json.contains(r#""dy""#));
+
+        let visibility = InputEvent::VisibilityState { visible: false };
+        let json = serde_json::to_string(&visibility).unwrap();
+        assert!(json.contains(r#""t":"vs""#));
+        assert!(json.contains(r#""visible":false"#));
+
+        let visibility_true = InputEvent::VisibilityState { visible: true };
+        let json = serde_json::to_string(&visibility_true).unwrap();
+        assert!(json.contains(r#""t":"vs""#));
+        assert!(json.contains(r#""visible":true"#));
+
+        // Verify deserialization from browser format
+        let browser_vs: InputEvent = serde_json::from_str(r#"{"t":"vs","visible":false}"#).unwrap();
+        match browser_vs {
+            InputEvent::VisibilityState { visible } => assert!(!visible),
+            _ => panic!("Expected VisibilityState"),
+        }
     }
 
     #[test]

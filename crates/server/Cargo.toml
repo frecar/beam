@@ -33,3 +33,6 @@ pam = { workspace = true }
 nix = { workspace = true }
 libc = "0.2"
 pem = "3"
+
+[dev-dependencies]
+http-body-util = "0.1"
