@@ -24,6 +24,7 @@ pub struct AppState {
     pub channels: ChannelRegistry,
     pub jwt_secret: String,
     pub login_limiter: LoginRateLimiter,
+    pub started_at: std::time::Instant,
 }
 
 /// Simple per-key rate limiter for login attempts.
@@ -561,10 +562,13 @@ async fn delete_session(
 }
 
 /// GET /api/health - server health check (no auth required, minimal info)
-async fn health_check() -> impl IntoResponse {
+async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let sessions = state.session_manager.list_sessions().await;
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": state.started_at.elapsed().as_secs(),
+        "sessions": sessions.len(),
     }))
 }
 

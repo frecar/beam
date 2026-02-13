@@ -164,6 +164,7 @@ async fn main() -> Result<()> {
         channels: signaling::new_channel_registry(),
         jwt_secret,
         login_limiter: web::LoginRateLimiter::new(5, 60), // 5 attempts per 60 seconds
+        started_at: std::time::Instant::now(),
     });
 
     // Restore sessions from previous graceful shutdown
