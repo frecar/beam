@@ -115,6 +115,14 @@ export class InputHandler {
   private lastSentH = 0;
   private resizeNeededCallback: (() => void) | null = null;
 
+  // Touch input state
+  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  private touchStartX = 0;
+  private touchStartY = 0;
+  private longPressTriggered = false;
+  private static readonly LONG_PRESS_MS = 500;
+  private static readonly LONG_PRESS_MOVE_THRESHOLD = 10;
+
   // Bound listeners (stored so we can remove them)
   private onKeyDown = this.handleKeyDown.bind(this);
   private onKeyUp = this.handleKeyUp.bind(this);
@@ -125,6 +133,9 @@ export class InputHandler {
   private onContextMenu = this.handleContextMenu.bind(this);
   private onFullscreenChange = this.handleFullscreenChange.bind(this);
   private onPointerLockChange = this.handlePointerLockChange.bind(this);
+  private onTouchStart = this.handleTouchStart.bind(this);
+  private onTouchMove = this.handleTouchMove.bind(this);
+  private onTouchEnd = this.handleTouchEnd.bind(this);
 
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -212,6 +223,9 @@ export class InputHandler {
     this.target.addEventListener("contextmenu", this.onContextMenu);
     document.addEventListener("fullscreenchange", this.onFullscreenChange);
     document.addEventListener("pointerlockchange", this.onPointerLockChange);
+    this.target.addEventListener("touchstart", this.onTouchStart, { passive: false });
+    this.target.addEventListener("touchmove", this.onTouchMove, { passive: false });
+    this.target.addEventListener("touchend", this.onTouchEnd, { passive: false });
 
     // Watch for container size changes and send resize events (debounced).
     this.resizeObserver = new ResizeObserver((entries) => {
@@ -239,6 +253,10 @@ export class InputHandler {
     this.target.removeEventListener("contextmenu", this.onContextMenu);
     document.removeEventListener("fullscreenchange", this.onFullscreenChange);
     document.removeEventListener("pointerlockchange", this.onPointerLockChange);
+    this.target.removeEventListener("touchstart", this.onTouchStart);
+    this.target.removeEventListener("touchmove", this.onTouchMove);
+    this.target.removeEventListener("touchend", this.onTouchEnd);
+    this.cancelLongPress();
 
     // Exit pointer lock if active
     if (this.pointerLocked && document.pointerLockElement) {
@@ -558,6 +576,123 @@ export class InputHandler {
         this.resizeNeededCallback?.();
       }
     }, 300);
+  }
+
+  // --- Touch input ---
+
+  /**
+   * Calculate normalized (0-1) coordinates within the actual video content area
+   * from touch coordinates, accounting for object-fit:contain letterboxing.
+   */
+  private getTouchVideoCoords(touch: Touch): { x: number; y: number } | null {
+    const video = this.videoElement;
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      const rect = this.target.getBoundingClientRect();
+      return {
+        x: Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width)),
+        y: Math.max(0, Math.min(1, (touch.clientY - rect.top) / rect.height)),
+      };
+    }
+
+    const rect = video.getBoundingClientRect();
+    const containerAspect = rect.width / rect.height;
+    const videoAspect = video.videoWidth / video.videoHeight;
+
+    let renderWidth: number, renderHeight: number, offsetX: number, offsetY: number;
+    if (containerAspect > videoAspect) {
+      renderHeight = rect.height;
+      renderWidth = rect.height * videoAspect;
+      offsetX = (rect.width - renderWidth) / 2;
+      offsetY = 0;
+    } else {
+      renderWidth = rect.width;
+      renderHeight = rect.width / videoAspect;
+      offsetX = 0;
+      offsetY = (rect.height - renderHeight) / 2;
+    }
+
+    const x = (touch.clientX - rect.left - offsetX) / renderWidth;
+    const y = (touch.clientY - rect.top - offsetY) / renderHeight;
+
+    return {
+      x: Math.max(0, Math.min(1, x)),
+      y: Math.max(0, Math.min(1, y)),
+    };
+  }
+
+  private handleTouchStart(e: TouchEvent): void {
+    e.preventDefault();
+
+    // Only handle single-finger touch for mouse emulation
+    if (e.touches.length !== 1) {
+      this.cancelLongPress();
+      return;
+    }
+
+    const touch = e.touches[0];
+    const coords = this.getTouchVideoCoords(touch);
+    if (coords) {
+      this.sendInput({ t: "m", x: coords.x, y: coords.y });
+    }
+
+    // Start long-press timer for right-click
+    this.touchStartX = touch.clientX;
+    this.touchStartY = touch.clientY;
+    this.longPressTriggered = false;
+    this.cancelLongPress();
+    this.longPressTimer = setTimeout(() => {
+      this.longPressTriggered = true;
+      // Send right-click (button 2) press + release
+      if (coords) {
+        this.sendInput({ t: "m", x: coords.x, y: coords.y });
+      }
+      this.sendInput({ t: "b", b: 2, d: true });
+      this.sendInput({ t: "b", b: 2, d: false });
+    }, InputHandler.LONG_PRESS_MS);
+
+    // Send left button down
+    this.sendInput({ t: "b", b: 0, d: true });
+  }
+
+  private handleTouchMove(e: TouchEvent): void {
+    e.preventDefault();
+
+    if (e.touches.length !== 1) {
+      this.cancelLongPress();
+      return;
+    }
+
+    const touch = e.touches[0];
+
+    // Cancel long press if finger moved too far
+    const dx = touch.clientX - this.touchStartX;
+    const dy = touch.clientY - this.touchStartY;
+    if (Math.sqrt(dx * dx + dy * dy) > InputHandler.LONG_PRESS_MOVE_THRESHOLD) {
+      this.cancelLongPress();
+    }
+
+    const coords = this.getTouchVideoCoords(touch);
+    if (coords) {
+      this.sendInput({ t: "m", x: coords.x, y: coords.y });
+    }
+  }
+
+  private handleTouchEnd(e: TouchEvent): void {
+    e.preventDefault();
+    this.cancelLongPress();
+
+    // Don't send button up if long press fired (it already sent right-click)
+    if (!this.longPressTriggered) {
+      this.sendInput({ t: "b", b: 0, d: false });
+    }
+    this.longPressTriggered = false;
+  }
+
+  private cancelLongPress(): void {
+    if (this.longPressTimer) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
   }
 
   private isInputElement(target: EventTarget | null): boolean {
