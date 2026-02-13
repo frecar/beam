@@ -239,6 +239,18 @@ async fn login(
             .into_response();
     }
 
+    // Validate per-session idle timeout override if provided.
+    // Checked early (before auth) since it's a request format issue, not auth-related.
+    if let Some(timeout) = req.idle_timeout
+        && !(60..=86400).contains(&timeout)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "idle_timeout must be between 60 and 86400 seconds" })),
+        )
+            .into_response();
+    }
+
     // Count every valid login attempt for metrics
     state
         .metrics_logins_attempted
@@ -339,6 +351,10 @@ async fn login(
         state.session_manager.cancel_grace_period(existing.id).await;
 
         let release_token = state.session_manager.get_release_token(existing.id).await;
+        let effective_timeout = state
+            .session_manager
+            .get_idle_timeout(existing.id, state.config.session.idle_timeout)
+            .await;
 
         return (
             StatusCode::OK,
@@ -346,6 +362,7 @@ async fn login(
                 token,
                 session_id: existing.id,
                 release_token,
+                idle_timeout: Some(effective_timeout),
             })),
         )
             .into_response();
@@ -363,6 +380,7 @@ async fn login(
             max_sessions,
             req.viewport_width,
             req.viewport_height,
+            req.idle_timeout,
         )
         .await
     {
@@ -393,6 +411,10 @@ async fn login(
     spawn_agent_monitor(Arc::clone(&state), session.id).await;
 
     let release_token = state.session_manager.get_release_token(session.id).await;
+    let effective_timeout = state
+        .session_manager
+        .get_idle_timeout(session.id, state.config.session.idle_timeout)
+        .await;
 
     tracing::info!(
         session_id = %session.id,
@@ -408,6 +430,7 @@ async fn login(
             token,
             session_id: session.id,
             release_token,
+            idle_timeout: Some(effective_timeout),
         })),
     )
         .into_response()
@@ -1490,6 +1513,56 @@ mod tests {
             let json = body_json(response).await;
             assert_eq!(json["error"], "Invalid username");
         }
+    }
+
+    #[tokio::test]
+    async fn login_rejects_idle_timeout_too_low() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "username": "testuser",
+            "password": "password",
+            "idle_timeout": 59
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let json = body_json(response).await;
+        assert!(json["error"].as_str().unwrap().contains("idle_timeout"));
+    }
+
+    #[tokio::test]
+    async fn login_rejects_idle_timeout_too_high() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "username": "testuser",
+            "password": "password",
+            "idle_timeout": 86401
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let json = body_json(response).await;
+        assert!(json["error"].as_str().unwrap().contains("idle_timeout"));
     }
 
     #[tokio::test]

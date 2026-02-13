@@ -135,6 +135,8 @@ struct ManagedSession {
     pub grace_cancel: Arc<AtomicBool>,
     /// Number of times the agent has been restarted after unexpected exits
     pub restart_count: u32,
+    /// Per-session idle timeout override in seconds. None = use global default.
+    pub idle_timeout_override: Option<u64>,
 }
 
 impl SessionManager {
@@ -168,6 +170,7 @@ impl SessionManager {
         max_sessions: usize,
         initial_width: Option<u32>,
         initial_height: Option<u32>,
+        idle_timeout_override: Option<u64>,
     ) -> Result<SessionInfo> {
         // Use client viewport dimensions if provided, clamped to sane bounds.
         // Fall back to config defaults for old clients or missing values.
@@ -218,6 +221,7 @@ impl SessionManager {
                 release_token: release_token.clone(),
                 grace_cancel: Arc::new(AtomicBool::new(false)),
                 restart_count: 0,
+                idle_timeout_override,
             };
             sessions.insert(session_id, managed);
         }
@@ -366,7 +370,8 @@ impl SessionManager {
         }
     }
 
-    /// Return IDs of sessions that haven't had activity in `max_idle_secs`.
+    /// Return IDs of sessions that haven't had activity past their idle timeout.
+    /// Each session uses its own override if set, otherwise the global `max_idle_secs`.
     pub async fn stale_sessions(&self, max_idle_secs: u64) -> Vec<Uuid> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -375,9 +380,21 @@ impl SessionManager {
         let sessions = self.sessions.read().await;
         sessions
             .values()
-            .filter(|s| now.saturating_sub(s.last_activity) > max_idle_secs)
+            .filter(|s| {
+                let effective = s.idle_timeout_override.unwrap_or(max_idle_secs);
+                effective > 0 && now.saturating_sub(s.last_activity) > effective
+            })
             .map(|s| s.info.id)
             .collect()
+    }
+
+    /// Get the effective idle timeout for a session (override or global default).
+    pub async fn get_idle_timeout(&self, session_id: Uuid, global_default: u64) -> u64 {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .and_then(|s| s.idle_timeout_override)
+            .unwrap_or(global_default)
     }
 
     /// Verify the agent token for a session. Returns true if valid.
@@ -788,6 +805,7 @@ impl SessionManager {
                 release_token,
                 grace_cancel: Arc::new(AtomicBool::new(false)),
                 restart_count: 0,
+                idle_timeout_override: None, // restored sessions use global default
             };
 
             let mut sessions = self.sessions.write().await;
@@ -986,6 +1004,7 @@ mod tests {
                     release_token: "release".to_string(),
                     grace_cancel: Arc::new(AtomicBool::new(false)),
                     restart_count: 0,
+                    idle_timeout_override: None,
                 },
             );
         }
@@ -1061,6 +1080,7 @@ mod tests {
                     release_token: "release".to_string(),
                     grace_cancel: Arc::new(AtomicBool::new(false)),
                     restart_count: 0,
+                    idle_timeout_override: None,
                 },
             );
         }
@@ -1103,6 +1123,7 @@ mod tests {
                         release_token: "release".to_string(),
                         grace_cancel: Arc::new(AtomicBool::new(false)),
                         restart_count: 0,
+                        idle_timeout_override: None,
                     },
                 );
             }
@@ -1117,5 +1138,207 @@ mod tests {
 
         assert_eq!(manager.get_restart_count(id1).await, Some(2));
         assert_eq!(manager.get_restart_count(id2).await, Some(1));
+    }
+
+    #[tokio::test]
+    async fn stale_sessions_uses_per_session_timeout() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let id_short = Uuid::new_v4();
+        let id_long = Uuid::new_v4();
+        let id_default = Uuid::new_v4();
+
+        {
+            let mut sessions = manager.sessions.write().await;
+
+            // Session with short timeout (60s), last active 120s ago → should be stale
+            sessions.insert(
+                id_short,
+                ManagedSession {
+                    info: SessionInfo {
+                        id: id_short,
+                        username: "short".to_string(),
+                        display: 100,
+                        width: 1920,
+                        height: 1080,
+                        created_at: 0,
+                    },
+                    agent_process: None,
+                    agent_pid: None,
+                    last_activity: now.saturating_sub(120),
+                    agent_token: "token".to_string(),
+                    release_token: "release".to_string(),
+                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    restart_count: 0,
+                    idle_timeout_override: Some(60),
+                },
+            );
+
+            // Session with long timeout (86400s), last active 120s ago → should NOT be stale
+            sessions.insert(
+                id_long,
+                ManagedSession {
+                    info: SessionInfo {
+                        id: id_long,
+                        username: "long".to_string(),
+                        display: 101,
+                        width: 1920,
+                        height: 1080,
+                        created_at: 0,
+                    },
+                    agent_process: None,
+                    agent_pid: None,
+                    last_activity: now.saturating_sub(120),
+                    agent_token: "token".to_string(),
+                    release_token: "release".to_string(),
+                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    restart_count: 0,
+                    idle_timeout_override: Some(86400),
+                },
+            );
+
+            // Session with no override, last active 120s ago, global=3600 → should NOT be stale
+            sessions.insert(
+                id_default,
+                ManagedSession {
+                    info: SessionInfo {
+                        id: id_default,
+                        username: "default".to_string(),
+                        display: 102,
+                        width: 1920,
+                        height: 1080,
+                        created_at: 0,
+                    },
+                    agent_process: None,
+                    agent_pid: None,
+                    last_activity: now.saturating_sub(120),
+                    agent_token: "token".to_string(),
+                    release_token: "release".to_string(),
+                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    restart_count: 0,
+                    idle_timeout_override: None,
+                },
+            );
+        }
+
+        let stale = manager.stale_sessions(3600).await;
+        assert!(
+            stale.contains(&id_short),
+            "short-timeout session should be stale"
+        );
+        assert!(
+            !stale.contains(&id_long),
+            "long-timeout session should NOT be stale"
+        );
+        assert!(
+            !stale.contains(&id_default),
+            "default-timeout session should NOT be stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_idle_timeout_returns_override_when_set() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let id = Uuid::new_v4();
+
+        {
+            let mut sessions = manager.sessions.write().await;
+            sessions.insert(
+                id,
+                ManagedSession {
+                    info: SessionInfo {
+                        id,
+                        username: "test".to_string(),
+                        display: 100,
+                        width: 1920,
+                        height: 1080,
+                        created_at: 0,
+                    },
+                    agent_process: None,
+                    agent_pid: None,
+                    last_activity: 0,
+                    agent_token: "token".to_string(),
+                    release_token: "release".to_string(),
+                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    restart_count: 0,
+                    idle_timeout_override: Some(7200),
+                },
+            );
+        }
+
+        assert_eq!(manager.get_idle_timeout(id, 3600).await, 7200);
+    }
+
+    #[tokio::test]
+    async fn get_idle_timeout_returns_global_when_no_override() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let id = Uuid::new_v4();
+
+        {
+            let mut sessions = manager.sessions.write().await;
+            sessions.insert(
+                id,
+                ManagedSession {
+                    info: SessionInfo {
+                        id,
+                        username: "test".to_string(),
+                        display: 100,
+                        width: 1920,
+                        height: 1080,
+                        created_at: 0,
+                    },
+                    agent_process: None,
+                    agent_pid: None,
+                    last_activity: 0,
+                    agent_token: "token".to_string(),
+                    release_token: "release".to_string(),
+                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    restart_count: 0,
+                    idle_timeout_override: None,
+                },
+            );
+        }
+
+        assert_eq!(manager.get_idle_timeout(id, 3600).await, 3600);
+    }
+
+    #[tokio::test]
+    async fn get_idle_timeout_nonexistent_returns_global() {
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
+        let id = Uuid::new_v4();
+        assert_eq!(manager.get_idle_timeout(id, 3600).await, 3600);
     }
 }
