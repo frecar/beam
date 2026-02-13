@@ -50,6 +50,12 @@ pub struct VideoConfig {
     pub framerate: u32,
     /// Force a specific encoder: "nvh264enc", "vah264enc", "x264enc"
     pub encoder: Option<String>,
+    /// Maximum width (0 = unlimited, default: 3840)
+    #[serde(default = "default_max_width")]
+    pub max_width: u32,
+    /// Maximum height (0 = unlimited, default: 2160)
+    #[serde(default = "default_max_height")]
+    pub max_height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +125,8 @@ impl Default for VideoConfig {
             max_bitrate: default_max_bitrate(),
             framerate: default_framerate(),
             encoder: None,
+            max_width: default_max_width(),
+            max_height: default_max_height(),
         }
     }
 }
@@ -175,6 +183,12 @@ fn default_max_bitrate() -> u32 {
 }
 fn default_framerate() -> u32 {
     60
+}
+fn default_max_width() -> u32 {
+    3840 // 4K
+}
+fn default_max_height() -> u32 {
+    2160 // 4K
 }
 fn default_true() -> bool {
     true

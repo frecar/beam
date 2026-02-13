@@ -37,6 +37,8 @@ struct InputCallbackCtx {
     capture_wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     capture_cmd_tx: std::sync::mpsc::Sender<CaptureCommand>,
     display: String,
+    max_width: u32,
+    max_height: u32,
 }
 
 /// Build the reusable input event callback that dispatches input events
@@ -51,6 +53,8 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
         capture_wake,
         capture_cmd_tx,
         display,
+        max_width,
+        max_height,
     } = ctx;
     let ctrl_down = Arc::new(AtomicBool::new(false));
     let last_layout = Arc::new(std::sync::Mutex::new(String::new()));
@@ -149,7 +153,13 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
             }
             InputEvent::Resize { w, h } => {
                 if (320..=7680).contains(&w) && (240..=4320).contains(&h) {
-                    let _ = resize_tx.try_send((w, h));
+                    // Clamp to configured max resolution (0 = unlimited)
+                    let cw = if max_width > 0 { w.min(max_width) } else { w };
+                    let ch = if max_height > 0 { h.min(max_height) } else { h };
+                    // Ensure even dimensions for H.264
+                    let cw = cw & !1;
+                    let ch = ch & !1;
+                    let _ = resize_tx.try_send((cw, ch));
                 } else {
                     warn!(w, h, "Ignoring invalid resize dimensions");
                 }
@@ -232,6 +242,8 @@ struct Args {
     min_bitrate: u32,
     max_bitrate: u32,
     encoder: Option<String>,
+    max_width: u32,
+    max_height: u32,
 }
 
 fn parse_args() -> anyhow::Result<Args> {
@@ -248,6 +260,8 @@ fn parse_args() -> anyhow::Result<Args> {
     let mut min_bitrate: u32 = 5_000;
     let mut max_bitrate: u32 = 80_000;
     let mut encoder: Option<String> = None;
+    let mut max_width: u32 = 3840;
+    let mut max_height: u32 = 2160;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -336,6 +350,22 @@ fn parse_args() -> anyhow::Result<Args> {
                 i += 1;
                 encoder = Some(args.get(i).context("Missing --encoder value")?.clone());
             }
+            "--max-width" => {
+                i += 1;
+                max_width = args
+                    .get(i)
+                    .context("Missing --max-width value")?
+                    .parse()
+                    .context("Invalid --max-width value")?;
+            }
+            "--max-height" => {
+                i += 1;
+                max_height = args
+                    .get(i)
+                    .context("Missing --max-height value")?
+                    .parse()
+                    .context("Invalid --max-height value")?;
+            }
             other => anyhow::bail!("Unknown argument: {other}"),
         }
         i += 1;
@@ -360,6 +390,8 @@ fn parse_args() -> anyhow::Result<Args> {
         min_bitrate,
         max_bitrate,
         encoder,
+        max_width,
+        max_height,
     })
 }
 
@@ -563,6 +595,8 @@ async fn main() -> anyhow::Result<()> {
         capture_wake: Arc::clone(&capture_wake_for_input),
         capture_cmd_tx: capture_cmd_tx.clone(),
         display: args.display.clone(),
+        max_width: args.max_width,
+        max_height: args.max_height,
     });
 
     // Create initial WebRTC peer with all callbacks

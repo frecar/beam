@@ -63,6 +63,8 @@ port = 8443
 bitrate = 5000      # kbps (initial target)
 framerate = 60
 # encoder = "nvh264enc"  # auto-detected: nvh264enc > vah264enc > x264enc
+# max_width = 3840       # clamp resolution (default: 3840, 0 = unlimited)
+# max_height = 2160      # clamp resolution (default: 2160, 0 = unlimited)
 
 [audio]
 enabled = true

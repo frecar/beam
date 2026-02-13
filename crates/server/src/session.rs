@@ -402,7 +402,11 @@ impl SessionManager {
             .arg("--min-bitrate")
             .arg(self.video_config.min_bitrate.to_string())
             .arg("--max-bitrate")
-            .arg(self.video_config.max_bitrate.to_string());
+            .arg(self.video_config.max_bitrate.to_string())
+            .arg("--max-width")
+            .arg(self.video_config.max_width.to_string())
+            .arg("--max-height")
+            .arg(self.video_config.max_height.to_string());
 
         // Pass encoder preference if configured
         if let Some(ref encoder) = self.video_config.encoder {
