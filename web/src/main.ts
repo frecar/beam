@@ -20,6 +20,7 @@ const SESSION_KEY = "beam_session";
 const SESSION_MAX_AGE_MS = 3600_000; // 1 hour — matches server reaper
 const AUDIO_MUTED_KEY = "beam_audio_muted";
 const SCROLL_SPEED_KEY = "beam_scroll_speed";
+const THEME_KEY = "beam_theme";
 
 // Idle timeout warning: server default is 3600s. We warn 2 minutes before.
 // The idle_timeout is not sent in the login response, so we use the server
@@ -77,8 +78,11 @@ const bandwidthIndicator = document.getElementById("bandwidth-indicator") as HTM
 const faviconLink = document.querySelector("link[rel='icon']") as HTMLLinkElement;
 
 const btnMute = document.getElementById("btn-mute") as HTMLButtonElement;
+const btnTheme = document.getElementById("btn-theme") as HTMLButtonElement;
 const perfOverlay = document.getElementById("perf-overlay") as HTMLDivElement;
 const helpOverlay = document.getElementById("help-overlay") as HTMLDivElement;
+const sessionInfoPanel = document.getElementById("session-info-panel") as HTMLDivElement;
+const sipCloseBtn = document.getElementById("sip-close") as HTMLButtonElement;
 const reconnectOverlay = document.getElementById("reconnect-overlay") as HTMLDivElement;
 const reconnectTitle = document.getElementById("reconnect-title") as HTMLHeadingElement;
 const reconnectIcon = document.querySelector(".reconnect-icon") as HTMLDivElement;
@@ -134,6 +138,76 @@ let currentConnectionState: "disconnected" | "connecting" | "connected" | "error
 let lastActivity = Date.now();
 let idleCheckInterval: ReturnType<typeof setInterval> | null = null;
 let idleWarningVisible = false;
+
+// --- Theme (dark/light mode) ---
+
+/** Determine if the current effective theme is light */
+function isLightMode(): boolean {
+  const root = document.documentElement;
+  return root.classList.contains("light-mode") ||
+    (!root.classList.contains("dark-mode") &&
+     window.matchMedia("(prefers-color-scheme: light)").matches);
+}
+
+/** Update the theme toggle button label to reflect the current mode */
+function updateThemeButton(): void {
+  btnTheme.textContent = isLightMode() ? "Dark" : "Light";
+  btnTheme.setAttribute("aria-label", isLightMode() ? "Switch to dark theme" : "Switch to light theme");
+}
+
+/** Toggle between light and dark mode, persisting the choice */
+function toggleTheme(): void {
+  const root = document.documentElement;
+  if (isLightMode()) {
+    // Switch to dark
+    root.classList.remove("light-mode");
+    root.classList.add("dark-mode");
+    localStorage.setItem(THEME_KEY, "dark");
+  } else {
+    // Switch to light
+    root.classList.remove("dark-mode");
+    root.classList.add("light-mode");
+    localStorage.setItem(THEME_KEY, "light");
+  }
+  updateThemeButton();
+}
+
+/** Initialize theme from localStorage or system preference */
+function initTheme(): void {
+  const saved = localStorage.getItem(THEME_KEY);
+  const root = document.documentElement;
+  if (saved === "light") {
+    root.classList.add("light-mode");
+    root.classList.remove("dark-mode");
+  } else if (saved === "dark") {
+    root.classList.add("dark-mode");
+    root.classList.remove("light-mode");
+  }
+  // If no saved preference, neither class is set, so the
+  // @media (prefers-color-scheme: light) rule in CSS takes effect.
+  updateThemeButton();
+}
+
+// Initialize theme immediately (before any async work)
+initTheme();
+
+// Listen for system theme changes (only matters when no explicit preference is saved)
+window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (!saved) {
+    updateThemeButton();
+  }
+});
+
+// Session info panel state
+let sessionInfoVisible = false;
+let connectedSinceTime: number | null = null;
+let sessionDurationInterval: ReturnType<typeof setInterval> | null = null;
+let sessionUsername: string | null = null;
+
+// Audio stats tracking for session info panel
+let prevAudioBytesReceived = 0;
+let prevAudioStatsTimestamp = 0;
 
 /** Generate an SVG data URL for a colored circle favicon */
 function faviconDataUrl(color: string): string {
@@ -459,6 +533,9 @@ async function pollWebRTCStats(): Promise<void> {
   if (remoteVideo.srcObject && remoteVideo.videoWidth === 0 && remoteVideo.videoHeight === 0) {
     console.warn("Video element has srcObject but 0x0 dimensions - no frames decoded yet");
   }
+
+  // Update session info panel if visible (reuses the same 2s polling interval)
+  updateSessionInfoStats();
 }
 
 /** Update the performance overlay content with color-coded values */
@@ -474,6 +551,263 @@ function updatePerfOverlay(): void {
     `Rate <span class="val-good">${perfBitrate > 0 ? perfBitrate + " kbps" : "--"}</span>\n` +
     `Loss <span class="${lossClass}">${perfLoss}%</span>\n` +
     `Res  ${res}`;
+}
+
+// --- Session info panel ---
+
+function toggleSessionInfoPanel(): void {
+  sessionInfoVisible = !sessionInfoVisible;
+  if (sessionInfoVisible) {
+    sessionInfoPanel.classList.add("visible");
+    updateSessionInfoPanel();
+    startSessionDurationTimer();
+  } else {
+    sessionInfoPanel.classList.remove("visible");
+    stopSessionDurationTimer();
+  }
+}
+
+function hideSessionInfoPanel(): void {
+  sessionInfoVisible = false;
+  sessionInfoPanel.classList.remove("visible");
+  stopSessionDurationTimer();
+}
+
+/** Format a duration in ms as "Xh Ym Zs" */
+function formatDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  } else if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function startSessionDurationTimer(): void {
+  stopSessionDurationTimer();
+  sessionDurationInterval = setInterval(() => {
+    updateSessionDuration();
+  }, 1000);
+}
+
+function stopSessionDurationTimer(): void {
+  if (sessionDurationInterval) {
+    clearInterval(sessionDurationInterval);
+    sessionDurationInterval = null;
+  }
+}
+
+function updateSessionDuration(): void {
+  const el = document.getElementById("sip-duration");
+  if (el && connectedSinceTime) {
+    el.textContent = formatDuration(Date.now() - connectedSinceTime);
+  }
+}
+
+/** Populate the session info panel with current metadata */
+function updateSessionInfoPanel(): void {
+  const sipSessionId = document.getElementById("sip-session-id");
+  const sipUsername = document.getElementById("sip-username");
+  const sipConnectedSince = document.getElementById("sip-connected-since");
+
+  if (sipSessionId && currentSessionId) {
+    // Show shortened session ID (first 8 chars)
+    sipSessionId.textContent = currentSessionId.substring(0, 8);
+    sipSessionId.title = currentSessionId;
+  }
+  if (sipUsername && sessionUsername) {
+    sipUsername.textContent = sessionUsername;
+  }
+  if (sipConnectedSince && connectedSinceTime) {
+    sipConnectedSince.textContent = new Date(connectedSinceTime).toLocaleTimeString();
+  }
+
+  updateSessionDuration();
+}
+
+/** Update the session info panel with WebRTC stats (called from pollWebRTCStats) */
+async function updateSessionInfoStats(): Promise<void> {
+  if (!sessionInfoVisible || !connection) return;
+
+  const stats = await connection.getStats();
+  if (!stats) return;
+
+  let iceState = "--";
+  let dtlsState = "--";
+  let localCandidateId = "";
+  let remoteCandidateId = "";
+  let localCandidateType = "--";
+  let remoteCandidateType = "--";
+  let transportProtocol = "--";
+
+  // Video stats
+  let videoCodec = "--";
+  let videoCodecId = "";
+  let videoResolution = "--";
+  let videoFramerate = "--";
+  let videoBitrate = "--";
+  let videoPacketsLost = "--";
+  let videoJitter = "--";
+
+  // Audio stats
+  let audioCodec = "--";
+  let audioCodecId = "";
+  let audioBitrate = "--";
+
+  let currentAudioBytesReceived = 0;
+  let currentAudioTimestamp = 0;
+
+  stats.forEach((report) => {
+    // ICE candidate pair (active)
+    if (report.type === "candidate-pair" && report.state === "succeeded") {
+      localCandidateId = report.localCandidateId || "";
+      remoteCandidateId = report.remoteCandidateId || "";
+    }
+
+    // Transport (DTLS state, ICE state)
+    if (report.type === "transport") {
+      iceState = report.iceState || report.iceLocalCandidateId ? "connected" : "--";
+      dtlsState = report.dtlsState || "--";
+      if (report.selectedCandidatePairId) {
+        // Transport-level ICE state
+        iceState = report.iceState || iceState;
+      }
+    }
+
+    // Local candidate
+    if (report.type === "local-candidate") {
+      if (report.id === localCandidateId) {
+        localCandidateType = report.candidateType || "--";
+        transportProtocol = (report.protocol || "--").toUpperCase();
+      }
+    }
+
+    // Remote candidate
+    if (report.type === "remote-candidate") {
+      if (report.id === remoteCandidateId) {
+        remoteCandidateType = report.candidateType || "--";
+      }
+    }
+
+    // Inbound video RTP
+    if (report.type === "inbound-rtp" && report.kind === "video") {
+      videoCodecId = report.codecId || "";
+      const fw = report.frameWidth;
+      const fh = report.frameHeight;
+      if (fw && fh) {
+        videoResolution = `${fw}x${fh}`;
+      }
+      const fps = report.framesPerSecond;
+      if (typeof fps === "number") {
+        videoFramerate = `${Math.round(fps)} fps`;
+      }
+      const lost = report.packetsLost || 0;
+      const received = report.packetsReceived || 0;
+      videoPacketsLost = `${lost} / ${lost + received}`;
+      const jitter = report.jitter;
+      if (typeof jitter === "number") {
+        videoJitter = `${(jitter * 1000).toFixed(1)} ms`;
+      }
+    }
+
+    // Inbound audio RTP
+    if (report.type === "inbound-rtp" && report.kind === "audio") {
+      audioCodecId = report.codecId || "";
+      currentAudioBytesReceived = report.bytesReceived || 0;
+      currentAudioTimestamp = report.timestamp;
+    }
+  });
+
+  // Resolve codec names from codec stats
+  stats.forEach((report) => {
+    if (report.type === "codec") {
+      if (report.id === videoCodecId) {
+        const mime = report.mimeType || "";
+        videoCodec = mime.replace("video/", "");
+      }
+      if (report.id === audioCodecId) {
+        const mime = report.mimeType || "";
+        audioCodec = mime.replace("audio/", "");
+      }
+    }
+  });
+
+  // Calculate video bitrate from existing perf state
+  if (perfBitrate > 0) {
+    videoBitrate = perfBitrate >= 1000
+      ? `${(perfBitrate / 1000).toFixed(1)} Mbps`
+      : `${perfBitrate} kbps`;
+  }
+
+  // Calculate audio bitrate
+  if (currentAudioBytesReceived > 0 && prevAudioBytesReceived > 0 && currentAudioTimestamp > prevAudioStatsTimestamp) {
+    const deltaBytes = currentAudioBytesReceived - prevAudioBytesReceived;
+    const deltaSec = (currentAudioTimestamp - prevAudioStatsTimestamp) / 1000;
+    if (deltaSec > 0) {
+      const audioKbps = Math.round((deltaBytes * 8) / deltaSec / 1000);
+      audioBitrate = `${audioKbps} kbps`;
+    }
+  }
+  prevAudioBytesReceived = currentAudioBytesReceived;
+  prevAudioStatsTimestamp = currentAudioTimestamp;
+
+  // Audio muted state (renderer controls the video element's muted property)
+  const sipAudioMuted = document.getElementById("sip-audio-muted");
+  if (sipAudioMuted) {
+    sipAudioMuted.textContent = remoteVideo.muted ? "Yes" : "No";
+  }
+
+  // Update DOM elements
+  const setText = (id: string, text: string) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  };
+
+  setText("sip-ice-state", iceState);
+  setText("sip-local-candidate", localCandidateType);
+  setText("sip-remote-candidate", remoteCandidateType);
+  setText("sip-transport", transportProtocol);
+  setText("sip-dtls-state", dtlsState);
+
+  setText("sip-resolution", videoResolution);
+  setText("sip-framerate", videoFramerate);
+  setText("sip-video-codec", videoCodec);
+  setText("sip-video-bitrate", videoBitrate);
+  setText("sip-packets-lost", videoPacketsLost);
+  setText("sip-jitter", videoJitter);
+
+  setText("sip-audio-codec", audioCodec);
+  setText("sip-audio-bitrate", audioBitrate);
+
+  // Apply color classes for ICE state
+  const iceEl = document.getElementById("sip-ice-state");
+  if (iceEl) {
+    iceEl.classList.remove("sip-good", "sip-warn", "sip-bad", "sip-dim");
+    if (iceState === "connected" || iceState === "completed") {
+      iceEl.classList.add("sip-good");
+    } else if (iceState === "checking" || iceState === "new") {
+      iceEl.classList.add("sip-warn");
+    } else if (iceState === "failed" || iceState === "disconnected") {
+      iceEl.classList.add("sip-bad");
+    }
+  }
+
+  // Apply color for DTLS state
+  const dtlsEl = document.getElementById("sip-dtls-state");
+  if (dtlsEl) {
+    dtlsEl.classList.remove("sip-good", "sip-warn", "sip-bad", "sip-dim");
+    if (dtlsState === "connected") {
+      dtlsEl.classList.add("sip-good");
+    } else if (dtlsState === "connecting" || dtlsState === "new") {
+      dtlsEl.classList.add("sip-warn");
+    } else if (dtlsState === "failed" || dtlsState === "closed") {
+      dtlsEl.classList.add("sip-bad");
+    }
+  }
 }
 
 function startHeartbeat(sessionId: string): void {
@@ -623,6 +957,11 @@ function handleDisconnect(): void {
   prevBytesReceived = 0;
   prevStatsTimestamp = 0;
   sessionBytesReceived = 0;
+  prevAudioBytesReceived = 0;
+  prevAudioStatsTimestamp = 0;
+  connectedSinceTime = null;
+  sessionUsername = null;
+  hideSessionInfoPanel();
 
   // Hide bandwidth indicator
   bandwidthIndicator.classList.remove("visible");
@@ -859,6 +1198,7 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
     currentToken = data.token;
     currentSessionId = data.session_id;
     currentReleaseToken = data.release_token ?? null;
+    sessionUsername = username;
     scheduleTokenRefresh();
 
     updateLoadingStatus("Starting session...");
@@ -936,6 +1276,11 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     showDesktop();
     setStatus("connected", "Connected");
     ui?.showNotification("Connected to remote desktop", "success");
+    connectedSinceTime = Date.now();
+    if (sessionInfoVisible) {
+      updateSessionInfoPanel();
+      startSessionDurationTimer();
+    }
     startStatsPolling();
     startHeartbeat(sessionId);
     startIdleCheck();
@@ -1142,6 +1487,10 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
     e.preventDefault();
     perfOverlay.classList.toggle("visible");
   }
+  if (e.key === "F10") {
+    e.preventDefault();
+    toggleSessionInfoPanel();
+  }
   if (e.key === "F12") {
     e.preventDefault();
     captureScreenshot();
@@ -1162,9 +1511,19 @@ reconnectDisconnectBtn.addEventListener("click", () => {
   handleDisconnect();
 });
 
+// Session info panel close button
+sipCloseBtn.addEventListener("click", () => {
+  hideSessionInfoPanel();
+});
+
 // Mute/unmute button
 btnMute.addEventListener("click", () => {
   toggleMute();
+});
+
+// Theme toggle button
+btnTheme.addEventListener("click", () => {
+  toggleTheme();
 });
 
 // Cancel button during loading
@@ -1238,6 +1597,7 @@ if (savedSession) {
     currentToken = savedSession.token;
     currentSessionId = savedSession.session_id;
     currentReleaseToken = savedSession.release_token ?? null;
+    sessionUsername = localStorage.getItem("beam_username");
     scheduleTokenRefresh();
     showLoading("Reconnecting...");
     startConnection(savedSession.session_id, savedSession.token);
