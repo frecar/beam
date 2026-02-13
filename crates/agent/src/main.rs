@@ -4,6 +4,7 @@ mod clipboard;
 mod cursor;
 mod display;
 mod encoder;
+mod filetransfer;
 mod h264;
 mod input;
 mod peer;
@@ -31,6 +32,7 @@ const LOW_FRAMERATE: u32 = 30; // 30fps for low quality mode
 struct InputCallbackCtx {
     injector: Arc<Mutex<InputInjector>>,
     clipboard: Arc<Mutex<ClipboardBridge>>,
+    file_transfer: Arc<Mutex<filetransfer::FileTransferManager>>,
     resize_tx: mpsc::Sender<(u32, u32)>,
     last_input_time: Arc<AtomicU64>,
     clipboard_read_tx: mpsc::Sender<()>,
@@ -48,6 +50,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
     let InputCallbackCtx {
         injector,
         clipboard,
+        file_transfer,
         resize_tx,
         last_input_time,
         clipboard_read_tx,
@@ -170,13 +173,9 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 }
             }
             InputEvent::Resize { w, h } => {
-                if (320..=7680).contains(&w) && (240..=4320).contains(&h) {
-                    // Clamp to configured max resolution (0 = unlimited)
-                    let cw = if max_width > 0 { w.min(max_width) } else { w };
-                    let ch = if max_height > 0 { h.min(max_height) } else { h };
-                    // Ensure even dimensions for H.264
-                    let cw = cw & !1;
-                    let ch = ch & !1;
+                if let Some((cw, ch)) =
+                    display::clamp_resize_dimensions(w, h, max_width, max_height)
+                {
                     let _ = resize_tx.try_send((cw, ch));
                 } else {
                     warn!(w, h, "Ignoring invalid resize dimensions");
@@ -234,6 +233,37 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                     let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
                     *woken = true;
                     cvar.notify_one();
+                }
+            }
+            InputEvent::FileStart {
+                ref id,
+                ref name,
+                size,
+            } => {
+                if let Err(e) = file_transfer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .handle_file_start(id, name, size)
+                {
+                    warn!(id, name, "File transfer start error: {e:#}");
+                }
+            }
+            InputEvent::FileChunk { ref id, ref data } => {
+                if let Err(e) = file_transfer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .handle_file_chunk(id, data)
+                {
+                    warn!(id, "File chunk error: {e:#}");
+                }
+            }
+            InputEvent::FileDone { ref id } => {
+                if let Err(e) = file_transfer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .handle_file_done(id)
+                {
+                    warn!(id, "File done error: {e:#}");
                 }
             }
         }
@@ -619,10 +649,17 @@ async fn main() -> anyhow::Result<()> {
     let tab_backgrounded = Arc::new(AtomicBool::new(false));
     let tab_backgrounded_for_capture = Arc::clone(&tab_backgrounded);
 
+    // File transfer manager — writes uploads to ~/Downloads
+    let home_dir = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    let file_transfer = Arc::new(Mutex::new(filetransfer::FileTransferManager::new(home_dir)));
+
     // Build the reusable input callback (Arc<dyn Fn>) so it survives peer recreation
     let input_callback = build_input_callback(InputCallbackCtx {
         injector: Arc::clone(&injector),
         clipboard: Arc::clone(&clipboard),
+        file_transfer,
         resize_tx: resize_tx.clone(),
         last_input_time: Arc::clone(&last_input_time),
         clipboard_read_tx: clipboard_read_tx.clone(),

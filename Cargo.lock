@@ -307,6 +307,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "audiopus",
+ "base64",
  "beam-protocol",
  "bytes",
  "futures-util",

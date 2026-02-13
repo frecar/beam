@@ -1,5 +1,6 @@
 import { ClipboardBridge } from "./clipboard";
 import { BeamConnection } from "./connection";
+import { FileUploader } from "./filetransfer";
 import { InputHandler } from "./input";
 import { Renderer } from "./renderer";
 import { BeamUI } from "./ui";
@@ -99,6 +100,7 @@ let connection: BeamConnection | null = null;
 let renderer: Renderer | null = null;
 let inputHandler: InputHandler | null = null;
 let clipboardBridge: ClipboardBridge | null = null;
+let fileUploader: FileUploader | null = null;
 let ui: BeamUI | null = null;
 let statsInterval: ReturnType<typeof setInterval> | null = null;
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -1033,6 +1035,7 @@ function handleDisconnect(): void {
   inputHandler = null;
   clipboardBridge?.disable();
   clipboardBridge = null;
+  fileUploader = null;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -1486,6 +1489,15 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     const savedQuality = localStorage.getItem("beam_quality_mode") || "high";
     sendInput({ t: "q", mode: savedQuality });
 
+    if (!fileUploader) {
+      fileUploader = new FileUploader(sendInput);
+      fileUploader.setProgressCallback((filename, percent) => {
+        if (percent >= 100) {
+          ui?.showNotification(`Uploaded: ${filename}`, "success");
+        }
+      });
+    }
+
     if (!clipboardBridge) {
       clipboardBridge = new ClipboardBridge(sendInput);
       clipboardBridge.onClipboardSync((direction, preview) => {
@@ -1721,6 +1733,72 @@ document.addEventListener("visibilitychange", () => {
       }).catch(() => { /* handled by regular heartbeat */ });
     }
   }
+});
+
+// --- File upload: drag-and-drop + button ---
+
+const fileDropOverlay = document.getElementById("file-drop-overlay") as HTMLDivElement;
+const btnUpload = document.getElementById("btn-upload") as HTMLButtonElement;
+const fileUploadInput = document.getElementById("file-upload-input") as HTMLInputElement;
+let dragCounter = 0;
+
+desktopView.addEventListener("dragenter", (e: DragEvent) => {
+  e.preventDefault();
+  dragCounter++;
+  if (dragCounter === 1) {
+    fileDropOverlay.classList.add("visible");
+  }
+});
+
+desktopView.addEventListener("dragleave", (e: DragEvent) => {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
+    fileDropOverlay.classList.remove("visible");
+  }
+});
+
+desktopView.addEventListener("dragover", (e: DragEvent) => {
+  e.preventDefault();
+});
+
+desktopView.addEventListener("drop", (e: DragEvent) => {
+  e.preventDefault();
+  dragCounter = 0;
+  fileDropOverlay.classList.remove("visible");
+
+  const files = e.dataTransfer?.files;
+  if (files && fileUploader) {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      ui?.showNotification(`Uploading: ${file.name}`, "info", 2000);
+      fileUploader.uploadFile(file).catch((err) => {
+        ui?.showNotification(`Upload failed: ${file.name}`, "error");
+        console.error("File upload error:", err);
+      });
+    }
+  }
+});
+
+btnUpload.addEventListener("click", () => {
+  fileUploadInput.click();
+});
+
+fileUploadInput.addEventListener("change", () => {
+  const files = fileUploadInput.files;
+  if (files && fileUploader) {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      ui?.showNotification(`Uploading: ${file.name}`, "info", 2000);
+      fileUploader.uploadFile(file).catch((err) => {
+        ui?.showNotification(`Upload failed: ${file.name}`, "error");
+        console.error("File upload error:", err);
+      });
+    }
+  }
+  // Reset input so the same file can be uploaded again
+  fileUploadInput.value = "";
 });
 
 // Pre-fill username from last successful login

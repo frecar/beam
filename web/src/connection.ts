@@ -30,7 +30,10 @@ export type InputEvent =
   | { t: "l"; layout: string }
   | { t: "q"; mode: string }
   | { t: "vs"; visible: boolean }
-  | { t: "cur"; css: string };
+  | { t: "cur"; css: string }
+  | { t: "fs"; id: string; name: string; size: number }
+  | { t: "fc"; id: string; data: string }
+  | { t: "fd"; id: string };
 
 type TrackCallback = (stream: MediaStream) => void;
 type VoidCallback = () => void;

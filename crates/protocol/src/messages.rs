@@ -69,6 +69,15 @@ pub enum InputEvent {
     /// Browser tab visibility state (true = visible, false = hidden/backgrounded)
     #[serde(rename = "vs")]
     VisibilityState { visible: bool },
+    /// File transfer start: initiates a new file upload
+    #[serde(rename = "fs")]
+    FileStart { id: String, name: String, size: u64 },
+    /// File transfer chunk: base64-encoded file data
+    #[serde(rename = "fc")]
+    FileChunk { id: String, data: String },
+    /// File transfer done: signals upload is complete
+    #[serde(rename = "fd")]
+    FileDone { id: String },
 }
 
 /// Authentication request.
@@ -275,6 +284,44 @@ mod tests {
         match browser_vs {
             InputEvent::VisibilityState { visible } => assert!(!visible),
             _ => panic!("Expected VisibilityState"),
+        }
+
+        // File transfer events
+        let fs = InputEvent::FileStart {
+            id: "abc-123".to_string(),
+            name: "test.txt".to_string(),
+            size: 1024,
+        };
+        let json = serde_json::to_string(&fs).unwrap();
+        assert!(json.contains(r#""t":"fs""#));
+        assert!(json.contains(r#""id":"abc-123""#));
+        assert!(json.contains(r#""name":"test.txt""#));
+        assert!(json.contains(r#""size":1024"#));
+
+        let fc = InputEvent::FileChunk {
+            id: "abc-123".to_string(),
+            data: "SGVsbG8=".to_string(),
+        };
+        let json = serde_json::to_string(&fc).unwrap();
+        assert!(json.contains(r#""t":"fc""#));
+        assert!(json.contains(r#""data":"SGVsbG8=""#));
+
+        let fd = InputEvent::FileDone {
+            id: "abc-123".to_string(),
+        };
+        let json = serde_json::to_string(&fd).unwrap();
+        assert!(json.contains(r#""t":"fd""#));
+
+        // Verify deserialization from browser format
+        let browser_fs: InputEvent =
+            serde_json::from_str(r#"{"t":"fs","id":"x","name":"f.txt","size":42}"#).unwrap();
+        match browser_fs {
+            InputEvent::FileStart { id, name, size } => {
+                assert_eq!(id, "x");
+                assert_eq!(name, "f.txt");
+                assert_eq!(size, 42);
+            }
+            _ => panic!("Expected FileStart"),
         }
     }
 

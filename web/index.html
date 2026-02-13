@@ -934,6 +934,48 @@
         outline-offset: 2px;
       }
 
+      /* File upload drop overlay */
+      #file-drop-overlay {
+        display: none;
+        position: absolute;
+        inset: 0;
+        z-index: 600;
+        background: rgba(74, 158, 255, 0.15);
+        border: 3px dashed var(--accent);
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+      }
+      #file-drop-overlay.visible {
+        display: flex;
+      }
+      .file-drop-text {
+        font-size: 18px;
+        font-weight: 500;
+        color: var(--accent);
+        background: var(--bg-card-solid);
+        padding: 16px 32px;
+        border-radius: 8px;
+        border: 1px solid var(--border-accent);
+        pointer-events: none;
+      }
+
+      /* Upload progress toast bar */
+      .toast-progress {
+        width: 100%;
+        height: 3px;
+        background: var(--border-subtle);
+        border-radius: 2px;
+        margin-top: 6px;
+        overflow: hidden;
+      }
+      .toast-progress-bar {
+        height: 100%;
+        background: var(--accent);
+        border-radius: 2px;
+        transition: width 0.15s ease;
+      }
+
       /* Screenshot flash overlay (camera shutter feedback) */
       #screenshot-flash {
         display: none;
@@ -1013,6 +1055,11 @@
     <!-- Desktop View -->
     <div id="desktop-view" role="application" aria-label="Remote desktop" tabindex="-1">
       <video id="remote-video" autoplay playsinline></video>
+
+      <!-- File upload drop overlay -->
+      <div id="file-drop-overlay" aria-hidden="true">
+        <div class="file-drop-text">Drop files to upload</div>
+      </div>
 
       <!-- Reconnect Overlay (shown when reconnect attempts exhausted) -->
       <div id="reconnect-overlay" role="alertdialog" aria-label="Connection lost" aria-labelledby="reconnect-title" aria-describedby="reconnect-desc" aria-modal="true">
@@ -1147,6 +1194,8 @@
           <option value="3">Scroll 3x</option>
         </select>
         <div class="status-separator" aria-hidden="true"></div>
+        <button class="status-btn" id="btn-upload" aria-label="Upload file to remote desktop" title="Upload file">Upload</button>
+        <input type="file" id="file-upload-input" style="display:none" multiple />
         <button class="status-btn" id="btn-forward-keys" aria-label="Forward browser shortcuts to remote desktop">Fwd Keys</button>
         <button class="status-btn" id="btn-mute" aria-label="Unmute audio">Unmute</button>
         <button class="status-btn" id="btn-fullscreen" aria-label="Toggle fullscreen">Fullscreen</button>
