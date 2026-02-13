@@ -329,8 +329,6 @@ async function pollWebRTCStats(): Promise<void> {
 
 /** Update the performance overlay content with color-coded values */
 function updatePerfOverlay(): void {
-  if (!perfOverlay.classList.contains("visible")) return;
-
   const rttClass = perfLatency < 20 ? "val-good" : perfLatency < 50 ? "val-warn" : "val-bad";
   const fpsClass = perfFps >= 50 ? "val-good" : perfFps >= 25 ? "val-warn" : "val-bad";
   const lossClass = perfLoss < 0.5 ? "val-good" : perfLoss < 2 ? "val-warn" : "val-bad";
