@@ -4,7 +4,15 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket};
 use beam_protocol::{AgentCommand, SignalingMessage};
 use tokio::sync::{Notify, RwLock, broadcast};
+use tokio::time::{Duration, Instant, interval};
 use uuid::Uuid;
+
+/// Interval between WebSocket ping frames.
+const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Maximum time to wait for a pong response before considering the connection dead.
+/// This allows 3 missed pings (3 * 30s = 90s).
+const WS_PONG_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Per-session signaling channel with separate paths for browser→agent and agent→browser.
 /// This prevents echo (messages reflecting back to the sender).
@@ -82,6 +90,11 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
     let kicked = channel.browser_kick.notified();
     tokio::pin!(kicked);
 
+    // Ping/pong keepalive state
+    let mut ping_interval = interval(WS_PING_INTERVAL);
+    ping_interval.tick().await; // consume the immediate first tick
+    let mut last_pong = Instant::now();
+
     tracing::info!(%session_id, "Browser WebSocket connected");
 
     loop {
@@ -97,6 +110,17 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
                     let _ = socket.send(Message::Text(json.into())).await;
                 }
                 break;
+            }
+            // Send periodic WebSocket ping frames
+            _ = ping_interval.tick() => {
+                if last_pong.elapsed() > WS_PONG_TIMEOUT {
+                    tracing::debug!(%session_id, "Browser WebSocket ping timeout, closing");
+                    break;
+                }
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    tracing::debug!(%session_id, "Browser WebSocket ping send failed");
+                    break;
+                }
             }
             // Forward agent messages to this browser client
             result = from_agent.recv() => {
@@ -141,6 +165,9 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
                             }
                         }
                     }
+                    Ok(Message::Pong(_)) => {
+                        last_pong = Instant::now();
+                    }
                     Ok(Message::Close(_)) => {
                         tracing::info!(%session_id, "Browser WebSocket closed");
                         break;
@@ -167,10 +194,26 @@ pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: 
     let channel = get_or_create_channel(&registry, session_id).await;
     let mut from_browser = channel.to_agent.subscribe();
 
+    // Ping/pong keepalive state
+    let mut ping_interval = interval(WS_PING_INTERVAL);
+    ping_interval.tick().await; // consume the immediate first tick
+    let mut last_pong = Instant::now();
+
     tracing::info!(%session_id, "Agent WebSocket connected");
 
     loop {
         tokio::select! {
+            // Send periodic WebSocket ping frames
+            _ = ping_interval.tick() => {
+                if last_pong.elapsed() > WS_PONG_TIMEOUT {
+                    tracing::debug!(%session_id, "Agent WebSocket ping timeout, closing");
+                    break;
+                }
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    tracing::debug!(%session_id, "Agent WebSocket ping send failed");
+                    break;
+                }
+            }
             // Forward browser messages to agent (wrapped in AgentCommand)
             result = from_browser.recv() => {
                 let msg = match result {
@@ -209,6 +252,9 @@ pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: 
                                 tracing::warn!(%session_id, "Invalid agent message: {e}");
                             }
                         }
+                    }
+                    Ok(Message::Pong(_)) => {
+                        last_pong = Instant::now();
                     }
                     Ok(Message::Close(_)) => {
                         tracing::info!(%session_id, "Agent WebSocket closed");
