@@ -185,10 +185,12 @@ impl VirtualDisplay {
                 "* { transition-duration: 0s !important; animation-duration: 0s !important; }\n",
             );
 
+            let pulse_server = format!("unix:/tmp/beam-pulse-{}/native", self.display_num);
             let child = Command::new("/usr/bin/dbus-launch")
                 .arg("--exit-with-session")
                 .arg("xfce4-session")
                 .env("DISPLAY", &display)
+                .env("PULSE_SERVER", &pulse_server)
                 .env("XDG_CONFIG_HOME", &xfce_config_dir)
                 // Include GNOME in desktop list so Electron apps (VS Code)
                 // auto-detect gnome-libsecret for credential storage.
@@ -347,6 +349,10 @@ impl VirtualDisplay {
         if which_exists("openbox") {
             let child = Command::new("openbox")
                 .env("DISPLAY", &display)
+                .env(
+                    "PULSE_SERVER",
+                    format!("unix:/tmp/beam-pulse-{}/native", self.display_num),
+                )
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()

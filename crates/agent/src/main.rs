@@ -27,6 +27,173 @@ const DEFAULT_BITRATE: u32 = 100_000; // 100 Mbps — for VA-API/software encode
 const LOW_BITRATE: u32 = 5_000; // 5 Mbps — for constrained WAN connections
 const DEFAULT_FRAMERATE: u32 = 60; // 60fps — higher rates cause WebRTC bufferbloat (RTT spikes to seconds)
 const LOW_FRAMERATE: u32 = 30; // 30fps for low quality mode
+const IDLE_TIMEOUT_MS: u64 = 300_000; // 5 minutes of no input → idle mode
+const IDLE_FRAMERATE: u32 = 5; // Low framerate when no input — saves GPU/CPU
+
+/// Build the reusable input event callback that dispatches input events
+/// to the appropriate subsystem (uinput, clipboard, resize, layout, quality).
+fn build_input_callback(
+    injector: Arc<Mutex<InputInjector>>,
+    clipboard: Arc<Mutex<ClipboardBridge>>,
+    resize_tx: mpsc::Sender<(u32, u32)>,
+    last_input_time: Arc<AtomicU64>,
+    clipboard_read_tx: mpsc::Sender<()>,
+    capture_wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    capture_cmd_tx: std::sync::mpsc::Sender<CaptureCommand>,
+    display: String,
+) -> Arc<dyn Fn(InputEvent) + Send + Sync> {
+    let ctrl_down = Arc::new(AtomicBool::new(false));
+    let last_layout = Arc::new(std::sync::Mutex::new(String::new()));
+
+    Arc::new(move |event: InputEvent| {
+        // Update last input timestamp for idle detection
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        last_input_time.store(now_ms, Ordering::Relaxed);
+
+        // Wake capture thread if it's sleeping in idle mode
+        {
+            let (lock, cvar) = &*capture_wake;
+            let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *woken = true;
+            cvar.notify_one();
+        }
+
+        match event {
+            InputEvent::Key { c, d } => {
+                if c == 29 || c == 97 {
+                    ctrl_down.store(d, Ordering::Relaxed);
+                }
+                if !d && (c == 46 || c == 45) && ctrl_down.load(Ordering::Relaxed) {
+                    let _ = clipboard_read_tx.try_send(());
+                }
+                if let Err(e) = injector
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .inject_key(c, d)
+                {
+                    warn!("Key inject error: {e:#}");
+                }
+            }
+            InputEvent::MouseMove { x, y } => {
+                if let Err(e) = injector
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .inject_mouse_move_abs(x, y)
+                {
+                    warn!("Mouse move inject error: {e:#}");
+                }
+            }
+            InputEvent::RelativeMouseMove { dx, dy } => {
+                if dx.is_finite()
+                    && dy.is_finite()
+                    && (-10000.0..=10000.0).contains(&dx)
+                    && (-10000.0..=10000.0).contains(&dy)
+                {
+                    if let Err(e) = injector
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .inject_mouse_move_rel(dx, dy)
+                    {
+                        warn!("Relative mouse move inject error: {e:#}");
+                    }
+                }
+            }
+            InputEvent::Button { b, d } => {
+                if let Err(e) = injector
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .inject_button(b, d)
+                {
+                    warn!("Button inject error: {e:#}");
+                }
+            }
+            InputEvent::Scroll { dx, dy } => {
+                if dx.is_finite()
+                    && dy.is_finite()
+                    && (-10000.0..=10000.0).contains(&dx)
+                    && (-10000.0..=10000.0).contains(&dy)
+                {
+                    if let Err(e) = injector
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .inject_scroll(dx, dy)
+                    {
+                        warn!("Scroll inject error: {e:#}");
+                    }
+                }
+            }
+            InputEvent::Clipboard { ref text } => {
+                const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
+                if text.len() > MAX_CLIPBOARD_BYTES {
+                    warn!(
+                        len = text.len(),
+                        max = MAX_CLIPBOARD_BYTES,
+                        "Clipboard text too large, ignoring"
+                    );
+                } else if let Err(e) = clipboard
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .set_text(text)
+                {
+                    warn!("Clipboard set error: {e:#}");
+                }
+            }
+            InputEvent::Resize { w, h } => {
+                if (320..=7680).contains(&w) && (240..=4320).contains(&h) {
+                    let _ = resize_tx.try_send((w, h));
+                } else {
+                    warn!(w, h, "Ignoring invalid resize dimensions");
+                }
+            }
+            InputEvent::Layout { ref layout } => {
+                if layout.len() <= 20
+                    && !layout.is_empty()
+                    && layout
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    let mut prev = last_layout.lock().unwrap_or_else(|e| e.into_inner());
+                    if *prev == *layout {
+                        return;
+                    }
+                    *prev = layout.clone();
+                    drop(prev);
+
+                    let display_str = display.clone();
+                    let layout = layout.clone();
+                    std::thread::spawn(move || {
+                        match std::process::Command::new("setxkbmap")
+                            .arg(&layout)
+                            .env("DISPLAY", &display_str)
+                            .output()
+                        {
+                            Ok(output) if output.status.success() => {
+                                info!(layout = %layout, "Keyboard layout set via setxkbmap");
+                            }
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                warn!(layout = %layout, "setxkbmap failed: {stderr}");
+                            }
+                            Err(e) => {
+                                warn!(layout = %layout, "Failed to run setxkbmap: {e}");
+                            }
+                        }
+                    });
+                } else {
+                    warn!(layout = %layout, "Invalid keyboard layout name, ignoring");
+                }
+            }
+            InputEvent::Quality { ref mode } => {
+                let is_high = mode == "high";
+                info!(mode = %mode, "Quality mode changed");
+                let _ = capture_cmd_tx.send(CaptureCommand::SetQualityHigh(is_high));
+            }
+        }
+    })
+}
 
 /// Commands sent from async tasks to the capture thread.
 /// Using a command channel lets the capture thread exclusively own (and recreate)
@@ -54,6 +221,11 @@ struct Args {
     tls_cert_path: Option<String>,
     width: u32,
     height: u32,
+    framerate: u32,
+    bitrate: u32,
+    min_bitrate: u32,
+    max_bitrate: u32,
+    encoder: Option<String>,
 }
 
 fn parse_args() -> anyhow::Result<Args> {
@@ -65,6 +237,11 @@ fn parse_args() -> anyhow::Result<Args> {
     let mut tls_cert_path = None;
     let mut width: u32 = 1920;
     let mut height: u32 = 1080;
+    let mut framerate: u32 = DEFAULT_FRAMERATE;
+    let mut bitrate: u32 = DEFAULT_BITRATE;
+    let mut min_bitrate: u32 = 5_000;
+    let mut max_bitrate: u32 = 80_000;
+    let mut encoder: Option<String> = None;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -117,6 +294,42 @@ fn parse_args() -> anyhow::Result<Args> {
                     .parse()
                     .context("Invalid --height value")?;
             }
+            "--framerate" => {
+                i += 1;
+                framerate = args
+                    .get(i)
+                    .context("Missing --framerate value")?
+                    .parse()
+                    .context("Invalid --framerate value")?;
+            }
+            "--bitrate" => {
+                i += 1;
+                bitrate = args
+                    .get(i)
+                    .context("Missing --bitrate value")?
+                    .parse()
+                    .context("Invalid --bitrate value")?;
+            }
+            "--min-bitrate" => {
+                i += 1;
+                min_bitrate = args
+                    .get(i)
+                    .context("Missing --min-bitrate value")?
+                    .parse()
+                    .context("Invalid --min-bitrate value")?;
+            }
+            "--max-bitrate" => {
+                i += 1;
+                max_bitrate = args
+                    .get(i)
+                    .context("Missing --max-bitrate value")?
+                    .parse()
+                    .context("Invalid --max-bitrate value")?;
+            }
+            "--encoder" => {
+                i += 1;
+                encoder = Some(args.get(i).context("Missing --encoder value")?.clone());
+            }
             other => anyhow::bail!("Unknown argument: {other}"),
         }
         i += 1;
@@ -136,6 +349,11 @@ fn parse_args() -> anyhow::Result<Args> {
         tls_cert_path,
         width,
         height,
+        framerate,
+        bitrate,
+        min_bitrate,
+        max_bitrate,
+        encoder,
     })
 }
 
@@ -163,6 +381,9 @@ async fn main() -> anyhow::Result<()> {
         "Starting beam-agent"
     );
 
+    // PulseAudio server path (set when we start a virtual display with PulseAudio)
+    let mut pulse_server: Option<String> = None;
+
     // Try to connect to the display; if it doesn't exist, start a virtual one
     let mut virtual_display = match ScreenCapture::new(&args.display) {
         Ok(_) => {
@@ -183,11 +404,7 @@ async fn main() -> anyhow::Result<()> {
                         warn!("Failed to start PulseAudio: {e:#}");
                     }
                     let pulse_path = format!("/tmp/beam-pulse-{display_num}/native");
-                    // SAFETY: No other threads are accessing env vars at this point
-                    // (capture/audio threads haven't been spawned yet)
-                    unsafe {
-                        std::env::set_var("PULSE_SERVER", format!("unix:{pulse_path}"));
-                    }
+                    pulse_server = Some(format!("unix:{pulse_path}"));
                     // Wait for PulseAudio socket to appear (up to 2s)
                     for _ in 0..20 {
                         if std::path::Path::new(&pulse_path).exists() {
@@ -196,7 +413,7 @@ async fn main() -> anyhow::Result<()> {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
 
-                    // Start desktop AFTER PulseAudio — inherits PULSE_SERVER env
+                    // Start desktop AFTER PulseAudio (PULSE_SERVER passed explicitly)
                     if let Err(e) = vd.start_desktop() {
                         warn!("Failed to start desktop: {e:#}");
                     }
@@ -220,9 +437,17 @@ async fn main() -> anyhow::Result<()> {
     let width = screen_capture.width();
     let height = screen_capture.height();
 
-    // Create encoder
-    let encoder = Encoder::new(width, height, DEFAULT_FRAMERATE, DEFAULT_BITRATE)
-        .context("Failed to initialize encoder")?;
+    // Create encoder (use config values from server)
+    let initial_framerate = args.framerate;
+    let initial_bitrate = args.bitrate;
+    let encoder = Encoder::with_encoder_preference(
+        width,
+        height,
+        initial_framerate,
+        initial_bitrate,
+        args.encoder.as_deref(),
+    )
+    .context("Failed to initialize encoder")?;
     let encoder_type = encoder.encoder_type();
 
     // Parse ICE server config
@@ -253,6 +478,12 @@ async fn main() -> anyhow::Result<()> {
         ice_servers,
         encoder_type,
     };
+
+    // Config-driven values for capture/encode
+    let config_bitrate = args.bitrate;
+    let config_framerate = args.framerate;
+    let config_min_bitrate = args.min_bitrate;
+    let config_max_bitrate = args.max_bitrate;
 
     // Channel for encoded video frames: capture thread → async write loop
     // Capacity of 2: reduces frame drops under burst while keeping latency low.
@@ -317,170 +548,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build the reusable input callback (Arc<dyn Fn>) so it survives peer recreation
-    let input_callback: Arc<dyn Fn(InputEvent) + Send + Sync> = {
-        let injector = Arc::clone(&injector);
-        let clipboard = Arc::clone(&clipboard);
-        let resize_tx = resize_tx.clone();
-        let last_input_time = Arc::clone(&last_input_time);
-        let clipboard_read_tx = clipboard_read_tx.clone();
-        let ctrl_down = Arc::new(AtomicBool::new(false));
-        let display_for_layout = args.display.clone();
-        let capture_wake = Arc::clone(&capture_wake_for_input);
-        let quality_cmd_tx = capture_cmd_tx.clone();
-        let last_layout = Arc::new(std::sync::Mutex::new(String::new()));
-
-        Arc::new(move |event: InputEvent| {
-            // Update last input timestamp for idle detection
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            last_input_time.store(now_ms, Ordering::Relaxed);
-
-            // Wake capture thread if it's sleeping in idle mode
-            {
-                let (lock, cvar) = &*capture_wake;
-                let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
-                *woken = true;
-                cvar.notify_one();
-            }
-
-            match event {
-                InputEvent::Key { c, d } => {
-                    if c == 29 || c == 97 {
-                        ctrl_down.store(d, Ordering::Relaxed);
-                    }
-                    if !d && (c == 46 || c == 45) && ctrl_down.load(Ordering::Relaxed) {
-                        let _ = clipboard_read_tx.try_send(());
-                    }
-                    if let Err(e) = injector
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .inject_key(c, d)
-                    {
-                        warn!("Key inject error: {e:#}");
-                    }
-                }
-                InputEvent::MouseMove { x, y } => {
-                    if let Err(e) = injector
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .inject_mouse_move_abs(x, y)
-                    {
-                        warn!("Mouse move inject error: {e:#}");
-                    }
-                }
-                InputEvent::RelativeMouseMove { dx, dy } => {
-                    if dx.is_finite()
-                        && dy.is_finite()
-                        && (-10000.0..=10000.0).contains(&dx)
-                        && (-10000.0..=10000.0).contains(&dy)
-                    {
-                        if let Err(e) = injector
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .inject_mouse_move_rel(dx, dy)
-                        {
-                            warn!("Relative mouse move inject error: {e:#}");
-                        }
-                    }
-                }
-                InputEvent::Button { b, d } => {
-                    if let Err(e) = injector
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .inject_button(b, d)
-                    {
-                        warn!("Button inject error: {e:#}");
-                    }
-                }
-                InputEvent::Scroll { dx, dy } => {
-                    // Validate scroll values: reject NaN/Infinity (would poison accumulator)
-                    if dx.is_finite()
-                        && dy.is_finite()
-                        && (-10000.0..=10000.0).contains(&dx)
-                        && (-10000.0..=10000.0).contains(&dy)
-                    {
-                        if let Err(e) = injector
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .inject_scroll(dx, dy)
-                        {
-                            warn!("Scroll inject error: {e:#}");
-                        }
-                    }
-                }
-                InputEvent::Clipboard { ref text } => {
-                    const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
-                    if text.len() > MAX_CLIPBOARD_BYTES {
-                        warn!(
-                            len = text.len(),
-                            max = MAX_CLIPBOARD_BYTES,
-                            "Clipboard text too large, ignoring"
-                        );
-                    } else if let Err(e) = clipboard
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .set_text(text)
-                    {
-                        warn!("Clipboard set error: {e:#}");
-                    }
-                }
-                InputEvent::Resize { w, h } => {
-                    if (320..=7680).contains(&w) && (240..=4320).contains(&h) {
-                        let _ = resize_tx.try_send((w, h));
-                    } else {
-                        warn!(w, h, "Ignoring invalid resize dimensions");
-                    }
-                }
-                InputEvent::Layout { ref layout } => {
-                    // Validate: only allow alphanumeric, hyphen, underscore (prevent injection)
-                    if layout.len() <= 20
-                        && !layout.is_empty()
-                        && layout
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                    {
-                        // Debounce: skip if layout hasn't changed (prevents unbounded thread spawning)
-                        let mut prev = last_layout.lock().unwrap_or_else(|e| e.into_inner());
-                        if *prev == *layout {
-                            return;
-                        }
-                        *prev = layout.clone();
-                        drop(prev);
-
-                        let display_str = display_for_layout.clone();
-                        let layout = layout.clone();
-                        std::thread::spawn(move || {
-                            match std::process::Command::new("setxkbmap")
-                                .arg(&layout)
-                                .env("DISPLAY", &display_str)
-                                .output()
-                            {
-                                Ok(output) if output.status.success() => {
-                                    info!(layout = %layout, "Keyboard layout set via setxkbmap");
-                                }
-                                Ok(output) => {
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-                                    warn!(layout = %layout, "setxkbmap failed: {stderr}");
-                                }
-                                Err(e) => {
-                                    warn!(layout = %layout, "Failed to run setxkbmap: {e}");
-                                }
-                            }
-                        });
-                    } else {
-                        warn!(layout = %layout, "Invalid keyboard layout name, ignoring");
-                    }
-                }
-                InputEvent::Quality { ref mode } => {
-                    let is_high = mode == "high";
-                    info!(mode = %mode, "Quality mode changed");
-                    let _ = quality_cmd_tx.send(CaptureCommand::SetQualityHigh(is_high));
-                }
-            }
-        })
-    };
+    let input_callback = build_input_callback(
+        Arc::clone(&injector),
+        Arc::clone(&clipboard),
+        resize_tx.clone(),
+        Arc::clone(&last_input_time),
+        clipboard_read_tx.clone(),
+        Arc::clone(&capture_wake_for_input),
+        capture_cmd_tx.clone(),
+        args.display.clone(),
+    );
 
     // Create initial WebRTC peer with all callbacks
     let initial_peer = peer::create_peer(
@@ -525,9 +602,9 @@ async fn main() -> anyhow::Result<()> {
             // The capture thread exclusively owns screen_capture and encoder
             // so it can recreate them during dynamic resolution changes.
             let mut encoder = encoder;
-            let mut current_bitrate = DEFAULT_BITRATE;
-            let mut current_framerate = DEFAULT_FRAMERATE;
-            let mut active_frame_duration_ns = 1_000_000_000u64 / DEFAULT_FRAMERATE as u64;
+            let mut current_bitrate = config_bitrate;
+            let mut current_framerate = config_framerate;
+            let mut active_frame_duration_ns = 1_000_000_000u64 / config_framerate as u64;
             let idle_frame_duration_ns = 1_000_000_000u64 / IDLE_FRAMERATE as u64;
             let mut frame_count: u64 = 0;
             let mut encoded_count: u64 = 0;
@@ -612,9 +689,9 @@ async fn main() -> anyhow::Result<()> {
                             );
                         }
                         CaptureCommand::SetQualityHigh(is_high) => {
-                            let new_framerate = if is_high { DEFAULT_FRAMERATE } else { LOW_FRAMERATE };
+                            let new_framerate = if is_high { config_framerate } else { LOW_FRAMERATE };
                             if abr_enabled {
-                                let new_bitrate = if is_high { DEFAULT_BITRATE } else { LOW_BITRATE };
+                                let new_bitrate = if is_high { config_bitrate } else { LOW_BITRATE };
                                 encoder.set_bitrate(new_bitrate);
                                 current_bitrate = new_bitrate;
                                 info!(bitrate = new_bitrate, fps = new_framerate, high = is_high, "Quality mode applied");
@@ -781,7 +858,7 @@ async fn main() -> anyhow::Result<()> {
                         *woken = false; // clear any stale wake signal
                         let result = cvar.wait_timeout(woken, remaining)
                             .unwrap_or_else(|e| e.into_inner());
-                        if result.0.clone() {
+                        if *result.0 {
                             debug!("Capture thread woken by input (idle → active)");
                         }
                     } else {
@@ -799,7 +876,7 @@ async fn main() -> anyhow::Result<()> {
         .context("Failed to spawn capture thread")?;
 
     // Audio capture thread
-    let audio_handle = match AudioCapture::new(48000, 2) {
+    let audio_handle = match AudioCapture::new(48000, 2, pulse_server.as_deref()) {
         Ok(mut audio_capture) => {
             let handle = std::thread::Builder::new()
                 .name("audio-capture".into())
@@ -858,7 +935,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         // Write encoded video frames to WebRTC (only when connected)
         _ = async {
-            let frame_duration = Duration::from_nanos(1_000_000_000u64 / DEFAULT_FRAMERATE as u64);
+            let frame_duration = Duration::from_nanos(1_000_000_000u64 / config_framerate as u64);
             let mut video_frame_count: u64 = 0;
             let mut dropped_count: u64 = 0;
             let mut was_connected = false;
@@ -1121,9 +1198,9 @@ async fn main() -> anyhow::Result<()> {
         // NVIDIA: disabled at runtime — nvh264enc on ARM64 corrupts colors
         // when bitrate is changed dynamically via set_property.
         _ = async {
-            let mut current_bitrate = DEFAULT_BITRATE;
-            let min_bitrate: u32 = 5000;
-            let max_bitrate: u32 = 80000;
+            let mut current_bitrate = config_bitrate;
+            let min_bitrate: u32 = config_min_bitrate;
+            let max_bitrate: u32 = config_max_bitrate;
             let abr_enabled = !matches!(encoder_type, encoder::EncoderType::Nvidia);
             if !abr_enabled {
                 info!("Adaptive bitrate disabled for NVIDIA encoder (runtime changes cause color corruption)");

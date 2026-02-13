@@ -572,6 +572,7 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
 
     // Persist session for reconnect on page refresh / browser crash
     saveSession(data);
+    localStorage.setItem("beam_username", username);
     currentToken = data.token;
     scheduleTokenRefresh();
 
@@ -829,6 +830,13 @@ document.addEventListener("visibilitychange", () => {
     }
   }
 });
+
+// Pre-fill username from last successful login
+const savedUsername = localStorage.getItem("beam_username");
+if (savedUsername) {
+  usernameInput.value = savedUsername;
+  passwordInput.focus();
+}
 
 // Attempt to resume previous session on page load
 const savedSession = loadSession();

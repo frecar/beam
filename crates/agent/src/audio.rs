@@ -14,7 +14,11 @@ pub struct AudioCapture {
 }
 
 impl AudioCapture {
-    pub fn new(sample_rate: u32, channels: u16) -> anyhow::Result<Self> {
+    pub fn new(
+        sample_rate: u32,
+        channels: u16,
+        pulse_server: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let spec = pulse::sample::Spec {
             format: pulse::sample::Format::S16le,
             channels: channels as u8,
@@ -36,7 +40,7 @@ impl AudioCapture {
         };
 
         let simple = Simple::new(
-            None,         // Default server
+            pulse_server, // Explicit server path (avoids unsafe set_var)
             "beam-agent", // Application name
             pulse::stream::Direction::Record,
             Some("@DEFAULT_MONITOR@"), // Capture system audio output

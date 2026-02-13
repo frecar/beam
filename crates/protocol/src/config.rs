@@ -93,6 +93,9 @@ pub struct SessionConfig {
     /// Maximum concurrent sessions
     #[serde(default = "default_max_sessions")]
     pub max_sessions: u32,
+    /// Idle timeout in seconds (0 = disabled)
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout: u64,
 }
 
 impl Default for ServerConfig {
@@ -147,6 +150,7 @@ impl Default for SessionConfig {
             default_height: default_height(),
             display_start: default_display_start(),
             max_sessions: default_max_sessions(),
+            idle_timeout: default_idle_timeout(),
         }
     }
 }
@@ -189,6 +193,9 @@ fn default_display_start() -> u32 {
 }
 fn default_max_sessions() -> u32 {
     8
+}
+fn default_idle_timeout() -> u64 {
+    3600 // 1 hour
 }
 fn default_stun_urls() -> Vec<String> {
     vec![

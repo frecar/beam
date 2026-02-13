@@ -28,7 +28,17 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new(width: u32, height: u32, framerate: u32, bitrate: u32) -> anyhow::Result<Self> {
-        let (encoder_type, encoder_name) = detect_encoder()?;
+        Self::with_encoder_preference(width, height, framerate, bitrate, None)
+    }
+
+    pub fn with_encoder_preference(
+        width: u32,
+        height: u32,
+        framerate: u32,
+        bitrate: u32,
+        preferred_encoder: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let (encoder_type, encoder_name) = detect_encoder(preferred_encoder)?;
         info!(?encoder_type, encoder_name, "Selected H.264 encoder");
 
         let pipeline = gst::Pipeline::new();
@@ -341,7 +351,25 @@ impl Drop for Encoder {
     }
 }
 
-fn detect_encoder() -> anyhow::Result<(EncoderType, String)> {
+fn detect_encoder(preferred: Option<&str>) -> anyhow::Result<(EncoderType, String)> {
+    // If user specified a preferred encoder, try it first
+    if let Some(pref) = preferred {
+        let enc_type = match pref {
+            "nvh264enc" => EncoderType::Nvidia,
+            "vah264enc" => EncoderType::VaApi,
+            "x264enc" => EncoderType::Software,
+            _ => bail!("Unknown encoder: {pref}. Use nvh264enc, vah264enc, or x264enc."),
+        };
+        if ElementFactory::find(pref).is_some() {
+            info!(encoder = pref, "Using preferred encoder from config");
+            return Ok((enc_type, pref.to_string()));
+        }
+        warn!(
+            encoder = pref,
+            "Preferred encoder not available, falling back to auto-detect"
+        );
+    }
+
     let candidates = [
         (EncoderType::Nvidia, "nvh264enc"),
         (EncoderType::VaApi, "vah264enc"),

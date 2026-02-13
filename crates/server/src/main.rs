@@ -154,6 +154,7 @@ async fn main() -> Result<()> {
         config.session.default_height,
         ice_servers_json,
         Some(tls_cert_path),
+        config.video.clone(),
     );
 
     // Build app state and router
@@ -193,29 +194,33 @@ async fn main() -> Result<()> {
 
     tracing::info!("Server ready, accepting connections");
 
-    // Background task: reap stale sessions (no activity for 1 hour)
-    let reaper_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        let max_idle_secs: u64 = 3600; // 1 hour
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let stale = reaper_state
-                .session_manager
-                .stale_sessions(max_idle_secs)
-                .await;
-            for session_id in stale {
-                tracing::info!(%session_id, "Reaping stale session (idle > {max_idle_secs}s)");
-                if let Err(e) = reaper_state
+    // Background task: reap stale sessions (configurable idle timeout)
+    let idle_timeout = state.config.session.idle_timeout;
+    if idle_timeout > 0 {
+        let reaper_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let stale = reaper_state
                     .session_manager
-                    .destroy_session(session_id)
-                    .await
-                {
-                    tracing::error!(%session_id, "Failed to reap session: {e}");
+                    .stale_sessions(idle_timeout)
+                    .await;
+                for session_id in stale {
+                    tracing::info!(%session_id, "Reaping stale session (idle > {idle_timeout}s)");
+                    if let Err(e) = reaper_state
+                        .session_manager
+                        .destroy_session(session_id)
+                        .await
+                    {
+                        tracing::error!(%session_id, "Failed to reap session: {e}");
+                    }
+                    signaling::remove_channel(&reaper_state.channels, session_id).await;
                 }
-                signaling::remove_channel(&reaper_state.channels, session_id).await;
             }
-        }
-    });
+        });
+    } else {
+        tracing::info!("Session idle timeout disabled (idle_timeout = 0)");
+    }
 
     // Set up graceful shutdown
     let shutdown_state = Arc::clone(&state);

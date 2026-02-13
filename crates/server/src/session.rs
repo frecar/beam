@@ -63,6 +63,8 @@ pub struct SessionManager {
     ice_servers_json: Option<String>,
     /// Path to TLS cert PEM for agent cert pinning
     tls_cert_path: Option<String>,
+    /// Video/audio config to pass to agents
+    video_config: beam_protocol::VideoConfig,
 }
 
 struct DisplayPool {
@@ -114,6 +116,7 @@ impl SessionManager {
         default_height: u32,
         ice_servers_json: Option<String>,
         tls_cert_path: Option<String>,
+        video_config: beam_protocol::VideoConfig,
     ) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
@@ -122,6 +125,7 @@ impl SessionManager {
             display_pool: RwLock::new(DisplayPool::new(display_start)),
             ice_servers_json,
             tls_cert_path,
+            video_config,
         }
     }
 
@@ -380,7 +384,20 @@ impl SessionManager {
             .arg("--width")
             .arg(info.width.to_string())
             .arg("--height")
-            .arg(info.height.to_string());
+            .arg(info.height.to_string())
+            .arg("--framerate")
+            .arg(self.video_config.framerate.to_string())
+            .arg("--bitrate")
+            .arg(self.video_config.bitrate.to_string())
+            .arg("--min-bitrate")
+            .arg(self.video_config.min_bitrate.to_string())
+            .arg("--max-bitrate")
+            .arg(self.video_config.max_bitrate.to_string());
+
+        // Pass encoder preference if configured
+        if let Some(ref encoder) = self.video_config.encoder {
+            cmd.arg("--encoder").arg(encoder);
+        }
 
         // Pass agent authentication token via environment variable
         // (CLI args are visible to all users via /proc/<pid>/cmdline)
@@ -709,7 +726,14 @@ mod tests {
 
     #[tokio::test]
     async fn verify_agent_token_rejects_wrong_token() {
-        let manager = SessionManager::new(100, 1920, 1080, None, None);
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            None,
+            beam_protocol::VideoConfig::default(),
+        );
         let id = Uuid::new_v4();
         // Non-existent session should reject
         assert!(!manager.verify_agent_token(id, "fake-token").await);

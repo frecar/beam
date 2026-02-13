@@ -2,6 +2,8 @@
 
 GPU-accelerated remote desktop for Ubuntu, streaming to any browser via WebRTC.
 
+<!-- Replace with actual screenshot: ![Beam desktop session](docs/screenshot.png) -->
+
 ## Features
 
 - **GPU-accelerated encoding** — NVIDIA NVENC, AMD/Intel VA-API, or x264 software fallback
@@ -68,6 +70,7 @@ bitrate = 128       # kbps (Opus)
 
 [session]
 max_sessions = 8
+# idle_timeout = 3600  # seconds (0 = disabled, default: 3600)
 
 [ice]
 stun_urls = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]

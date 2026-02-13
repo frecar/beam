@@ -9,6 +9,7 @@ use axum::{Json, Router};
 use beam_protocol::{AuthRequest, AuthResponse, BeamConfig, IceServerInfo, SignalingMessage};
 use serde::Deserialize;
 use serde_json::json;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
@@ -97,6 +98,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/health", get(health_check))
         .route("/api/ice-config", get(ice_config))
         .route("/ws/agent/{id}", get(agent_ws_upgrade))
+        .layer(RequestBodyLimitLayer::new(65_536)) // 64KB max request body
         .with_state(Arc::clone(&state));
 
     // Serve static files (configurable path, defaults to "web/dist")
