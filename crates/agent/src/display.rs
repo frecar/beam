@@ -543,6 +543,36 @@ impl Drop for VirtualDisplay {
     }
 }
 
+/// Clamp and normalize resize dimensions for safe use with xrandr and H.264.
+/// Returns `None` if the dimensions are out of the valid range (320..=7680, 240..=4320).
+/// Otherwise clamps to `max_width`/`max_height` (0 = unlimited, default 3840x2160),
+/// enforces minimum 640x480, and rounds down to even numbers (H.264 requirement).
+pub fn clamp_resize_dimensions(
+    w: u32,
+    h: u32,
+    max_width: u32,
+    max_height: u32,
+) -> Option<(u32, u32)> {
+    // Reject clearly invalid dimensions
+    if !(320..=7680).contains(&w) || !(240..=4320).contains(&h) {
+        return None;
+    }
+
+    // Apply max bounds (0 = unlimited)
+    let cw = if max_width > 0 { w.min(max_width) } else { w };
+    let ch = if max_height > 0 { h.min(max_height) } else { h };
+
+    // Enforce minimum usable resolution
+    let cw = cw.max(640);
+    let ch = ch.max(480);
+
+    // Round down to even (H.264 encoder requirement)
+    let cw = cw & !1;
+    let ch = ch & !1;
+
+    Some((cw, ch))
+}
+
 /// Change display resolution using xrandr. Standalone function that only needs
 /// the X display string (e.g. ":10"), so it can be called from the capture thread
 /// without owning a VirtualDisplay reference.
@@ -787,5 +817,64 @@ mod tests {
         let parts: Vec<&str> = ml.split_whitespace().collect();
         assert_eq!(parts[1], "1800", "hdisp should match width");
         assert_eq!(parts[5], "1168", "vdisp should match height");
+    }
+
+    #[test]
+    fn clamp_resize_rejects_too_small() {
+        assert_eq!(clamp_resize_dimensions(100, 100, 0, 0), None);
+        assert_eq!(clamp_resize_dimensions(319, 480, 0, 0), None);
+        assert_eq!(clamp_resize_dimensions(640, 239, 0, 0), None);
+    }
+
+    #[test]
+    fn clamp_resize_rejects_too_large() {
+        assert_eq!(clamp_resize_dimensions(7681, 1080, 0, 0), None);
+        assert_eq!(clamp_resize_dimensions(1920, 4321, 0, 0), None);
+    }
+
+    #[test]
+    fn clamp_resize_enforces_max_bounds() {
+        // max_width=1920, max_height=1080
+        let (w, h) = clamp_resize_dimensions(2560, 1440, 1920, 1080).unwrap();
+        assert_eq!(w, 1920);
+        assert_eq!(h, 1080);
+    }
+
+    #[test]
+    fn clamp_resize_unlimited_max() {
+        // max=0 means unlimited
+        let (w, h) = clamp_resize_dimensions(3840, 2160, 0, 0).unwrap();
+        assert_eq!(w, 3840);
+        assert_eq!(h, 2160);
+    }
+
+    #[test]
+    fn clamp_resize_enforces_min_640x480() {
+        let (w, h) = clamp_resize_dimensions(320, 240, 0, 0).unwrap();
+        assert_eq!(w, 640);
+        assert_eq!(h, 480);
+    }
+
+    #[test]
+    fn clamp_resize_enforces_even_dimensions() {
+        // Odd dimensions should be rounded down to even
+        let (w, h) = clamp_resize_dimensions(1921, 1081, 0, 0).unwrap();
+        assert_eq!(w, 1920);
+        assert_eq!(h, 1080);
+    }
+
+    #[test]
+    fn clamp_resize_passthrough_normal() {
+        let (w, h) = clamp_resize_dimensions(1920, 1080, 3840, 2160).unwrap();
+        assert_eq!(w, 1920);
+        assert_eq!(h, 1080);
+    }
+
+    #[test]
+    fn clamp_resize_even_after_max_clamp() {
+        // If max bound produces an odd number, still round to even
+        let (w, h) = clamp_resize_dimensions(2000, 1200, 1921, 1081).unwrap();
+        assert_eq!(w, 1920);
+        assert_eq!(h, 1080);
     }
 }
