@@ -187,6 +187,9 @@ async fn main() -> Result<()> {
         jwt_secret,
         login_limiter: web::LoginRateLimiter::new(5, 60), // 5 attempts per 60 seconds
         started_at: std::time::Instant::now(),
+        metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
+        metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
+        metrics_agent_restarts: std::sync::atomic::AtomicU64::new(0),
     });
 
     // Restore sessions from previous graceful shutdown

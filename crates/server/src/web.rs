@@ -25,6 +25,10 @@ pub struct AppState {
     pub jwt_secret: String,
     pub login_limiter: LoginRateLimiter,
     pub started_at: std::time::Instant,
+    /// Metrics counters (atomic for lock-free thread safety)
+    pub metrics_logins_attempted: std::sync::atomic::AtomicU64,
+    pub metrics_logins_failed: std::sync::atomic::AtomicU64,
+    pub metrics_agent_restarts: std::sync::atomic::AtomicU64,
 }
 
 /// Simple per-key rate limiter for login attempts.
@@ -158,6 +162,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/ws", get(browser_ws_upgrade))
         .route("/api/health", get(health_check))
         .route("/api/health/detailed", get(health_check_detailed))
+        .route("/metrics", get(metrics))
         .route("/api/ice-config", get(ice_config))
         .route("/ws/agent/{id}", get(agent_ws_upgrade))
         .layer(RequestBodyLimitLayer::new(65_536)) // 64KB max request body
@@ -230,11 +235,19 @@ async fn login(
             .into_response();
     }
 
+    // Count every valid login attempt for metrics
+    state
+        .metrics_logins_attempted
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     // Rate limit: check BEFORE auth to avoid wasting PAM calls, but only
     // count failed attempts (so attackers can't lock out legitimate users
     // by sending bad requests with their username).
     if !state.login_limiter.check(&req.username) {
         tracing::warn!(username = %req.username, "Login rate limited");
+        state
+            .metrics_logins_failed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": "Too many login attempts. Please try again later." })),
@@ -255,6 +268,9 @@ async fn login(
     match pam_result {
         Err(_) => {
             tracing::warn!(username = %req.username, "PAM authentication timed out (10s)");
+            state
+                .metrics_logins_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return (
                 StatusCode::GATEWAY_TIMEOUT,
                 Json(json!({ "error": "Authentication timed out" })),
@@ -268,6 +284,9 @@ async fn login(
         }
         Ok(Ok(Err(e))) => {
             tracing::warn!(username = %req.username, "Authentication failed: {e}");
+            state
+                .metrics_logins_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "Invalid credentials" })),
@@ -541,6 +560,9 @@ async fn spawn_agent_monitor(state: Arc<AppState>, session_id: Uuid) {
                 }
 
                 let server_url = format!("wss://127.0.0.1:{}", state.config.server.port);
+                state
+                    .metrics_agent_restarts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match state
                     .session_manager
                     .respawn_agent(session_id, &server_url)
@@ -662,6 +684,9 @@ pub async fn spawn_orphan_agent_monitor(state: Arc<AppState>, session_id: Uuid, 
                 return;
             }
 
+            state
+                .metrics_agent_restarts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let server_url = format!("wss://127.0.0.1:{}", state.config.server.port);
             match state
                 .session_manager
@@ -930,6 +955,51 @@ async fn health_check_detailed(
         "sessions": sessions.len(),
     }))
     .into_response()
+}
+
+/// GET /metrics - Prometheus-compatible metrics endpoint (no auth required)
+async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let active_sessions = state.session_manager.list_sessions().await.len();
+    let uptime_secs = state.started_at.elapsed().as_secs();
+    let logins_attempted = state
+        .metrics_logins_attempted
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let logins_failed = state
+        .metrics_logins_failed
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let agent_restarts = state
+        .metrics_agent_restarts
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let body = format!(
+        "# HELP beam_active_sessions Number of active sessions\n\
+         # TYPE beam_active_sessions gauge\n\
+         beam_active_sessions {active_sessions}\n\
+         \n\
+         # HELP beam_uptime_seconds Server uptime in seconds\n\
+         # TYPE beam_uptime_seconds gauge\n\
+         beam_uptime_seconds {uptime_secs}\n\
+         \n\
+         # HELP beam_total_logins_attempted Total login attempts\n\
+         # TYPE beam_total_logins_attempted counter\n\
+         beam_total_logins_attempted {logins_attempted}\n\
+         \n\
+         # HELP beam_total_logins_failed Total failed login attempts\n\
+         # TYPE beam_total_logins_failed counter\n\
+         beam_total_logins_failed {logins_failed}\n\
+         \n\
+         # HELP beam_agent_restarts_total Total agent restart attempts\n\
+         # TYPE beam_agent_restarts_total counter\n\
+         beam_agent_restarts_total {agent_restarts}\n"
+    );
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 /// GET /api/ice-config - return ICE/TURN server configuration (requires JWT)
@@ -1204,6 +1274,9 @@ mod tests {
             jwt_secret: TEST_JWT_SECRET.to_string(),
             login_limiter: LoginRateLimiter::new(5, 60),
             started_at: std::time::Instant::now(),
+            metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
+            metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
+            metrics_agent_restarts: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1446,5 +1519,63 @@ mod tests {
             Some(b"camera=(), microphone=(), geolocation=()".as_slice()),
             "missing or wrong Permissions-Policy"
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_prometheus_format() {
+        let state = test_app_state();
+
+        // Simulate some metrics
+        state
+            .metrics_logins_attempted
+            .store(42, std::sync::atomic::Ordering::Relaxed);
+        state
+            .metrics_logins_failed
+            .store(5, std::sync::atomic::Ordering::Relaxed);
+        state
+            .metrics_agent_restarts
+            .store(2, std::sync::atomic::Ordering::Relaxed);
+
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Check Content-Type header
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .expect("missing content-type")
+            .to_str()
+            .unwrap();
+        assert_eq!(content_type, "text/plain; version=0.0.4; charset=utf-8");
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&bytes).unwrap();
+
+        // Verify Prometheus text format: each metric has HELP, TYPE, and value lines
+        assert!(body.contains("# HELP beam_active_sessions"));
+        assert!(body.contains("# TYPE beam_active_sessions gauge"));
+        assert!(body.contains("beam_active_sessions 0"));
+
+        assert!(body.contains("# HELP beam_uptime_seconds"));
+        assert!(body.contains("# TYPE beam_uptime_seconds gauge"));
+
+        assert!(body.contains("# HELP beam_total_logins_attempted"));
+        assert!(body.contains("# TYPE beam_total_logins_attempted counter"));
+        assert!(body.contains("beam_total_logins_attempted 42"));
+
+        assert!(body.contains("# HELP beam_total_logins_failed"));
+        assert!(body.contains("# TYPE beam_total_logins_failed counter"));
+        assert!(body.contains("beam_total_logins_failed 5"));
+
+        assert!(body.contains("# HELP beam_agent_restarts_total"));
+        assert!(body.contains("# TYPE beam_agent_restarts_total counter"));
+        assert!(body.contains("beam_agent_restarts_total 2"));
     }
 }
