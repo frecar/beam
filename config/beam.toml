@@ -1,0 +1,32 @@
+# Beam Remote Desktop Configuration
+
+[server]
+bind = "0.0.0.0"
+port = 8443
+# web_root = "/usr/share/beam/web/dist"  # Default: "web/dist" (relative to CWD)
+# tls_cert = "/etc/beam/cert.pem"    # Auto-generated if absent
+# tls_key = "/etc/beam/key.pem"      # Auto-generated if absent
+
+[video]
+bitrate = 5000      # kbps (initial target)
+min_bitrate = 500   # kbps (adaptive lower bound)
+max_bitrate = 20000 # kbps (adaptive upper bound)
+framerate = 60
+# encoder = "nvh264enc"  # Auto-detected if absent: nvh264enc > vah264enc > x264enc
+
+[audio]
+enabled = true
+bitrate = 128       # kbps (Opus)
+
+[session]
+default_width = 1920
+default_height = 1080
+display_start = 10
+max_sessions = 8
+
+[ice]
+stun_urls = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
+# TURN server for NAT traversal (required for enterprise networks)
+# turn_urls = ["turn:turn.example.com:3478", "turns:turn.example.com:5349"]
+# turn_username = "beam"
+# turn_credential = "your-turn-secret"

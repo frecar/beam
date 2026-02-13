@@ -1,0 +1,10 @@
+target/
+node_modules/
+dist/
+*.swp
+*.swo
+*~
+.env
+.DS_Store
+web/dist/
+web/src/*.js

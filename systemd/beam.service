@@ -1,0 +1,19 @@
+[Unit]
+Description=Beam Remote Desktop Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/beam-server --config /etc/beam/beam.toml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=beam
+
+[Install]
+WantedBy=multi-user.target

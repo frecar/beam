@@ -1,0 +1,421 @@
+use crate::capture::PooledFrame;
+use anyhow::{Context, bail};
+use gstreamer::prelude::*;
+use gstreamer::{self as gst, ClockTime, ElementFactory, FlowError};
+use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use tracing::{debug, info, warn};
+
+/// Detected encoder type, exposed so peer.rs can register the matching H.264 profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderType {
+    Nvidia,
+    VaApi,
+    Software,
+}
+
+pub struct Encoder {
+    pipeline: gst::Pipeline,
+    appsrc: AppSrc,
+    encoded_rx: std::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
+    _bus_watch: gst::bus::BusWatchGuard,
+    encoder_type: EncoderType,
+    /// Set by the GStreamer bus watch on pipeline error. The capture thread
+    /// checks this each iteration and recreates the encoder if set.
+    pipeline_error: Arc<AtomicBool>,
+}
+
+impl Encoder {
+    pub fn new(
+        width: u32,
+        height: u32,
+        framerate: u32,
+        bitrate: u32,
+    ) -> anyhow::Result<Self> {
+        let (encoder_type, encoder_name) = detect_encoder()?;
+        info!(?encoder_type, encoder_name, "Selected H.264 encoder");
+
+        let pipeline = gst::Pipeline::new();
+
+        // appsrc: raw frames from X11 capture.
+        // X11 depth-24 TrueColor captures as 4 bytes/pixel (byte 3 is padding).
+        // NVIDIA: use BGRA — nvh264enc accepts it directly and does GPU color
+        //   conversion. Using BGRx with videoconvert produces valid H.264 but
+        //   Chrome refuses to decode (black screen).
+        // Other encoders: use BGRx with videoconvert for correct conversion.
+        let format = match encoder_type {
+            EncoderType::Nvidia => "BGRA",
+            _ => "BGRx",
+        };
+        let appsrc_elem = ElementFactory::make("appsrc")
+            .name("src")
+            .build()
+            .context("Failed to create appsrc")?;
+
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("format", format)
+            .field("width", width as i32)
+            .field("height", height as i32)
+            .field("framerate", gst::Fraction::new(framerate as i32, 1))
+            .build();
+
+        let appsrc = appsrc_elem
+            .dynamic_cast::<AppSrc>()
+            .map_err(|_| anyhow::anyhow!("Failed to cast to AppSrc"))?;
+        appsrc.set_caps(Some(&caps));
+        appsrc.set_is_live(true);
+        appsrc.set_format(gst::Format::Time);
+        // Minimize internal buffering in appsrc
+        appsrc.set_property("min-latency", 0i64);
+        appsrc.set_property("max-latency", 0i64);
+
+        // encoder element
+        let encoder = build_encoder_element(encoder_type, &encoder_name, bitrate)?;
+
+        // capsfilter: force constrained-baseline profile to match webrtc-rs SDP
+        let profile_caps = gst::Caps::builder("video/x-h264")
+            .field("profile", "constrained-baseline")
+            .build();
+        let capsfilter = ElementFactory::make("capsfilter")
+            .property("caps", &profile_caps)
+            .build()
+            .context("Failed to create profile capsfilter")?;
+
+        // h264parse: inline SPS/PPS with every keyframe
+        let parser = ElementFactory::make("h264parse")
+            .property_from_str("config-interval", "-1")
+            .build()
+            .context("Failed to create h264parse")?;
+
+        // Force h264parse to output Annex B byte-stream with complete access units.
+        // webrtc-rs TrackLocalStaticSample expects Annex B format (start codes).
+        let parse_caps = gst::Caps::builder("video/x-h264")
+            .field("stream-format", "byte-stream")
+            .field("alignment", "au")
+            .build();
+        let parse_capsfilter = ElementFactory::make("capsfilter")
+            .name("parse-caps")
+            .property("caps", &parse_caps)
+            .build()
+            .context("Failed to create h264parse output capsfilter")?;
+
+        // appsink: pull encoded H.264 NAL units.
+        // max-buffers=1 + drop=true: absolute minimum buffering for lowest latency.
+        // Combined with channel capacity 2 in main.rs, total pipeline depth is
+        // at most 3 frames (~25ms at 120fps).
+        // async=false: don't wait for clock sync on state changes.
+        let appsink_elem = ElementFactory::make("appsink")
+            .name("sink")
+            .property("sync", false)
+            .property("async", false)
+            .property("emit-signals", true)
+            .property("max-buffers", 1u32)
+            .property("drop", true)
+            .build()
+            .context("Failed to create appsink")?;
+
+        let appsink = appsink_elem
+            .dynamic_cast::<AppSink>()
+            .map_err(|_| anyhow::anyhow!("Failed to cast to AppSink"))?;
+
+        // Channel to collect encoded frames
+        let (encoded_tx, encoded_rx) = mpsc::channel::<Vec<u8>>();
+
+        appsink.set_callbacks(
+            AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| FlowError::Eos)?;
+                    let buffer = sample.buffer().ok_or(FlowError::Error)?;
+                    let map = buffer.map_readable().map_err(|_| FlowError::Error)?;
+                    let _ = encoded_tx.send(map.to_vec());
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+
+        // Build pipeline based on encoder type.
+        // h264parse with config-interval=-1 inlines SPS/PPS with every IDR frame
+        // (required for Chrome's decoder to initialize).
+        //
+        // NVIDIA: appsrc(BGRA) → nvh264enc → h264parse → appsink
+        //   No videoconvert: nvh264enc accepts BGRA directly and does GPU color
+        //   conversion. No profile capsfilter: nvh264enc outputs main profile.
+        // Other:  appsrc(BGRx) → videoconvert → encoder → capsfilter → h264parse → appsink
+        match encoder_type {
+            EncoderType::Nvidia => {
+                pipeline
+                    .add_many([
+                        appsrc.upcast_ref(),
+                        &encoder,
+                        &parser,
+                        &parse_capsfilter,
+                        appsink.upcast_ref(),
+                    ])
+                    .context("Failed to add elements to NVIDIA pipeline")?;
+                gst::Element::link_many([
+                    appsrc.upcast_ref(),
+                    &encoder,
+                    &parser,
+                    &parse_capsfilter,
+                    appsink.upcast_ref(),
+                ])
+                .context("Failed to link NVIDIA pipeline")?;
+                info!("NVIDIA pipeline: appsrc(BGRA) → nvh264enc → h264parse → appsink");
+            }
+            _ => {
+                let convert = ElementFactory::make("videoconvert")
+                    .build()
+                    .context("Failed to create videoconvert")?;
+                pipeline
+                    .add_many([
+                        appsrc.upcast_ref(),
+                        &convert,
+                        &encoder,
+                        &capsfilter,
+                        &parser,
+                        &parse_capsfilter,
+                        appsink.upcast_ref(),
+                    ])
+                    .context("Failed to add elements to pipeline")?;
+                gst::Element::link_many([
+                    appsrc.upcast_ref(),
+                    &convert,
+                    &encoder,
+                    &capsfilter,
+                    &parser,
+                    &parse_capsfilter,
+                    appsink.upcast_ref(),
+                ])
+                .context("Failed to link pipeline elements")?;
+                info!("Pipeline: appsrc(BGRx) → videoconvert → encoder → h264parse → appsink");
+            }
+        }
+
+        // Set up bus watch for error monitoring.
+        // The guard must be kept alive or the watch is removed.
+        let pipeline_error = Arc::new(AtomicBool::new(false));
+        let pipeline_error_flag = Arc::clone(&pipeline_error);
+        let bus = pipeline.bus().context("Failed to get pipeline bus")?;
+        let _bus_watch = bus.add_watch(move |_, msg| {
+            use gst::MessageView;
+            match msg.view() {
+                MessageView::Error(err) => {
+                    tracing::error!(
+                        source = ?err.src().map(|s| s.name().to_string()),
+                        error = %err.error(),
+                        debug = ?err.debug(),
+                        "GStreamer pipeline error"
+                    );
+                    pipeline_error_flag.store(true, Ordering::Relaxed);
+                }
+                MessageView::Warning(warn) => {
+                    tracing::warn!(
+                        source = ?warn.src().map(|s| s.name().to_string()),
+                        warning = %warn.error(),
+                        "GStreamer pipeline warning"
+                    );
+                }
+                MessageView::StateChanged(state) => {
+                    if state.src().map(|s| s.name().as_str() == "pipeline0").unwrap_or(false) {
+                        tracing::debug!(
+                            old = ?state.old(),
+                            new = ?state.current(),
+                            "Pipeline state changed"
+                        );
+                    }
+                }
+                _ => {}
+            }
+            gst::glib::ControlFlow::Continue
+        })
+        .context("Failed to add bus watch")?;
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .context("Failed to set pipeline to Playing")?;
+
+        info!(width, height, framerate, bitrate, "Encoder pipeline started");
+
+        Ok(Self {
+            pipeline,
+            appsrc,
+            encoded_rx: std::sync::Mutex::new(encoded_rx),
+            _bus_watch,
+            encoder_type,
+            pipeline_error,
+        })
+    }
+
+    /// Push a raw frame into the encoder. Takes ownership of a pooled frame
+    /// buffer. When GStreamer finishes encoding, the PooledFrame is dropped
+    /// and the backing memory is returned to the capture pool for reuse.
+    pub fn encode_frame(&self, frame: PooledFrame, pts: u64) -> anyhow::Result<()> {
+        let mut buffer = gst::Buffer::from_slice(frame);
+        {
+            let buffer_mut = buffer
+                .get_mut()
+                .expect("freshly-created GstBuffer should have unique ownership");
+            buffer_mut.set_pts(ClockTime::from_nseconds(pts));
+        }
+        self.appsrc
+            .push_buffer(buffer)
+            .context("Failed to push buffer to appsrc")?;
+        Ok(())
+    }
+
+    /// The encoder type detected at construction (NVIDIA, VA-API, or software).
+    /// Used to register matching H.264 profiles in WebRTC SDP.
+    pub fn encoder_type(&self) -> EncoderType {
+        self.encoder_type
+    }
+
+    /// Dynamically adjust the encoder bitrate (kbps).
+    /// Works at runtime on VA-API and software encoders.
+    /// NOT safe for NVIDIA (use set_qp instead — runtime bitrate changes corrupt colors).
+    pub fn set_bitrate(&self, bitrate_kbps: u32) {
+        // Find the encoder element in the pipeline
+        let encoder_names = ["vah264enc0", "x264enc0"];
+        for name in &encoder_names {
+            if let Some(elem) = self.pipeline.by_name(name) {
+                elem.set_property("bitrate", bitrate_kbps);
+                debug!(bitrate_kbps, encoder = name, "Bitrate updated");
+                return;
+            }
+        }
+        // Fallback: iterate children to find the encoder
+        for elem in self.pipeline.iterate_elements().into_iter().flatten() {
+            let factory_name = elem
+                .factory()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default();
+            if factory_name.contains("264enc") {
+                elem.set_property("bitrate", bitrate_kbps);
+                debug!(bitrate_kbps, factory = factory_name, "Bitrate updated");
+                return;
+            }
+        }
+        warn!(bitrate_kbps, "No encoder element found in pipeline, bitrate unchanged");
+    }
+
+    /// Returns true if the GStreamer pipeline has encountered an error.
+    /// The capture thread should recreate the encoder when this returns true.
+    pub fn has_error(&self) -> bool {
+        self.pipeline_error.load(Ordering::Relaxed)
+    }
+
+    /// Force the encoder to emit an IDR keyframe on the next frame.
+    /// Call this after WebRTC SDP negotiation so the browser's decoder
+    /// can start decoding immediately.
+    pub fn force_keyframe(&self) {
+        let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+            .all_headers(true)
+            .build();
+        self.appsrc.send_event(event);
+        info!("Forced IDR keyframe from encoder");
+    }
+
+    pub fn pull_encoded(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        let rx = self.encoded_rx.lock().unwrap_or_else(|e| e.into_inner());
+        match rx.try_recv() {
+            Ok(data) => Ok(Some(data)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                bail!("Encoder pipeline disconnected")
+            }
+        }
+    }
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        let _ = self.appsrc.end_of_stream();
+        let _ = self.pipeline.set_state(gst::State::Null);
+        debug!("Encoder pipeline stopped");
+    }
+}
+
+fn detect_encoder() -> anyhow::Result<(EncoderType, String)> {
+    let candidates = [
+        (EncoderType::Nvidia, "nvh264enc"),
+        (EncoderType::VaApi, "vah264enc"),
+        (EncoderType::Software, "x264enc"),
+    ];
+
+    for (enc_type, name) in &candidates {
+        if ElementFactory::find(name).is_some() {
+            info!(encoder = name, "Found encoder");
+            return Ok((*enc_type, name.to_string()));
+        }
+        debug!(encoder = name, "Encoder not available, trying next");
+    }
+
+    bail!("No H.264 encoder found. Install gstreamer plugins (good/bad/ugly).")
+}
+
+fn build_encoder_element(
+    encoder_type: EncoderType,
+    name: &str,
+    bitrate: u32,
+) -> anyhow::Result<gst::Element> {
+    let elem = match encoder_type {
+        EncoderType::Nvidia => ElementFactory::make(name)
+            .property_from_str("preset", "low-latency")
+            .property_from_str("rc-mode", "vbr")
+            .property("bitrate", bitrate)
+            .property("gop-size", i32::MAX)
+            .property("zerolatency", true)
+            .property("rc-lookahead", 0u32)
+            .property("bframes", 0u32)
+            .property("strict-gop", true)
+            .property("qp-max-i", 20i32)
+            .property("qp-max-p", 23i32)
+            .property("vbv-buffer-size", 200_000u32)
+            .build()
+            .context("Failed to create nvh264enc")?,
+        EncoderType::VaApi => ElementFactory::make(name)
+            .property_from_str("rate-control", "cbr")
+            .property("bitrate", bitrate)
+            .property("target-usage", 7u32)
+            .property("key-int-max", 30u32)
+            .build()
+            .context("Failed to create vah264enc")?,
+        EncoderType::Software => ElementFactory::make(name)
+            .property_from_str("tune", "zerolatency")
+            .property_from_str("speed-preset", "ultrafast")
+            .property("bitrate", bitrate)
+            .property("key-int-max", 30u32)
+            .property("bframes", 0u32)
+            .build()
+            .context("Failed to create x264enc")?,
+    };
+
+    Ok(elem)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify appsrc caps do NOT contain colorimetry.
+    /// Adding colorimetry (e.g., bt709) injects VUI colour parameters into the
+    /// H.264 SPS, which Chrome's WebRTC decoder rejects (0 FPS, PLI flood).
+    #[test]
+    fn appsrc_caps_must_not_contain_colorimetry() {
+        gst::init().unwrap();
+        for format in &["BGRA", "BGRx"] {
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("format", *format)
+                .field("width", 1920i32)
+                .field("height", 1080i32)
+                .field("framerate", gst::Fraction::new(60, 1))
+                .build();
+            let caps_str = caps.to_string();
+            assert!(
+                !caps_str.contains("colorimetry"),
+                "appsrc caps must NOT specify colorimetry (causes Chrome WebRTC decode failure). \
+                 Format={format}, caps={caps_str}"
+            );
+        }
+    }
+}

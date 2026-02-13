@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Beam</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Mono", "Fira Code",
+          "Fira Mono", "Roboto Mono", monospace;
+        background: #1a1a2e;
+        color: #e0e0e0;
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      /* Login View */
+      #login-view {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+      }
+
+      .login-card {
+        width: 360px;
+        padding: 40px;
+        border: 1px solid rgba(74, 158, 255, 0.15);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.03);
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+      }
+
+      .login-card h1 {
+        font-size: 20px;
+        font-weight: 500;
+        margin-bottom: 8px;
+        color: #e0e0e0;
+        letter-spacing: 0.5px;
+      }
+
+      .login-card p {
+        font-size: 13px;
+        color: #888;
+        margin-bottom: 28px;
+      }
+
+      .form-group {
+        margin-bottom: 16px;
+      }
+
+      .form-group label {
+        display: block;
+        font-size: 12px;
+        color: #888;
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+      }
+
+      .form-group input {
+        width: 100%;
+        padding: 10px 12px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+        color: #e0e0e0;
+        font-size: 14px;
+        font-family: inherit;
+        outline: none;
+        transition: border-color 0.2s;
+      }
+
+      .form-group input:focus {
+        border-color: #4a9eff;
+        box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
+      }
+
+      .form-group input::placeholder {
+        color: #555;
+      }
+
+      button#connect-btn {
+        width: 100%;
+        padding: 10px;
+        margin-top: 8px;
+        background: #4a9eff;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        font-size: 14px;
+        font-family: inherit;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background 0.2s;
+        letter-spacing: 0.3px;
+      }
+
+      button#connect-btn:hover {
+        background: #3a8eef;
+      }
+
+      button#connect-btn:focus-visible {
+        outline: 2px solid #4a9eff;
+        outline-offset: 2px;
+      }
+
+      button#connect-btn:disabled {
+        background: #333;
+        color: #666;
+        cursor: not-allowed;
+      }
+
+      .login-error {
+        margin-top: 12px;
+        font-size: 13px;
+        color: #ff6b6b;
+        display: none;
+      }
+
+      .login-hints {
+        margin-top: 20px;
+        padding-top: 16px;
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
+        font-size: 11px;
+        color: #777;
+        line-height: 1.8;
+      }
+
+      .login-hints kbd {
+        display: inline-block;
+        padding: 1px 5px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 3px;
+        font-size: 11px;
+        font-family: inherit;
+        color: #999;
+      }
+
+      /* Loading state (replaces form content during connection) */
+      .login-loading {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+        padding: 40px 0;
+      }
+
+      .loading-spinner {
+        width: 32px;
+        height: 32px;
+        border: 2px solid rgba(74, 158, 255, 0.15);
+        border-top-color: #4a9eff;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+
+      .loading-spinner.error {
+        animation: none;
+        border-color: rgba(255, 107, 107, 0.3);
+        border-top-color: #ff6b6b;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
+      .loading-status {
+        font-size: 13px;
+        color: #888;
+        text-align: center;
+        transition: opacity 0.15s ease;
+      }
+
+      .loading-status.error {
+        color: #ff6b6b;
+      }
+
+      .loading-cancel {
+        margin-top: 4px;
+        padding: 6px 16px;
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+        color: #666;
+        font-size: 12px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: color 0.15s, border-color 0.15s;
+      }
+
+      .loading-cancel:hover {
+        color: #999;
+        border-color: rgba(255, 255, 255, 0.2);
+      }
+
+      .loading-cancel:focus-visible {
+        outline: 2px solid #4a9eff;
+        outline-offset: 2px;
+      }
+
+      /* Desktop View - leave room for the 28px status bar at the bottom */
+      #desktop-view {
+        display: none;
+        width: 100vw;
+        height: calc(100vh - 28px);
+        cursor: default;
+      }
+
+      /* In fullscreen, fill the entire screen (no status bar) */
+      #desktop-view:fullscreen {
+        width: 100%;
+        height: 100%;
+        cursor: default;
+      }
+
+      #remote-video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: #000;
+        cursor: default;
+      }
+
+      /* Notifications */
+      #notifications {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        z-index: 300;
+        pointer-events: none;
+      }
+
+      .notification {
+        padding: 10px 16px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-family: inherit;
+        backdrop-filter: blur(12px);
+        opacity: 0;
+        transform: translateX(20px);
+        transition: opacity 0.3s ease, transform 0.3s ease;
+        max-width: 320px;
+      }
+
+      .notification.visible {
+        opacity: 1;
+        transform: translateX(0);
+      }
+
+      .notification-info {
+        background: rgba(74, 158, 255, 0.15);
+        border: 1px solid rgba(74, 158, 255, 0.25);
+        color: #8ec5ff;
+      }
+
+      .notification-success {
+        background: rgba(74, 222, 128, 0.15);
+        border: 1px solid rgba(74, 222, 128, 0.25);
+        color: #4ade80;
+      }
+
+      .notification-error {
+        background: rgba(255, 107, 107, 0.15);
+        border: 1px solid rgba(255, 107, 107, 0.25);
+        color: #ff6b6b;
+      }
+
+      /* Status Bar - merged bar with stats, controls, and connection status */
+      #status-bar {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 28px;
+        background: rgba(15, 15, 30, 0.92);
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
+        display: none;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 10px;
+        font-size: 12px;
+        color: #888;
+        z-index: 200;
+        backdrop-filter: blur(12px);
+        user-select: none;
+        transition: transform 0.2s ease;
+      }
+
+      #status-bar.visible {
+        display: flex;
+      }
+
+      .status-left {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .status-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .status-stats {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .status-stat {
+        color: #aaa;
+        min-width: 48px;
+      }
+
+      .status-separator {
+        width: 1px;
+        height: 14px;
+        background: rgba(255, 255, 255, 0.1);
+        margin: 0 4px;
+      }
+
+      .status-btn {
+        padding: 2px 8px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 3px;
+        color: #ccc;
+        font-size: 11px;
+        font-family: inherit;
+        cursor: pointer;
+        line-height: 1;
+        transition: background 0.15s, border-color 0.15s;
+      }
+
+      .status-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+        border-color: rgba(255, 255, 255, 0.2);
+      }
+
+      .status-select {
+        padding: 1px 4px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 3px;
+        color: #ccc;
+        font-size: 11px;
+        font-family: inherit;
+        cursor: pointer;
+        line-height: 1;
+        outline: none;
+        transition: border-color 0.15s;
+      }
+
+      .status-select:hover,
+      .status-select:focus {
+        border-color: rgba(255, 255, 255, 0.2);
+      }
+
+      .status-select option {
+        background: #1a1a2e;
+        color: #e0e0e0;
+      }
+
+      .status-btn-disconnect {
+        color: #ff6b6b;
+        border-color: rgba(255, 107, 107, 0.2);
+      }
+
+      .status-btn-disconnect:hover {
+        background: rgba(255, 107, 107, 0.1);
+        border-color: rgba(255, 107, 107, 0.4);
+      }
+
+      .status-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #666;
+        flex-shrink: 0;
+      }
+
+      .status-dot.connected { background: #4ade80; }
+      .status-dot.connecting { background: #facc15; animation: pulse 1s ease-in-out infinite; }
+      .status-dot.error { background: #ff6b6b; }
+
+      /* Fullscreen: auto-hide bar, show on bottom-edge hover (JS-driven) */
+      #status-bar.fs-hidden {
+        transform: translateY(100%);
+      }
+
+      #status-bar.fs-peek {
+        transform: translateY(0);
+      }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+
+      /* Performance overlay (F9 toggle) — visible in fullscreen */
+      #perf-overlay {
+        display: none;
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        background: rgba(0, 0, 0, 0.7);
+        color: #fff;
+        font: 12px/1.6 monospace;
+        padding: 6px 10px;
+        border-radius: 4px;
+        z-index: 10000;
+        pointer-events: none;
+        user-select: none;
+      }
+      #perf-overlay.visible { display: block; }
+      #perf-overlay .val-good { color: #4ade80; }
+      #perf-overlay .val-warn { color: #facc15; }
+      #perf-overlay .val-bad { color: #ff6b6b; }
+
+      /* Reconnect Overlay — shown on top of frozen desktop */
+      #reconnect-overlay {
+        display: none;
+        position: absolute;
+        inset: 0;
+        z-index: 500;
+        background: rgba(10, 10, 20, 0.6);
+        backdrop-filter: blur(4px);
+        align-items: center;
+        justify-content: center;
+        opacity: 0;
+        transition: opacity 0.2s ease-out;
+      }
+
+      #reconnect-overlay.visible {
+        display: flex;
+        opacity: 1;
+      }
+
+      .reconnect-card {
+        width: 300px;
+        padding: 32px;
+        border: 1px solid rgba(255, 107, 107, 0.2);
+        border-radius: 8px;
+        background: rgba(26, 26, 46, 0.95);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        text-align: center;
+        transform: scale(0.96);
+        transition: transform 0.2s ease-out;
+      }
+
+      #reconnect-overlay.visible .reconnect-card {
+        transform: scale(1);
+      }
+
+      .reconnect-icon {
+        color: #ff6b6b;
+        margin-bottom: 16px;
+      }
+
+      .reconnect-card h2 {
+        font-size: 16px;
+        font-weight: 500;
+        color: #e0e0e0;
+        margin-bottom: 6px;
+        letter-spacing: 0.3px;
+      }
+
+      .reconnect-card p {
+        font-size: 13px;
+        color: #888;
+        margin-bottom: 24px;
+        line-height: 1.4;
+      }
+
+      .reconnect-btn-primary {
+        display: block;
+        width: 100%;
+        padding: 10px;
+        background: #4a9eff;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        font-size: 14px;
+        font-family: inherit;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background 0.15s;
+        letter-spacing: 0.3px;
+      }
+
+      .reconnect-btn-primary:hover {
+        background: #3a8eef;
+      }
+
+      .reconnect-btn-primary:focus-visible {
+        outline: 2px solid #4a9eff;
+        outline-offset: 2px;
+      }
+
+      .reconnect-btn-primary:disabled {
+        background: #333;
+        color: #666;
+        cursor: not-allowed;
+      }
+
+      .reconnect-btn-secondary {
+        display: block;
+        width: 100%;
+        margin-top: 8px;
+        padding: 8px;
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+        color: #666;
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: color 0.15s, border-color 0.15s;
+      }
+
+      .reconnect-btn-secondary:hover {
+        color: #999;
+        border-color: rgba(255, 255, 255, 0.2);
+      }
+
+      .reconnect-btn-secondary:focus-visible {
+        outline: 2px solid #4a9eff;
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Login View -->
+    <div id="login-view">
+      <div class="login-card">
+        <div id="login-form-content">
+          <h1>Beam</h1>
+          <p>Sign in with your Linux account</p>
+          <form id="login-form">
+            <div class="form-group">
+              <label for="username">Username</label>
+              <input
+                type="text"
+                id="username"
+                name="username"
+                placeholder=""
+                autocomplete="username"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="password">Password</label>
+              <input
+                type="password"
+                id="password"
+                name="password"
+                placeholder=""
+                autocomplete="current-password"
+                required
+              />
+            </div>
+            <button type="submit" id="connect-btn">Connect</button>
+          </form>
+          <div class="login-error" id="login-error"></div>
+          <div class="login-hints">
+            <kbd>F11</kbd> Toggle fullscreen &middot;
+            <kbd>Esc</kbd> Exit fullscreen &middot;
+            <kbd>F9</kbd> Performance overlay
+          </div>
+        </div>
+        <div id="login-loading" class="login-loading" style="display: none;">
+          <div class="loading-spinner" id="loading-spinner"></div>
+          <p class="loading-status" id="loading-status">Authenticating...</p>
+          <button type="button" class="loading-cancel" id="loading-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Desktop View -->
+    <div id="desktop-view">
+      <video id="remote-video" autoplay playsinline></video>
+
+      <!-- Reconnect Overlay (shown when reconnect attempts exhausted) -->
+      <div id="reconnect-overlay" role="alertdialog" aria-labelledby="reconnect-title" aria-describedby="reconnect-desc">
+        <div class="reconnect-card">
+          <div class="reconnect-icon" aria-hidden="true">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="1" y1="1" x2="23" y2="23"></line>
+              <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"></path>
+              <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"></path>
+              <path d="M10.71 5.05A16 16 0 0 1 22.56 9"></path>
+              <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"></path>
+              <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+              <line x1="12" y1="20" x2="12.01" y2="20"></line>
+            </svg>
+          </div>
+          <h2 id="reconnect-title">Connection lost</h2>
+          <p id="reconnect-desc">Your session is still running on the server.</p>
+          <button type="button" id="reconnect-btn" class="reconnect-btn-primary">Reconnect</button>
+          <button type="button" id="reconnect-disconnect-btn" class="reconnect-btn-secondary">Disconnect</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Performance Overlay (F9 toggle) -->
+    <div id="perf-overlay"></div>
+
+    <!-- Notification Container -->
+    <div id="notifications"></div>
+
+    <!-- Status Bar -->
+    <div id="status-bar">
+      <div class="status-left">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="status-text">Disconnected</span>
+      </div>
+      <div class="status-right">
+        <div class="status-stats">
+          <span class="status-stat" id="stat-latency">-- ms</span>
+          <span class="status-stat" id="stat-fps">-- FPS</span>
+          <span class="status-stat" id="stat-quality">--</span>
+        </div>
+        <div class="status-separator"></div>
+        <select class="status-select" id="layout-select" title="Keyboard layout">
+          <option value="us">US</option>
+          <option value="gb">GB</option>
+          <option value="no">NO</option>
+          <option value="se">SE</option>
+          <option value="dk">DK</option>
+          <option value="de">DE</option>
+          <option value="fr">FR</option>
+          <option value="es">ES</option>
+          <option value="fi">FI</option>
+          <option value="it">IT</option>
+          <option value="pt">PT</option>
+          <option value="nl">NL</option>
+          <option value="pl">PL</option>
+          <option value="ru">RU</option>
+          <option value="jp">JP</option>
+        </select>
+        <div class="status-separator"></div>
+        <select class="status-select" id="quality-select" title="Quality mode">
+          <option value="high">High</option>
+          <option value="low">Low</option>
+        </select>
+        <div class="status-separator"></div>
+        <button class="status-btn" id="btn-fullscreen">Fullscreen</button>
+        <button class="status-btn status-btn-disconnect" id="btn-disconnect">Disconnect</button>
+        <button class="status-btn status-btn-disconnect" id="btn-end-session">End Session</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

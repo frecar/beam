@@ -1,0 +1,522 @@
+import type { InputEvent } from "./connection";
+import { keyCodeToEvdev } from "./keymap";
+import { isBrowserShortcut, isMac } from "./platform";
+import { roundToEven, isSignificantResize } from "./resize";
+
+// Re-export for external use (tests, etc.)
+export { roundToEven, isSignificantResize } from "./resize";
+
+/** Evdev code for Left Ctrl, used when remapping Mac Cmd shortcuts */
+const EVDEV_LEFT_CTRL = 29;
+
+/**
+ * Keyboard layout signatures: map physical key codes to the characters
+ * they produce on each layout. Used with the Keyboard Layout Map API
+ * (Chrome/Edge) to detect the actual OS keyboard layout.
+ */
+const LAYOUT_SIGNATURES: Record<string, Record<string, string>> = {
+  no:  { BracketLeft: "\u00e5", Semicolon: "\u00f8", Quote: "\u00e6" },  // å ø æ
+  se:  { BracketLeft: "\u00e5", Semicolon: "\u00f6", Quote: "\u00e4" },  // å ö ä
+  dk:  { BracketLeft: "\u00e5", Semicolon: "\u00e6", Quote: "\u00f8" },  // å æ ø
+  de:  { BracketLeft: "\u00fc", Semicolon: "\u00f6", Quote: "\u00e4", KeyZ: "y" },
+  fr:  { KeyQ: "a", KeyW: "z", KeyA: "q", Semicolon: "m" },
+  es:  { Quote: "\u00b4", BracketLeft: "`" },
+  fi:  { BracketLeft: "\u00e5", Semicolon: "\u00f6", Quote: "\u00e4", Backslash: "'" },
+  it:  { BracketLeft: "\u00e8", Quote: "\u00e0" },
+  pt:  { BracketLeft: "+", Quote: "\u00ba" },
+  gb:  { BracketLeft: "[", Semicolon: ";", Quote: "'", Backquote: "`" },
+  us:  { BracketLeft: "[", Semicolon: ";", Quote: "'", Backquote: "`" },
+};
+
+/**
+ * Detect keyboard layout using the Keyboard Layout Map API (Chrome/Edge).
+ * Probes physical key mappings to identify the layout with high confidence.
+ * Returns the XKB layout name or empty string if detection fails.
+ */
+async function detectKeyboardLayout(): Promise<string> {
+  // Try Keyboard Layout Map API (Chrome/Edge only)
+  if ("keyboard" in navigator && typeof (navigator as any).keyboard?.getLayoutMap === "function") {
+    try {
+      const layoutMap: Map<string, string> = await (navigator as any).keyboard.getLayoutMap();
+
+      let bestLayout = "";
+      let bestScore = 0;
+
+      for (const [layout, signature] of Object.entries(LAYOUT_SIGNATURES)) {
+        let matches = 0;
+        let total = 0;
+        for (const [key, expected] of Object.entries(signature)) {
+          const actual = layoutMap.get(key);
+          if (actual !== undefined) {
+            total++;
+            if (actual === expected) matches++;
+          }
+        }
+        const score = total > 0 ? matches / total : 0;
+        if (score > bestScore) {
+          bestScore = score;
+          bestLayout = layout;
+        }
+      }
+
+      if (bestScore >= 0.6) {
+        console.log(`Keyboard layout detected via Layout Map API: ${bestLayout} (score: ${bestScore})`);
+        return bestLayout;
+      }
+    } catch {
+      // API not available or permission denied
+    }
+  }
+
+  // Fallback: check navigator.languages for non-English locale hints
+  const LANG_MAP: Record<string, string> = {
+    nb: "no", nn: "no", no: "no", sv: "se", da: "dk", de: "de",
+    fr: "fr", es: "es", fi: "fi", pt: "pt", it: "it", nl: "nl",
+    pl: "pl", ru: "ru", ja: "jp", ko: "kr", zh: "cn", cs: "cz",
+    hu: "hu", ro: "ro", tr: "tr", uk: "ua", el: "gr", he: "il",
+    ar: "ara", th: "th", is: "is",
+  };
+  for (const lang of navigator.languages || []) {
+    const prefix = lang.toLowerCase().split("-")[0];
+    if (prefix !== "en" && LANG_MAP[prefix]) {
+      console.log(`Keyboard layout guessed from navigator.languages: ${LANG_MAP[prefix]} (${lang})`);
+      return LANG_MAP[prefix];
+    }
+  }
+
+  return "";
+}
+
+/**
+ * Captures keyboard, mouse, and wheel events from the browser
+ * and forwards them as compact InputEvents to the remote desktop.
+ *
+ * Mac keyboard remapping: Cmd is fully remapped to Ctrl. The Meta/Super
+ * key is never sent to the remote (it would trigger WM actions).
+ * Keys pressed while Cmd is held use complete press+release sequences
+ * because Mac Chrome often skips keyup for Cmd combo keys.
+ */
+export class InputHandler {
+  private target: HTMLElement;
+  private videoElement: HTMLVideoElement | null;
+  private sendInput: (event: InputEvent) => void;
+  private active = false;
+  private pointerLocked = false;
+
+  // Resize gating: Chrome's WebRTC H.264 decoder can't handle mid-stream
+  // resolution changes. We suppress resize events until the first video
+  // frame is decoded, and trigger a WebRTC reconnect for large resizes.
+  private firstFrameReceived = false;
+  private lastSentW = 0;
+  private lastSentH = 0;
+  private resizeNeededCallback: (() => void) | null = null;
+
+  // Bound listeners (stored so we can remove them)
+  private onKeyDown = this.handleKeyDown.bind(this);
+  private onKeyUp = this.handleKeyUp.bind(this);
+  private onMouseMove = this.handleMouseMove.bind(this);
+  private onMouseDown = this.handleMouseDown.bind(this);
+  private onMouseUp = this.handleMouseUp.bind(this);
+  private onWheel = this.handleWheel.bind(this);
+  private onContextMenu = this.handleContextMenu.bind(this);
+  private onFullscreenChange = this.handleFullscreenChange.bind(this);
+  private onPointerLockChange = this.handlePointerLockChange.bind(this);
+
+  private resizeObserver: ResizeObserver | null = null;
+  private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(target: HTMLElement, sendInput: (event: InputEvent) => void) {
+    this.target = target;
+    this.videoElement = target.querySelector("video");
+    this.sendInput = sendInput;
+  }
+
+  /**
+   * Send the current container dimensions as a resize immediately.
+   * Called on every DataChannel open (including soft reconnects) to ensure
+   * the agent has the correct resolution from the start. This breaks the
+   * chicken-and-egg deadlock where the browser can't decode frames at the
+   * wrong resolution, so requestVideoFrameCallback never fires, so no
+   * resize is ever sent.
+   */
+  sendCurrentDimensions(): void {
+    const rect = this.target.getBoundingClientRect();
+    const w = roundToEven(rect.width);
+    const h = roundToEven(rect.height);
+    this.lastSentW = w;
+    this.lastSentH = h;
+    if (w > 0 && h > 0) {
+      this.sendInput({ t: "r", w, h });
+    }
+  }
+
+  /**
+   * Notify that the first video frame has been decoded by Chrome.
+   * Enables future resize events from ResizeObserver and fullscreen changes.
+   */
+  notifyFirstFrame(): void {
+    this.firstFrameReceived = true;
+  }
+
+  /** Register callback invoked when a significant resize requires WebRTC reconnect */
+  onResizeNeeded(callback: () => void): void {
+    this.resizeNeededCallback = callback;
+  }
+
+  /** Send keyboard layout to remote agent. Uses saved preference, auto-detection, or fallback. */
+  async sendLayout(): Promise<void> {
+    const saved = localStorage.getItem("beam_keyboard_layout");
+    let layout: string;
+    if (saved) {
+      layout = saved;
+      console.log(`Using saved keyboard layout: ${layout}`);
+    } else {
+      layout = await detectKeyboardLayout();
+      if (!layout) {
+        layout = "us";
+        console.log("Could not detect keyboard layout, defaulting to US");
+      }
+    }
+    this.sendInput({ t: "l", layout });
+    // Update the selector if it exists
+    const select = document.getElementById("layout-select") as HTMLSelectElement | null;
+    if (select && select.value !== layout) {
+      select.value = layout;
+    }
+  }
+
+  /** Send a specific keyboard layout to remote agent */
+  sendSpecificLayout(layout: string): void {
+    this.sendInput({ t: "l", layout });
+  }
+
+  enable(): void {
+    if (this.active) return;
+    this.active = true;
+
+    document.addEventListener("keydown", this.onKeyDown);
+    document.addEventListener("keyup", this.onKeyUp);
+    this.target.addEventListener("mousemove", this.onMouseMove);
+    this.target.addEventListener("mousedown", this.onMouseDown);
+    this.target.addEventListener("mouseup", this.onMouseUp);
+    this.target.addEventListener("wheel", this.onWheel, { passive: false });
+    this.target.addEventListener("contextmenu", this.onContextMenu);
+    document.addEventListener("fullscreenchange", this.onFullscreenChange);
+    document.addEventListener("pointerlockchange", this.onPointerLockChange);
+
+    // Watch for container size changes and send resize events (debounced).
+    this.resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = Math.round(entry.contentRect.width);
+        const h = Math.round(entry.contentRect.height);
+        if (w > 0 && h > 0) {
+          this.debouncedResize(w, h);
+        }
+      }
+    });
+    this.resizeObserver.observe(this.target);
+  }
+
+  disable(): void {
+    if (!this.active) return;
+    this.active = false;
+
+    document.removeEventListener("keydown", this.onKeyDown);
+    document.removeEventListener("keyup", this.onKeyUp);
+    this.target.removeEventListener("mousemove", this.onMouseMove);
+    this.target.removeEventListener("mousedown", this.onMouseDown);
+    this.target.removeEventListener("mouseup", this.onMouseUp);
+    this.target.removeEventListener("wheel", this.onWheel);
+    this.target.removeEventListener("contextmenu", this.onContextMenu);
+    document.removeEventListener("fullscreenchange", this.onFullscreenChange);
+    document.removeEventListener("pointerlockchange", this.onPointerLockChange);
+
+    // Exit pointer lock if active
+    if (this.pointerLocked && document.pointerLockElement) {
+      document.exitPointerLock();
+    }
+    this.pointerLocked = false;
+    this.firstFrameReceived = false;
+    this.lastSentW = 0;
+    this.lastSentH = 0;
+
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
+    if (this.resizeTimer) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = null;
+    }
+  }
+
+  // --- Keyboard ---
+
+  private handleKeyDown(e: KeyboardEvent): void {
+    // Let browser shortcuts through (Mac Cmd+T, Cmd+W, etc.)
+    if (isBrowserShortcut(e)) return;
+
+    // Don't capture when typing in input fields
+    if (this.isInputElement(e.target)) return;
+
+    // On Mac, suppress Meta (Cmd) key itself - it's remapped to Ctrl for
+    // all shortcuts. Sending Meta to remote causes Super+Ctrl combos.
+    if (isMac && (e.code === "MetaLeft" || e.code === "MetaRight")) {
+      e.preventDefault();
+      return;
+    }
+
+    // Mac Cmd+key → Ctrl+key on remote.
+    // Send complete press+release because Mac Chrome often skips keyup
+    // for keys pressed during Cmd combos.
+    if (isMac && e.metaKey) {
+      const evdev = keyCodeToEvdev(e.code);
+      if (evdev === undefined) return;
+
+      // Cmd+V: let the native paste event fire so ClipboardBridge can
+      // read clipboardData reliably (navigator.clipboard.readText() often
+      // fails on self-signed cert pages). Send Ctrl+V after a short delay
+      // to give the agent time to set the X11 clipboard.
+      if (e.key.toLowerCase() === "v") {
+        // Don't preventDefault — let browser generate the paste event
+        setTimeout(() => this.sendCtrlCombo(evdev), 50);
+        return;
+      }
+
+      e.preventDefault();
+      this.sendCtrlCombo(evdev);
+      return;
+    }
+
+    // Non-Mac Ctrl+V: same approach — let paste event fire for clipboard sync
+    if (!isMac && e.ctrlKey && e.key.toLowerCase() === "v") {
+      const evdev = keyCodeToEvdev(e.code);
+      if (evdev === undefined) return;
+      setTimeout(() => this.sendCtrlCombo(evdev), 50);
+      return;
+    }
+
+    const evdev = keyCodeToEvdev(e.code);
+    if (evdev === undefined) return;
+
+    e.preventDefault();
+    this.sendInput({ t: "k", c: evdev, d: true });
+  }
+
+  private handleKeyUp(e: KeyboardEvent): void {
+    if (isBrowserShortcut(e)) return;
+    if (this.isInputElement(e.target)) return;
+
+    // On Mac, suppress Meta key release (never sent to remote)
+    if (isMac && (e.code === "MetaLeft" || e.code === "MetaRight")) {
+      e.preventDefault();
+      return;
+    }
+
+    // Mac Cmd+key combos already handled as press+release in keydown
+    if (isMac && e.metaKey) {
+      e.preventDefault();
+      return;
+    }
+
+    const evdev = keyCodeToEvdev(e.code);
+    if (evdev === undefined) return;
+
+    e.preventDefault();
+    this.sendInput({ t: "k", c: evdev, d: false });
+  }
+
+  // --- Keyboard helpers ---
+
+  /** Send a complete Ctrl+key press+release sequence */
+  private sendCtrlCombo(evdev: number): void {
+    this.sendInput({ t: "k", c: EVDEV_LEFT_CTRL, d: true });
+    this.sendInput({ t: "k", c: evdev, d: true });
+    this.sendInput({ t: "k", c: evdev, d: false });
+    this.sendInput({ t: "k", c: EVDEV_LEFT_CTRL, d: false });
+  }
+
+
+  // --- Mouse ---
+
+  /**
+   * Calculate normalized (0-1) coordinates within the actual video content area,
+   * accounting for object-fit:contain letterboxing/pillarboxing.
+   */
+  private getVideoCoords(e: MouseEvent): { x: number; y: number } | null {
+    const video = this.videoElement;
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      const rect = this.target.getBoundingClientRect();
+      return {
+        x: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
+        y: Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)),
+      };
+    }
+
+    const rect = video.getBoundingClientRect();
+    const containerAspect = rect.width / rect.height;
+    const videoAspect = video.videoWidth / video.videoHeight;
+
+    let renderWidth: number, renderHeight: number, offsetX: number, offsetY: number;
+    if (containerAspect > videoAspect) {
+      renderHeight = rect.height;
+      renderWidth = rect.height * videoAspect;
+      offsetX = (rect.width - renderWidth) / 2;
+      offsetY = 0;
+    } else {
+      renderWidth = rect.width;
+      renderHeight = rect.width / videoAspect;
+      offsetX = 0;
+      offsetY = (rect.height - renderHeight) / 2;
+    }
+
+    const x = (e.clientX - rect.left - offsetX) / renderWidth;
+    const y = (e.clientY - rect.top - offsetY) / renderHeight;
+
+    return {
+      x: Math.max(0, Math.min(1, x)),
+      y: Math.max(0, Math.min(1, y)),
+    };
+  }
+
+  private handleMouseMove(e: MouseEvent): void {
+    if (this.pointerLocked) {
+      // Pointer lock: send raw pixel deltas
+      const dx = e.movementX;
+      const dy = e.movementY;
+      if (dx !== 0 || dy !== 0) {
+        this.sendInput({ t: "rm", dx, dy });
+      }
+    } else {
+      // Normal: send absolute coordinates
+      const coords = this.getVideoCoords(e);
+      if (coords) {
+        this.sendInput({ t: "m", x: coords.x, y: coords.y });
+      }
+    }
+  }
+
+  private handleMouseDown(e: MouseEvent): void {
+    e.preventDefault();
+    const coords = this.getVideoCoords(e);
+    if (coords) {
+      this.sendInput({ t: "m", x: coords.x, y: coords.y });
+    }
+    this.sendInput({ t: "b", b: e.button, d: true });
+  }
+
+  private handleMouseUp(e: MouseEvent): void {
+    e.preventDefault();
+    this.sendInput({ t: "b", b: e.button, d: false });
+  }
+
+  private handleWheel(e: WheelEvent): void {
+    e.preventDefault();
+
+    let dx = e.deltaX;
+    let dy = e.deltaY;
+
+    if (e.deltaMode === 1) {
+      dx *= 30;
+      dy *= 30;
+    } else if (e.deltaMode === 2) {
+      dx *= 300;
+      dy *= 300;
+    }
+
+    this.sendInput({ t: "s", dx, dy });
+  }
+
+  private handleContextMenu(e: Event): void {
+    e.preventDefault();
+  }
+
+  // --- Pointer Lock ---
+
+  /** Programmatically toggle pointer lock (for use by external UI controls). */
+  togglePointerLock(): void {
+    if (this.pointerLocked) {
+      document.exitPointerLock();
+    } else {
+      this.target.requestPointerLock();
+    }
+  }
+
+  private handlePointerLockChange(): void {
+    this.pointerLocked = document.pointerLockElement === this.target;
+  }
+
+  // --- Resize ---
+
+  /**
+   * On fullscreen change, send an immediate resize with correct dimensions.
+   * Use screen dimensions for fullscreen (getBoundingClientRect may not
+   * have settled yet), container dimensions when exiting.
+   */
+  private handleFullscreenChange(): void {
+    if (!this.firstFrameReceived) return;
+    // Give the browser time to settle the fullscreen layout
+    setTimeout(() => {
+      // Always measure the actual container — getBoundingClientRect gives
+      // exact CSS pixel dimensions whether fullscreen or windowed.
+      // screen.width/height can differ from the actual fullscreen area
+      // (e.g. macOS notch, DPR scaling, rounding).
+      const rect = this.target.getBoundingClientRect();
+      let w = roundToEven(rect.width);
+      let h = roundToEven(rect.height);
+
+      // Re-assert cursor visibility after Chrome's fullscreen transition.
+      // Chrome's user-agent fullscreen styles can hide the cursor.
+      if (document.fullscreenElement) {
+        this.target.style.cursor = "default";
+        if (this.videoElement) {
+          this.videoElement.style.cursor = "default";
+        }
+      }
+
+      if (w > 0 && h > 0) {
+        if (this.resizeTimer) {
+          clearTimeout(this.resizeTimer);
+          this.resizeTimer = null;
+        }
+        const significant = isSignificantResize(this.lastSentW, this.lastSentH, w, h);
+        this.lastSentW = w;
+        this.lastSentH = h;
+        this.sendInput({ t: "r", w, h });
+        if (significant) {
+          this.resizeNeededCallback?.();
+        }
+      }
+    }, 150);
+  }
+
+  private debouncedResize(w: number, h: number): void {
+    if (!this.firstFrameReceived) return;
+    if (this.resizeTimer) {
+      clearTimeout(this.resizeTimer);
+    }
+    const ew = roundToEven(w);
+    const eh = roundToEven(h);
+    this.resizeTimer = setTimeout(() => {
+      this.resizeTimer = null;
+      const significant = isSignificantResize(this.lastSentW, this.lastSentH, ew, eh);
+      this.lastSentW = ew;
+      this.lastSentH = eh;
+      this.sendInput({ t: "r", w: ew, h: eh });
+      if (significant) {
+        this.resizeNeededCallback?.();
+      }
+    }, 300);
+  }
+
+  private isInputElement(target: EventTarget | null): boolean {
+    if (!target || !(target instanceof HTMLElement)) return false;
+    const tag = target.tagName;
+    return (
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      tag === "SELECT" ||
+      target.isContentEditable
+    );
+  }
+}

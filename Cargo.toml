@@ -1,0 +1,64 @@
+[workspace]
+members = ["crates/server", "crates/agent", "crates/protocol"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Beam Contributors"]
+repository = "https://github.com/frecar/beam"
+
+[workspace.dependencies]
+# Shared
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+toml = "0.8"
+
+# Protocol
+beam-protocol = { path = "crates/protocol" }
+
+# Web framework
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pemfile = "2"
+rcgen = "0.14"
+tokio-rustls = "0.26"
+
+# HTTP internals
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+
+# Auth
+jsonwebtoken = "9"
+pam = "0.8"
+
+# WebRTC
+webrtc = "0.17"
+
+# GStreamer
+gstreamer = "0.24"
+gstreamer-app = { version = "0.24", features = ["v1_24"] }
+gstreamer-video = "0.24"
+
+# X11
+x11rb = { version = "0.13", features = ["shm", "randr", "xfixes", "allow-unsafe-code"] }
+
+# Input
+input-linux = "0.7"
+nix = { version = "0.31", features = ["ioctl", "fs", "process", "signal", "user"] }
+
+# Audio
+libpulse-binding = "2"
+libpulse-simple-binding = "2"
+audiopus = "0.3.0-rc.0"
