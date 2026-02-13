@@ -10,6 +10,13 @@ Restart=always
 RestartSec=5
 LimitNOFILE=65536
 
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/var/lib/beam /tmp /etc/beam
+ProtectHome=yes
+NoNewPrivileges=no
+PrivateTmp=no
+
 # Logging
 StandardOutput=journal
 StandardError=journal

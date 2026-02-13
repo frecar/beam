@@ -1,5 +1,5 @@
 .PHONY: build build-release build-web build-rust \
-        dev run test lint fmt check \
+        dev run test lint fmt check ci \
         install uninstall deploy clean setup doctor help
 
 CARGO := cargo
@@ -19,6 +19,7 @@ help:
 	@echo "  make lint           Run clippy + TypeScript type check"
 	@echo "  make fmt            Format all Rust code"
 	@echo "  make check          Full pre-commit check (fmt + lint + test)"
+	@echo "  make ci             Run exact CI checks (verify before pushing)"
 	@echo ""
 	@echo "Deployment:"
 	@echo "  sudo make install   Build and install to system"
@@ -83,6 +84,15 @@ check:
 	cd web && $(NPM) test
 	@echo ""
 	@echo "All checks passed."
+
+ci:
+	@echo "Running CI checks (mirrors .github/workflows/ci.yml)..."
+	$(CARGO) fmt --all -- --check
+	$(CARGO) clippy --workspace -- -D warnings
+	$(CARGO) test --workspace
+	cd web && npx tsc --noEmit && $(NPM) test && $(NPM) run build
+	@echo ""
+	@echo "All CI checks passed."
 
 # === Installation ===
 
