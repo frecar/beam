@@ -810,6 +810,86 @@ async function updateSessionInfoStats(): Promise<void> {
   }
 }
 
+/** Collect all current stats into a formatted text block and copy to clipboard */
+function copyStatsToClipboard(): void {
+  const getText = (id: string): string => {
+    const el = document.getElementById(id);
+    return el ? el.textContent || "--" : "--";
+  };
+
+  // Session info
+  const sessionId = currentSessionId || "--";
+  const username = sessionUsername || "--";
+  const connectedSince = connectedSinceTime
+    ? new Date(connectedSinceTime).toISOString().replace("T", " ").replace(/\.\d+Z$/, "")
+    : "--";
+  const duration = connectedSinceTime ? formatDuration(Date.now() - connectedSinceTime) : "--";
+
+  // Connection
+  const iceState = getText("sip-ice-state");
+  const transport = getText("sip-transport");
+  const localCandidate = getText("sip-local-candidate");
+  const remoteCandidate = getText("sip-remote-candidate");
+  const dtlsState = getText("sip-dtls-state");
+
+  // Video
+  const resolution = getText("sip-resolution");
+  const framerate = getText("sip-framerate");
+  const videoCodec = getText("sip-video-codec");
+  const videoBitrate = getText("sip-video-bitrate");
+  const packetsLost = getText("sip-packets-lost");
+  const jitter = getText("sip-jitter");
+
+  // Audio
+  const audioCodec = getText("sip-audio-codec");
+  const audioBitrate = getText("sip-audio-bitrate");
+  const audioMuted = getText("sip-audio-muted");
+
+  // Client info
+  const userAgent = navigator.userAgent;
+  const screenSize = `${window.screen.width}x${window.screen.height}`;
+
+  const text = [
+    "Beam Remote Desktop - Session Stats",
+    "====================================",
+    `Session ID: ${sessionId}`,
+    `Username: ${username}`,
+    `Connected: ${connectedSince}`,
+    `Duration: ${duration}`,
+    "",
+    "Connection:",
+    `  ICE State: ${iceState}`,
+    `  Transport: ${transport} (${localCandidate} \u2192 ${remoteCandidate})`,
+    `  DTLS: ${dtlsState}`,
+    "",
+    "Video:",
+    `  Resolution: ${resolution}`,
+    `  Framerate: ${framerate}`,
+    `  Codec: ${videoCodec}`,
+    `  Bitrate: ${videoBitrate}`,
+    `  Packets lost: ${packetsLost}`,
+    `  Jitter: ${jitter}`,
+    "",
+    "Audio:",
+    `  Codec: ${audioCodec}`,
+    `  Bitrate: ${audioBitrate}`,
+    `  Muted: ${audioMuted}`,
+    "",
+    "Client:",
+    `  User Agent: ${userAgent}`,
+    `  Screen: ${screenSize}`,
+  ].join("\n");
+
+  navigator.clipboard.writeText(text).then(
+    () => {
+      ui?.showNotification("Stats copied to clipboard", "success");
+    },
+    () => {
+      ui?.showNotification("Failed to copy stats to clipboard", "error");
+    },
+  );
+}
+
 function startHeartbeat(sessionId: string): void {
   stopHeartbeat();
   heartbeatInterval = setInterval(async () => {
@@ -1372,6 +1452,11 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
 
     if (!clipboardBridge) {
       clipboardBridge = new ClipboardBridge(sendInput);
+      clipboardBridge.onClipboardSync((direction, preview) => {
+        const label = direction === "sent" ? "Clipboard sent" : "Clipboard received";
+        const message = preview ? `${label}: ${preview}` : label;
+        ui?.showNotification(message, "info", 2000);
+      });
     }
     clipboardBridge.enable();
   });
@@ -1514,6 +1599,12 @@ reconnectDisconnectBtn.addEventListener("click", () => {
 // Session info panel close button
 sipCloseBtn.addEventListener("click", () => {
   hideSessionInfoPanel();
+});
+
+// Session info panel copy stats button
+const sipCopyStatsBtn = document.getElementById("sip-copy-stats") as HTMLButtonElement;
+sipCopyStatsBtn.addEventListener("click", () => {
+  copyStatsToClipboard();
 });
 
 // Mute/unmute button
