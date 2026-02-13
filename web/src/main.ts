@@ -8,6 +8,7 @@ import { BeamUI } from "./ui";
 interface LoginResponse {
   session_id: string;
   token: string;
+  release_token?: string;
 }
 
 /** Stored session with expiry timestamp */
@@ -17,6 +18,15 @@ interface StoredSession extends LoginResponse {
 
 const SESSION_KEY = "beam_session";
 const SESSION_MAX_AGE_MS = 3600_000; // 1 hour — matches server reaper
+const AUDIO_MUTED_KEY = "beam_audio_muted";
+
+// Idle timeout warning: server default is 3600s. We warn 2 minutes before.
+// The idle_timeout is not sent in the login response, so we use the server
+// default. If someone configures a different value server-side, the warning
+// timing will be slightly off but won't cause breakage.
+const IDLE_TIMEOUT_SECS = 3600;
+const IDLE_WARNING_BEFORE_SECS = 120; // Show warning 2 min before expiry
+const IDLE_CHECK_INTERVAL_MS = 30_000; // Check every 30s
 
 function saveSession(data: LoginResponse): void {
   const stored: StoredSession = { ...data, saved_at: Date.now() };
@@ -62,13 +72,18 @@ const statusDot = document.getElementById("status-dot") as HTMLDivElement;
 const statusText = document.getElementById("status-text") as HTMLSpanElement;
 const statusVersion = document.getElementById("status-version") as HTMLSpanElement;
 
+const faviconLink = document.querySelector("link[rel='icon']") as HTMLLinkElement;
+
+const btnMute = document.getElementById("btn-mute") as HTMLButtonElement;
 const perfOverlay = document.getElementById("perf-overlay") as HTMLDivElement;
+const helpOverlay = document.getElementById("help-overlay") as HTMLDivElement;
 const reconnectOverlay = document.getElementById("reconnect-overlay") as HTMLDivElement;
 const reconnectTitle = document.getElementById("reconnect-title") as HTMLHeadingElement;
 const reconnectIcon = document.querySelector(".reconnect-icon") as HTMLDivElement;
 const reconnectBtn = document.getElementById("reconnect-btn") as HTMLButtonElement;
 const reconnectDisconnectBtn = document.getElementById("reconnect-disconnect-btn") as HTMLButtonElement;
 const reconnectDesc = document.getElementById("reconnect-desc") as HTMLParagraphElement;
+const idleWarning = document.getElementById("idle-warning") as HTMLDivElement;
 
 let connection: BeamConnection | null = null;
 let renderer: Renderer | null = null;
@@ -90,6 +105,10 @@ const RECONNECT_DELAY_MS = 1000; // Give agent time to process resize
 let currentToken: string | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Release token for graceful session cleanup on tab close
+let currentReleaseToken: string | null = null;
+let currentSessionId: string | null = null;
+
 // Guard against race between heartbeat 404 and user clicking reconnect
 let isReturningToLogin = false;
 
@@ -103,20 +122,68 @@ let perfLatency = 0;
 let perfBitrate = 0;
 let perfLoss = 0;
 
+// Track connection state so quality updates only apply when connected
+let currentConnectionState: "disconnected" | "connecting" | "connected" | "error" = "disconnected";
+
+// Idle timeout warning state
+let lastActivity = Date.now();
+let idleCheckInterval: ReturnType<typeof setInterval> | null = null;
+let idleWarningVisible = false;
+
+/** Generate an SVG data URL for a colored circle favicon */
+function faviconDataUrl(color: string): string {
+  return `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='${encodeURIComponent(color)}'/%3E%3C/svg%3E`;
+}
+
+function setFavicon(color: string): void {
+  if (faviconLink) {
+    faviconLink.href = faviconDataUrl(color);
+  }
+}
+
 function setStatus(state: "disconnected" | "connecting" | "connected" | "error", message: string): void {
+  currentConnectionState = state;
   statusText.textContent = message;
   statusDot.className = "status-dot";
+  statusDot.style.backgroundColor = "";
 
   switch (state) {
     case "connected":
       statusDot.classList.add("connected");
+      document.title = "Beam - Connected";
+      setFavicon("#4ade80"); // green
       break;
     case "connecting":
       statusDot.classList.add("connecting");
+      document.title = "Beam - Disconnected";
+      setFavicon("#facc15"); // yellow
       break;
     case "error":
       statusDot.classList.add("error");
+      document.title = "Beam - Disconnected";
+      setFavicon("#ff6b6b"); // red
       break;
+    case "disconnected":
+    default:
+      document.title = "Beam - Login";
+      setFavicon("#888"); // gray
+      break;
+  }
+}
+
+/** Update status bar dot color and text based on current RTT latency */
+function updateConnectionQuality(rttMs: number): void {
+  if (currentConnectionState !== "connected") return;
+
+  if (rttMs > 80) {
+    statusDot.style.backgroundColor = "#ff6b6b";
+    statusText.textContent = "Connected (slow)";
+  } else if (rttMs >= 30) {
+    statusDot.style.backgroundColor = "#facc15";
+    statusText.textContent = "Connected";
+  } else {
+    statusDot.style.backgroundColor = "#4ade80";
+    statusText.textContent = "Connected";
   }
 }
 
@@ -126,6 +193,17 @@ function setToken(token: string): void {
   if (data) {
     data.token = token;
     saveSession(data);
+  }
+}
+
+/** Send release beacon to start server-side grace period cleanup.
+ *  Uses navigator.sendBeacon() which reliably fires during tab close. */
+function sendReleaseBeacon(): void {
+  if (currentSessionId && currentReleaseToken) {
+    navigator.sendBeacon(
+      `/api/sessions/${currentSessionId}/release`,
+      currentReleaseToken,
+    );
   }
 }
 
@@ -321,6 +399,9 @@ async function pollWebRTCStats(): Promise<void> {
   perfLoss = parseFloat(lossPercent);
   updatePerfOverlay();
 
+  // Update status bar connection quality indicator based on latency
+  if (rttMs !== null) updateConnectionQuality(rttMs);
+
   // Warn if video element has no frames decoded yet (debugging aid)
   if (remoteVideo.srcObject && remoteVideo.videoWidth === 0 && remoteVideo.videoHeight === 0) {
     console.warn("Video element has srcObject but 0x0 dimensions - no frames decoded yet");
@@ -398,6 +479,71 @@ function stopStatsPolling(): void {
   }
 }
 
+// --- Idle timeout warning ---
+
+/** Record user activity and hide the warning if visible */
+function recordActivity(): void {
+  lastActivity = Date.now();
+  if (idleWarningVisible) {
+    hideIdleWarning();
+    // Send an immediate heartbeat to reset the server-side idle timer
+    // now that the user has returned from being idle.
+    sendActivityHeartbeat();
+  }
+}
+
+/** Send an extra heartbeat after the user returns from idle.
+ *  This resets the server-side `last_activity` timestamp immediately
+ *  rather than waiting for the next 30s heartbeat tick. */
+function sendActivityHeartbeat(): void {
+  const session = loadSession();
+  if (session && currentToken) {
+    fetch(`/api/sessions/${session.session_id}/heartbeat`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${currentToken}` },
+    }).catch(() => { /* regular heartbeat will retry */ });
+  }
+}
+
+function showIdleWarning(): void {
+  if (idleWarningVisible) return;
+  idleWarningVisible = true;
+  idleWarning.classList.add("visible");
+  console.warn("Idle timeout warning: session will expire soon due to inactivity");
+}
+
+function hideIdleWarning(): void {
+  if (!idleWarningVisible) return;
+  idleWarningVisible = false;
+  idleWarning.classList.remove("visible");
+}
+
+/** Start periodic idle check. Shows warning when user has been idle
+ *  for (idle_timeout - warning_threshold) seconds. */
+function startIdleCheck(): void {
+  stopIdleCheck();
+  lastActivity = Date.now();
+
+  // idle_timeout=0 means disabled on the server — no warning needed
+  if (IDLE_TIMEOUT_SECS <= 0) return;
+
+  idleCheckInterval = setInterval(() => {
+    const idleSecs = (Date.now() - lastActivity) / 1000;
+    const warningThreshold = IDLE_TIMEOUT_SECS - IDLE_WARNING_BEFORE_SECS;
+    if (idleSecs >= warningThreshold) {
+      showIdleWarning();
+    }
+  }, IDLE_CHECK_INTERVAL_MS);
+}
+
+function stopIdleCheck(): void {
+  if (idleCheckInterval) {
+    clearInterval(idleCheckInterval);
+    idleCheckInterval = null;
+  }
+  hideIdleWarning();
+}
+
 function handleDisconnect(): void {
   connection?.disconnect();
   connection = null;
@@ -413,11 +559,14 @@ function handleDisconnect(): void {
   }
   stopStatsPolling();
   stopHeartbeat();
+  stopIdleCheck();
   if (refreshTimer) {
     clearTimeout(refreshTimer);
     refreshTimer = null;
   }
   currentToken = null;
+  currentReleaseToken = null;
+  currentSessionId = null;
 
   // Clear saved session
   clearSession();
@@ -425,7 +574,6 @@ function handleDisconnect(): void {
   hideReconnectOverlay();
   showLogin();
   setStatus("disconnected", "Disconnected");
-  document.title = "Beam";
   ui?.showNotification("Disconnected from remote desktop", "info");
 
   connectBtn.disabled = false;
@@ -449,25 +597,51 @@ const ICON_TAB = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" st
   <line x1="3" y1="12" x2="21" y2="12"></line>
 </svg>`;
 
-function showReconnectOverlay(mode: "disconnected" | "replaced" = "disconnected"): void {
+// Track whether the reconnect overlay is showing an auto-reconnect countdown
+// so the reconnect button click can skip the countdown.
+let isAutoReconnectCountdown = false;
+
+function showReconnectOverlay(mode: "disconnected" | "replaced" | "auto-reconnecting" = "disconnected", countdownSeconds?: number): void {
   if (mode === "replaced") {
     reconnectIcon.innerHTML = ICON_TAB;
     reconnectTitle.textContent = "Session in use";
     reconnectDesc.textContent = "This session was opened in another tab.";
     reconnectBtn.textContent = "Take back";
+    isAutoReconnectCountdown = false;
+  } else if (mode === "auto-reconnecting" && countdownSeconds !== undefined && countdownSeconds > 0) {
+    reconnectIcon.innerHTML = ICON_WIFI_OFF;
+    reconnectTitle.textContent = "Network change detected";
+    reconnectDesc.textContent = `Reconnecting in ${countdownSeconds}...`;
+    reconnectBtn.textContent = "Reconnect now";
+    isAutoReconnectCountdown = true;
   } else {
     reconnectIcon.innerHTML = ICON_WIFI_OFF;
     reconnectTitle.textContent = "Connection lost";
     reconnectDesc.textContent = "Your session is still running on the server.";
     reconnectBtn.textContent = "Reconnect";
+    isAutoReconnectCountdown = false;
   }
   reconnectBtn.disabled = false;
   reconnectOverlay.classList.add("visible");
   reconnectBtn.focus();
 }
 
+/** Update the reconnect overlay countdown text without resetting focus/layout */
+function updateReconnectCountdown(seconds: number): void {
+  if (seconds > 0) {
+    reconnectDesc.textContent = `Reconnecting in ${seconds}...`;
+  } else {
+    reconnectTitle.textContent = "Reconnecting...";
+    reconnectDesc.textContent = "Re-establishing connection to your session.";
+    reconnectBtn.textContent = "Reconnecting...";
+    reconnectBtn.disabled = true;
+    isAutoReconnectCountdown = false;
+  }
+}
+
 function hideReconnectOverlay(): void {
   reconnectOverlay.classList.remove("visible");
+  isAutoReconnectCountdown = false;
 }
 
 /** Attempt to reconnect using the existing session */
@@ -512,6 +686,10 @@ function handleEndSession(): void {
   const session = loadSession();
   const token = currentToken;
 
+  // Belt-and-suspenders: send release beacon before the DELETE call.
+  // If the DELETE fails (e.g., network issues), the grace period still runs.
+  sendReleaseBeacon();
+
   // Fire DELETE request before handleDisconnect clears the token
   if (session && token) {
     fetch(`/api/sessions/${session.session_id}`, {
@@ -530,6 +708,19 @@ function toggleFullscreen(): void {
   } else {
     renderer?.enterFullscreen();
   }
+}
+
+/** Update the mute button text to reflect current audio state */
+function updateMuteButton(muted: boolean): void {
+  btnMute.textContent = muted ? "Unmute" : "Mute";
+  localStorage.setItem(AUDIO_MUTED_KEY, muted ? "true" : "false");
+}
+
+/** Toggle audio mute via the renderer */
+function toggleMute(): void {
+  if (!renderer) return;
+  const muted = renderer.toggleMute();
+  updateMuteButton(muted);
 }
 
 async function handleLogin(event: SubmitEvent): Promise<void> {
@@ -580,6 +771,8 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
     saveSession(data);
     localStorage.setItem("beam_username", username);
     currentToken = data.token;
+    currentSessionId = data.session_id;
+    currentReleaseToken = data.release_token ?? null;
     scheduleTokenRefresh();
 
     updateLoadingStatus("Starting session...");
@@ -621,6 +814,24 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   connection = new BeamConnection(sessionId, token);
   renderer = new Renderer(remoteVideo, desktopView);
 
+  // Sync mute button when renderer's mute state changes (e.g. click-to-unmute)
+  renderer.onMuteChange((muted) => updateMuteButton(muted));
+
+  // Apply saved audio preference. If the user previously unmuted, the
+  // click-to-unmute one-shot in Renderer will also fire on first click,
+  // but we can pre-set the state here. Due to browser autoplay policy,
+  // unmuting only takes effect after user interaction — the one-shot click
+  // handler in Renderer covers that case.
+  const savedMuted = localStorage.getItem(AUDIO_MUTED_KEY);
+  if (savedMuted === "false") {
+    // User previously chose to have audio on. We can't auto-unmute due to
+    // autoplay policy, but we update the button to show the intent. The
+    // Renderer's click-to-unmute will fire on first interaction.
+    updateMuteButton(true); // still muted until interaction
+  } else {
+    updateMuteButton(true); // default: muted
+  }
+
   // Initialize UI
   ui = new BeamUI();
   ui.setOnFullscreen(toggleFullscreen);
@@ -638,10 +849,10 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     hideReconnectOverlay();
     showDesktop();
     setStatus("connected", "Connected");
-    document.title = "Beam - Connected";
     ui?.showNotification("Connected to remote desktop", "success");
     startStatsPolling();
     startHeartbeat(sessionId);
+    startIdleCheck();
 
     // Notify InputHandler after the first video frame is decoded so it
     // can safely send resize events. Chrome's H.264 decoder can't handle
@@ -738,6 +949,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     clipboardBridge = null;
     stopStatsPolling();
     stopHeartbeat();
+    stopIdleCheck();
   });
 
   connection.onReconnecting((attempt, max) => {
@@ -755,6 +967,34 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     const session = loadSession();
     if (session) {
       startHeartbeat(session.session_id);
+    }
+  });
+
+  // Auto-reconnect countdown: ICE detected a network change (disconnected/failed).
+  // Show the overlay with a countdown so the user knows what's happening.
+  // They can click "Reconnect now" to skip the countdown, or wait for auto.
+  connection.onAutoReconnecting((secondsRemaining) => {
+    if (secondsRemaining > 0) {
+      // First callback (e.g. 3): show the overlay with countdown
+      if (!reconnectOverlay.classList.contains("visible") || !isAutoReconnectCountdown) {
+        setStatus("connecting", "Network change detected");
+        showReconnectOverlay("auto-reconnecting", secondsRemaining);
+      } else {
+        // Subsequent callbacks (2, 1): just update the countdown text
+        updateReconnectCountdown(secondsRemaining);
+      }
+    } else {
+      // 0: auto-reconnect is now triggering
+      updateReconnectCountdown(0);
+    }
+  });
+
+  // ICE self-recovered during countdown: cancel the overlay
+  connection.onAutoReconnectRecovered(() => {
+    if (isAutoReconnectCountdown) {
+      hideReconnectOverlay();
+      setStatus("connected", "Connected");
+      ui?.showNotification("Connection recovered", "success");
     }
   });
 
@@ -783,8 +1023,16 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   await connection.connect();
 }
 
-// F11 keyboard shortcut for fullscreen, F9 for performance overlay
+// F1 help overlay, F8 mute toggle, F9 performance overlay, F11 fullscreen
 document.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "F1") {
+    e.preventDefault();
+    helpOverlay.classList.toggle("visible");
+  }
+  if (e.key === "F8") {
+    e.preventDefault();
+    toggleMute();
+  }
   if (e.key === "F11") {
     e.preventDefault();
     toggleFullscreen();
@@ -809,6 +1057,11 @@ reconnectDisconnectBtn.addEventListener("click", () => {
   handleDisconnect();
 });
 
+// Mute/unmute button
+btnMute.addEventListener("click", () => {
+  toggleMute();
+});
+
 // Cancel button during loading
 loadingCancel.addEventListener("click", () => {
   if (connectionTimeout) {
@@ -821,12 +1074,41 @@ loadingCancel.addEventListener("click", () => {
   setStatus("disconnected", "Disconnected");
 });
 
+// Track user activity for idle timeout warning.
+// These fire on any mouse/keyboard interaction in the desktop view,
+// resetting the idle timer. The listeners are always attached but
+// recordActivity() is a no-op when no session is active (idleCheckInterval
+// is null, so the warning never shows).
+desktopView.addEventListener("mousemove", recordActivity);
+desktopView.addEventListener("mousedown", recordActivity);
+desktopView.addEventListener("wheel", recordActivity);
+document.addEventListener("keydown", recordActivity);
+
+// Graceful session release on tab/window close. sendBeacon() is reliable
+// during unload (unlike fetch), and the server starts a 60s grace period.
+// If the user returns (page refresh, back button), the session reconnects
+// and cancels the grace period.
+window.addEventListener("beforeunload", () => {
+  sendReleaseBeacon();
+});
+
 // When the tab becomes visible after being backgrounded, fire an immediate
 // heartbeat. Browsers throttle timers in background tabs, so the regular
 // 30s heartbeat may have been delayed for minutes. An immediate heartbeat
 // resets the server-side idle timer and detects if the session was reaped.
+//
+// Also notify the agent of tab visibility changes so it can reduce capture
+// framerate when the tab is backgrounded (saves GPU/CPU/bandwidth).
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && currentToken && heartbeatInterval) {
+  const visible = document.visibilityState === "visible";
+
+  // Send visibility state to agent via DataChannel
+  if (connection) {
+    console.debug(`Tab visibility changed: ${visible ? "visible" : "hidden"}`);
+    connection.sendInput({ t: "vs", visible });
+  }
+
+  if (visible && currentToken && heartbeatInterval) {
     const session = loadSession();
     if (session) {
       fetch(`/api/sessions/${session.session_id}/heartbeat`, {
@@ -849,6 +1131,8 @@ const savedSession = loadSession();
 if (savedSession) {
   try {
     currentToken = savedSession.token;
+    currentSessionId = savedSession.session_id;
+    currentReleaseToken = savedSession.release_token ?? null;
     scheduleTokenRefresh();
     showLoading("Reconnecting...");
     startConnection(savedSession.session_id, savedSession.token);

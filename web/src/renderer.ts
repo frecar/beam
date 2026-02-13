@@ -6,6 +6,7 @@ export class Renderer {
   private videoElement: HTMLVideoElement;
   private containerElement: HTMLElement;
   private unmuted = false;
+  private muteChangeCallback: ((muted: boolean) => void) | null = null;
 
   // FPS tracking
   private frameCount = 0;
@@ -28,10 +29,37 @@ export class Renderer {
         if (!this.unmuted) {
           this.videoElement.muted = false;
           this.unmuted = true;
+          this.muteChangeCallback?.(false);
         }
       },
       { once: true },
     );
+  }
+
+  /** Set callback to receive mute state changes */
+  onMuteChange(callback: (muted: boolean) => void): void {
+    this.muteChangeCallback = callback;
+  }
+
+  /** Returns true if the audio is currently muted */
+  isMuted(): boolean {
+    return this.videoElement.muted;
+  }
+
+  /** Toggle audio mute state. Returns the new muted state. */
+  toggleMute(): boolean {
+    const newMuted = !this.videoElement.muted;
+    this.videoElement.muted = newMuted;
+    if (!newMuted) this.unmuted = true;
+    this.muteChangeCallback?.(newMuted);
+    return newMuted;
+  }
+
+  /** Set audio mute state directly */
+  setMuted(muted: boolean): void {
+    this.videoElement.muted = muted;
+    if (!muted) this.unmuted = true;
+    this.muteChangeCallback?.(muted);
   }
 
   /** Attach a remote MediaStream to the video element */

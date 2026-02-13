@@ -28,6 +28,27 @@ export class ClipboardBridge {
     });
   }
 
+  /**
+   * Try to read the browser clipboard and send it as PRIMARY selection
+   * to the remote agent. Called before middle-click so the remote X11
+   * PRIMARY buffer is populated when the app handles the button press.
+   *
+   * Returns a Promise that resolves when the clipboard has been sent
+   * (or immediately if clipboard read fails — e.g. permissions denied).
+   */
+  async sendPrimaryClipboard(): Promise<void> {
+    const MAX_CLIPBOARD_BYTES = 1_048_576; // 1 MB
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text && text.length <= MAX_CLIPBOARD_BYTES) {
+        this.sendClipboard({ t: "cp", text });
+      }
+    } catch {
+      // Clipboard read permission denied or not focused — ignore silently.
+      // The middle-click will still go through, just without clipboard sync.
+    }
+  }
+
   private handlePaste(e: ClipboardEvent): void {
     const MAX_CLIPBOARD_BYTES = 1_048_576; // 1 MB
     const text = e.clipboardData?.getData("text");

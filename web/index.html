@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Beam</title>
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Beam Remote Desktop</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23888'/%3E%3C/svg%3E" />
     <style>
       * {
         margin: 0;
@@ -403,6 +403,33 @@
       .status-dot.connecting { background: #facc15; animation: pulse 1s ease-in-out infinite; }
       .status-dot.error { background: #ff6b6b; }
 
+      /* Idle timeout warning banner */
+      #idle-warning {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        background: rgba(250, 204, 21, 0.12);
+        border-bottom: 1px solid rgba(250, 204, 21, 0.25);
+        color: #facc15;
+        font-size: 13px;
+        text-align: center;
+        padding: 6px 16px;
+        z-index: 400;
+        backdrop-filter: blur(8px);
+        user-select: none;
+        opacity: 0;
+        transform: translateY(-100%);
+        transition: opacity 0.3s ease, transform 0.3s ease;
+      }
+
+      #idle-warning.visible {
+        display: block;
+        opacity: 1;
+        transform: translateY(0);
+      }
+
       /* Fullscreen: auto-hide bar, show on bottom-edge hover (JS-driven) */
       #status-bar.fs-hidden {
         transform: translateY(100%);
@@ -436,6 +463,49 @@
       #perf-overlay .val-good { color: #4ade80; }
       #perf-overlay .val-warn { color: #facc15; }
       #perf-overlay .val-bad { color: #ff6b6b; }
+
+      /* Help overlay (F1 toggle) */
+      #help-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 10000;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(4px);
+        align-items: center;
+        justify-content: center;
+      }
+      #help-overlay.visible { display: flex; }
+      #help-overlay .help-card {
+        background: rgba(20, 20, 40, 0.95);
+        border: 1px solid rgba(74, 158, 255, 0.2);
+        border-radius: 8px;
+        padding: 24px 32px;
+        font: 13px/2 monospace;
+        color: #ccc;
+        min-width: 280px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        user-select: none;
+      }
+      #help-overlay .help-card h2 {
+        font-size: 15px;
+        font-weight: 500;
+        color: #e0e0e0;
+        margin-bottom: 12px;
+        letter-spacing: 0.3px;
+      }
+      #help-overlay .help-card kbd {
+        display: inline-block;
+        min-width: 36px;
+        padding: 1px 6px;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 3px;
+        font-size: 12px;
+        color: #aaa;
+        text-align: center;
+        margin-right: 8px;
+      }
 
       /* Reconnect Overlay — shown on top of frozen desktop */
       #reconnect-overlay {
@@ -583,6 +653,7 @@
           </form>
           <div class="login-error" id="login-error"></div>
           <div class="login-hints">
+            <kbd>F8</kbd> Toggle audio &middot;
             <kbd>F11</kbd> Toggle fullscreen &middot;
             <kbd>Esc</kbd> Exit fullscreen &middot;
             <kbd>F9</kbd> Performance overlay
@@ -622,8 +693,23 @@
       </div>
     </div>
 
+    <!-- Idle Timeout Warning Banner -->
+    <div id="idle-warning" role="alert">Session will expire due to inactivity. Move mouse or press a key to stay connected.</div>
+
     <!-- Performance Overlay (F9 toggle) -->
     <div id="perf-overlay"></div>
+
+    <!-- Help Overlay (F1 toggle) -->
+    <div id="help-overlay">
+      <div class="help-card">
+        <h2>Keyboard Shortcuts</h2>
+        <div><kbd>F1</kbd> Toggle this help</div>
+        <div><kbd>F8</kbd> Toggle audio mute</div>
+        <div><kbd>F9</kbd> Performance overlay</div>
+        <div><kbd>F11</kbd> Toggle fullscreen</div>
+        <div><kbd>Esc</kbd> Exit fullscreen</div>
+      </div>
+    </div>
 
     <!-- Notification Container -->
     <div id="notifications"></div>
@@ -664,6 +750,7 @@
           <option value="low">Low</option>
         </select>
         <div class="status-separator"></div>
+        <button class="status-btn" id="btn-mute">Unmute</button>
         <button class="status-btn" id="btn-fullscreen">Fullscreen</button>
         <button class="status-btn status-btn-disconnect" id="btn-disconnect">Disconnect</button>
         <button class="status-btn status-btn-disconnect" id="btn-end-session">End Session</button>

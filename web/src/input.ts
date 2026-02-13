@@ -402,7 +402,39 @@ export class InputHandler {
     if (coords) {
       this.sendInput({ t: "m", x: coords.x, y: coords.y });
     }
-    this.sendInput({ t: "b", b: e.button, d: true });
+
+    // Middle-click (button 1): try to sync browser clipboard to the remote
+    // X11 PRIMARY selection BEFORE sending the button press. This enables
+    // select-to-copy, middle-click-to-paste workflows for Linux users.
+    // The clipboard read is async and may fail (permissions) — in that case
+    // the button press is sent immediately without clipboard sync.
+    if (e.button === 1) {
+      this.sendPrimaryClipboardThenButton(e.button);
+    } else {
+      this.sendInput({ t: "b", b: e.button, d: true });
+    }
+  }
+
+  /**
+   * Read the browser clipboard and send it as PRIMARY selection, then
+   * send the middle-click button press. If the clipboard read fails
+   * (e.g. permissions denied, page not focused), send the button press
+   * immediately without clipboard data.
+   */
+  private sendPrimaryClipboardThenButton(button: number): void {
+    const MAX_CLIPBOARD_BYTES = 1_048_576; // 1 MB
+    navigator.clipboard
+      .readText()
+      .then((text) => {
+        if (text && text.length <= MAX_CLIPBOARD_BYTES) {
+          this.sendInput({ t: "cp", text });
+        }
+        this.sendInput({ t: "b", b: button, d: true });
+      })
+      .catch(() => {
+        // Clipboard read failed — send button press without clipboard sync
+        this.sendInput({ t: "b", b: button, d: true });
+      });
   }
 
   private handleMouseUp(e: MouseEvent): void {

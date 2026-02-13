@@ -25,13 +25,16 @@ export type InputEvent =
   | { t: "b"; b: number; d: boolean }
   | { t: "s"; dx: number; dy: number }
   | { t: "c"; text: string }
+  | { t: "cp"; text: string }
   | { t: "r"; w: number; h: number }
   | { t: "l"; layout: string }
   | { t: "q"; mode: string }
+  | { t: "vs"; visible: boolean }
   | { t: "cur"; css: string };
 
 type TrackCallback = (stream: MediaStream) => void;
 type VoidCallback = () => void;
+type CountdownCallback = (secondsRemaining: number) => void;
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -64,8 +67,11 @@ export class BeamConnection {
   private disconnectCallback: VoidCallback | null = null;
   private reconnectingCallback: ((attempt: number, maxAttempts: number) => void) | null = null;
   private reconnectFailedCallback: VoidCallback | null = null;
+  private autoReconnectingCallback: CountdownCallback | null = null;
+  private autoReconnectRecoveredCallback: VoidCallback | null = null;
   private replacedCallback: VoidCallback | null = null;
   private agentExitedCallback: VoidCallback | null = null;
+  private iceAutoReconnectCountdown: ReturnType<typeof setInterval> | null = null;
   private iceServers: RTCIceServer[] = DEFAULT_ICE_SERVERS;
 
   constructor(sessionId: string, token: string) {
@@ -101,6 +107,18 @@ export class BeamConnection {
   /** Register callback for when all reconnection attempts have been exhausted */
   onReconnectFailed(callback: VoidCallback): void {
     this.reconnectFailedCallback = callback;
+  }
+
+  /** Register callback for auto-reconnect countdown (ICE disconnected/failed).
+   *  Called each second with the remaining seconds (3, 2, 1, 0).
+   *  0 means the auto-reconnect is now triggering. */
+  onAutoReconnecting(callback: CountdownCallback): void {
+    this.autoReconnectingCallback = callback;
+  }
+
+  /** Register callback for when ICE self-recovers during the countdown */
+  onAutoReconnectRecovered(callback: VoidCallback): void {
+    this.autoReconnectRecoveredCallback = callback;
   }
 
   /** Register callback for when this tab was replaced by another tab/window */
@@ -186,10 +204,7 @@ export class BeamConnection {
     this.offerRetryCount = 0;
     this.pendingOfferSdp = null;
 
-    if (this.iceDisconnectTimer) {
-      clearTimeout(this.iceDisconnectTimer);
-      this.iceDisconnectTimer = null;
-    }
+    this.cancelIceAutoReconnect();
 
     if (this.dataChannel) {
       this.dataChannel.close();
@@ -334,36 +349,71 @@ export class BeamConnection {
       console.log("ICE connection state:", state);
 
       if (state === "connected" || state === "completed") {
-        // ICE recovered or connected: cancel any pending disconnect timer
-        if (this.iceDisconnectTimer) {
-          clearTimeout(this.iceDisconnectTimer);
-          this.iceDisconnectTimer = null;
+        // ICE recovered or connected: cancel any pending auto-reconnect
+        const wasCountingDown = this.iceDisconnectTimer !== null || this.iceAutoReconnectCountdown !== null;
+        this.cancelIceAutoReconnect();
+        if (wasCountingDown) {
+          console.log("ICE self-recovered, cancelling auto-reconnect");
+          this.autoReconnectRecoveredCallback?.();
         }
-      } else if (state === "disconnected") {
-        // ICE disconnected is transient - wait before escalating to full reconnect.
-        // The ICE agent will attempt to restore connectivity on its own.
+      } else if (state === "disconnected" || state === "failed") {
+        // Start auto-reconnect countdown. Both "disconnected" (transient) and
+        // "failed" (permanent) get a 3-second grace period — this handles
+        // network changes (Wi-Fi to Ethernet, roaming) without requiring manual
+        // intervention, while still giving ICE a chance to self-recover.
         if (!this.iceDisconnectTimer && !this.intentionalDisconnect) {
-          this.iceDisconnectTimer = setTimeout(() => {
-            this.iceDisconnectTimer = null;
-            if (this.pc?.iceConnectionState === "disconnected") {
-              console.warn("ICE disconnected for 30s, escalating to full reconnect");
-              this.scheduleReconnect();
-            }
-          }, 30_000);
-        }
-      } else if (state === "failed") {
-        // ICE failed is permanent - reconnect immediately
-        if (this.iceDisconnectTimer) {
-          clearTimeout(this.iceDisconnectTimer);
-          this.iceDisconnectTimer = null;
-        }
-        if (!this.intentionalDisconnect) {
-          this.scheduleReconnect();
+          this.startIceAutoReconnect();
         }
       }
     };
 
     this.createAndSendOffer();
+  }
+
+  /** Start a 3-second auto-reconnect countdown. Notifies the UI each second
+   *  so it can display a countdown. If ICE recovers during the countdown,
+   *  cancelIceAutoReconnect() cancels everything. */
+  private startIceAutoReconnect(): void {
+    const ICE_AUTO_RECONNECT_SECS = 3;
+    let remaining = ICE_AUTO_RECONNECT_SECS;
+
+    console.log(`ICE ${this.pc?.iceConnectionState}, auto-reconnecting in ${remaining}s...`);
+    this.autoReconnectingCallback?.(remaining);
+
+    this.iceAutoReconnectCountdown = setInterval(() => {
+      remaining--;
+      if (remaining <= 0) {
+        this.cancelIceAutoReconnect();
+        this.triggerAutoReconnect();
+      } else {
+        this.autoReconnectingCallback?.(remaining);
+      }
+    }, 1_000);
+
+    // Also set the main timer as a safety net (fires at exactly 3s)
+    this.iceDisconnectTimer = setTimeout(() => {
+      this.cancelIceAutoReconnect();
+      this.triggerAutoReconnect();
+    }, ICE_AUTO_RECONNECT_SECS * 1_000);
+  }
+
+  /** Cancel any pending ICE auto-reconnect countdown and timers */
+  private cancelIceAutoReconnect(): void {
+    if (this.iceAutoReconnectCountdown) {
+      clearInterval(this.iceAutoReconnectCountdown);
+      this.iceAutoReconnectCountdown = null;
+    }
+    if (this.iceDisconnectTimer) {
+      clearTimeout(this.iceDisconnectTimer);
+      this.iceDisconnectTimer = null;
+    }
+  }
+
+  /** Execute the auto-reconnect: notify UI with 0 remaining, then reconnect */
+  private triggerAutoReconnect(): void {
+    console.warn("ICE auto-reconnect: initiating full reconnect");
+    this.autoReconnectingCallback?.(0);
+    this.scheduleReconnect();
   }
 
   private async createAndSendOffer(): Promise<void> {
@@ -566,10 +616,7 @@ export class BeamConnection {
     this.offerRetryCount = 0;
     this.pendingOfferSdp = null;
 
-    if (this.iceDisconnectTimer) {
-      clearTimeout(this.iceDisconnectTimer);
-      this.iceDisconnectTimer = null;
-    }
+    this.cancelIceAutoReconnect();
 
     if (this.dataChannel) {
       this.dataChannel.close();
