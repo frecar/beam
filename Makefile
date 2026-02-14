@@ -47,7 +47,7 @@ build-web:
 dev: build
 	@echo ""
 	@echo "Starting Beam server (debug build)..."
-	@echo "  Web client: https://localhost:8443"
+	@echo "  Web client: https://localhost:8444"
 	@echo "  Log in with your Linux username and password"
 	@echo ""
 	PATH="$(CURDIR)/target/debug:$$PATH" \

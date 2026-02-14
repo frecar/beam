@@ -309,7 +309,7 @@ fn default_bind() -> String {
     "0.0.0.0".to_string()
 }
 fn default_port() -> u16 {
-    8443
+    8444
 }
 fn default_bitrate() -> u32 {
     5000
@@ -368,7 +368,7 @@ mod tests {
 
         // Server defaults
         assert_eq!(config.server.bind, "0.0.0.0");
-        assert_eq!(config.server.port, 8443);
+        assert_eq!(config.server.port, 8444);
         assert!(config.server.tls_cert.is_none());
         assert!(config.server.tls_key.is_none());
         assert!(config.server.jwt_secret.is_none());
@@ -430,7 +430,7 @@ framerate = 30
 
         // Other sections use full defaults
         assert_eq!(config.server.bind, "0.0.0.0");
-        assert_eq!(config.server.port, 8443);
+        assert_eq!(config.server.port, 8444);
         assert_eq!(config.server.web_root, "web/dist");
         assert!(config.audio.enabled);
         assert_eq!(config.audio.bitrate, 128);

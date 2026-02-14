@@ -32,7 +32,7 @@ sudo make install         # installs deps, builds, and installs everything
 sudo systemctl enable --now beam
 ```
 
-Open `https://<your-server>:8443` (default port, configurable in `/etc/beam/beam.toml`) and log in with any Linux user account.
+Open `https://<your-server>:8444` (default port, configurable in `/etc/beam/beam.toml`) and log in with any Linux user account.
 
 ### Requirements
 
@@ -125,7 +125,7 @@ make doctor               # shows system status
 make dev                  # builds everything, starts server in debug mode
 ```
 
-The server runs at `https://localhost:8443` (default port). Log in with your Linux credentials. The `make dev` target ensures `beam-agent` is in PATH so sessions work correctly.
+The server runs at `https://localhost:8444` (default port). Log in with your Linux credentials. The `make dev` target ensures `beam-agent` is in PATH so sessions work correctly.
 
 ### Common Targets
 

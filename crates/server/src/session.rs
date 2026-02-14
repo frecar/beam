@@ -541,7 +541,15 @@ impl SessionManager {
     ) -> Result<Child> {
         let display_str = format!(":{}", info.display);
 
-        let mut cmd = Command::new("beam-agent");
+        // Try to find the agent binary in the same directory as the server,
+        // or fall back to "beam-agent" in PATH.
+        let agent_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|parent| parent.join("beam-agent")))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| "beam-agent".into());
+
+        let mut cmd = Command::new(agent_path);
         cmd.arg("--display")
             .arg(&display_str)
             .arg("--session-id")

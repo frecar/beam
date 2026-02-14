@@ -135,6 +135,8 @@ let isReturningToLogin = false;
 // For calculating received video bitrate from inbound-rtp stats
 let prevBytesReceived = 0;
 let prevStatsTimestamp = 0;
+let prevPacketsReceived = 0;
+let prevPacketsLost = 0;
 
 // Cumulative bytes received during this session (for bandwidth indicator)
 let sessionBytesReceived = 0;
@@ -163,6 +165,13 @@ let totalPacketsLost = 0;
 
 // Track connection state so quality updates only apply when connected
 let currentConnectionState: "disconnected" | "connecting" | "connected" | "error" = "disconnected";
+
+// --- Auto quality mode ---
+const QUALITY_MODE_KEY = "beam_quality_mode";
+let qualityMode: "auto" | "high" | "low" = "auto";
+let autoQualityLevel: "high" | "low" = "high";
+let qualityScoreHistory: { score: number; time: number }[] = [];
+const nqDot = document.getElementById("nq-dot") as HTMLSpanElement;
 
 // Idle timeout warning state
 let lastActivity = Date.now();
@@ -308,6 +317,103 @@ function updateConnectionQuality(rttMs: number): void {
   } else {
     statusDot.style.backgroundColor = "#4ade80";
     statusText.textContent = "Connected";
+  }
+}
+
+// --- Network quality monitor ---
+
+/** Compute a 0-100 network quality score from RTT and packet loss */
+function computeNetworkScore(rttMs: number | null, lossPercent: number): number {
+  let rttScore = 100;
+  if (rttMs !== null) {
+    if (rttMs > 100) rttScore = 20;
+    else if (rttMs > 50) rttScore = 50;
+    else if (rttMs > 20) rttScore = 80;
+  }
+
+  let lossScore = 100;
+  if (lossPercent > 1) lossScore = 20;
+  else if (lossPercent > 0.1) lossScore = 60;
+
+  return Math.round((rttScore + lossScore) / 2);
+}
+
+/** Update the network quality dot color */
+function updateNetworkQualityDot(score: number): void {
+  if (currentConnectionState !== "connected") {
+    nqDot.classList.remove("visible");
+    return;
+  }
+  nqDot.classList.remove("nq-good", "nq-fair", "nq-poor");
+  if (score > 70) {
+    nqDot.classList.add("nq-good");
+  } else if (score > 40) {
+    nqDot.classList.add("nq-fair");
+  } else {
+    nqDot.classList.add("nq-poor");
+  }
+  nqDot.classList.add("visible");
+}
+
+/** Update the quality select option text to reflect auto level */
+function updateQualitySelectDisplay(): void {
+  const qualitySelect = document.getElementById("quality-select") as HTMLSelectElement | null;
+  if (!qualitySelect) return;
+  const autoOption = qualitySelect.querySelector('option[value="auto"]') as HTMLOptionElement | null;
+  if (autoOption) {
+    autoOption.textContent = qualityMode === "auto"
+      ? `Auto (${autoQualityLevel === "high" ? "High" : "Low"})`
+      : "Auto";
+  }
+}
+
+/** Switch auto quality level and notify the agent */
+function switchAutoQuality(level: "high" | "low"): void {
+  if (autoQualityLevel === level) return;
+  autoQualityLevel = level;
+
+  // Send quality command to agent
+  connection?.sendInput({ t: "q", mode: level });
+
+  // Update select display
+  updateQualitySelectDisplay();
+
+  // Toast notification
+  if (level === "low") {
+    ui?.showNotification("Quality reduced due to network conditions", "warning");
+  } else {
+    ui?.showNotification("Quality restored to high", "success");
+  }
+}
+
+/** Feed stats to the network quality monitor (called from pollWebRTCStats) */
+function updateNetworkQualityMonitor(rttMs: number | null, lossPercent: number): void {
+  const score = computeNetworkScore(rttMs, lossPercent);
+  const now = Date.now();
+
+  // Always update the dot (visible regardless of auto mode)
+  updateNetworkQualityDot(score);
+
+  if (qualityMode !== "auto") return;
+
+  qualityScoreHistory.push({ score, time: now });
+  // Keep last 15 seconds of history
+  qualityScoreHistory = qualityScoreHistory.filter(s => now - s.time < 15_000);
+
+  if (autoQualityLevel === "high") {
+    // Drop to low: score < 40 sustained for 5 seconds
+    const fiveSecsAgo = now - 5_000;
+    const recent = qualityScoreHistory.filter(s => s.time >= fiveSecsAgo);
+    if (recent.length >= 3 && recent.every(s => s.score < 40)) {
+      switchAutoQuality("low");
+    }
+  } else {
+    // Restore to high: score > 70 sustained for 10 seconds
+    const tenSecsAgo = now - 10_000;
+    const recent = qualityScoreHistory.filter(s => s.time >= tenSecsAgo);
+    if (recent.length >= 5 && recent.every(s => s.score > 70)) {
+      switchAutoQuality("high");
+    }
   }
 }
 
@@ -600,17 +706,27 @@ async function pollWebRTCStats(): Promise<void> {
     lastVideoResolution = `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`;
   }
 
-  // Calculate loss percentage
-  const lossPercent =
+  // Calculate interval loss percentage for better reactivity in auto-quality
+  let intervalLossPercent = 0;
+  const deltaReceived = packetsReceived - prevPacketsReceived;
+  const deltaLost = Math.max(0, packetsLost - prevPacketsLost);
+  if (deltaReceived + deltaLost > 0) {
+    intervalLossPercent = (deltaLost / (deltaReceived + deltaLost)) * 100;
+  }
+  prevPacketsReceived = packetsReceived;
+  prevPacketsLost = packetsLost;
+
+  // Calculate cumulative loss percentage for display
+  const cumulativeLossPercent =
     packetsReceived > 0 ? (packetsLost / packetsReceived) * 100 : 0;
 
   // Update latency stats display in status bar
-  updateLatencyStats(rttMs, currentDecodeTimeMs, lossPercent);
+  updateLatencyStats(rttMs, currentDecodeTimeMs, cumulativeLossPercent);
 
   // Update performance overlay state
   if (rttMs !== null) perfLatency = rttMs;
   if (bitrateKbps !== null) perfBitrate = bitrateKbps;
-  perfLoss = Math.round(lossPercent * 10) / 10;
+  perfLoss = Math.round(cumulativeLossPercent * 10) / 10;
   updatePerfOverlay();
 
   // Update status bar connection quality indicator based on latency
@@ -618,6 +734,9 @@ async function pollWebRTCStats(): Promise<void> {
 
   // Update bandwidth indicator in status bar
   updateBandwidthIndicator(bitrateKbps, sessionBytesReceived);
+
+  // Feed the network quality monitor with interval loss
+  updateNetworkQualityMonitor(rttMs, intervalLossPercent);
 
   // Warn if video element has no frames decoded yet (debugging aid)
   if (remoteVideo.srcObject && remoteVideo.videoWidth === 0 && remoteVideo.videoHeight === 0) {
@@ -1379,6 +1498,8 @@ function handleDisconnect(): void {
   currentSessionId = null;
   prevBytesReceived = 0;
   prevStatsTimestamp = 0;
+  prevPacketsReceived = 0;
+  prevPacketsLost = 0;
   sessionBytesReceived = 0;
   prevAudioBytesReceived = 0;
   prevAudioStatsTimestamp = 0;
@@ -1397,8 +1518,10 @@ function handleDisconnect(): void {
   hideClipboardHistoryPanel();
   hideAdminPanel();
 
-  // Hide bandwidth indicator
+  // Hide bandwidth indicator and network quality dot
   bandwidthIndicator.classList.remove("visible");
+  nqDot.classList.remove("visible");
+  qualityScoreHistory = [];
 
   // Reset latency stats display
   lsRtt.textContent = "RTT: --";
@@ -1809,9 +1932,18 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
       const qualitySelect = document.getElementById("quality-select") as HTMLSelectElement | null;
       if (qualitySelect) {
         qualitySelect.onchange = () => {
-          const mode = qualitySelect.value;
-          localStorage.setItem("beam_quality_mode", mode);
-          connection?.sendInput({ t: "q", mode });
+          const mode = qualitySelect.value as "auto" | "high" | "low";
+          localStorage.setItem(QUALITY_MODE_KEY, mode);
+          qualityMode = mode;
+          qualityScoreHistory = [];
+          if (mode === "auto") {
+            // Default to high, let the monitor adjust
+            autoQualityLevel = "high";
+            connection?.sendInput({ t: "q", mode: "high" });
+          } else {
+            connection?.sendInput({ t: "q", mode });
+          }
+          updateQualitySelectDisplay();
         };
       }
 
@@ -1838,8 +1970,11 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     // requestVideoFrameCallback never fires, and we're stuck forever.
     inputHandler.sendLayout();
     inputHandler.sendCurrentDimensions();
-    const savedQuality = localStorage.getItem("beam_quality_mode") || "high";
-    sendInput({ t: "q", mode: savedQuality });
+    const savedQuality = localStorage.getItem(QUALITY_MODE_KEY) || "auto";
+    qualityMode = savedQuality as "auto" | "high" | "low";
+    const effectiveQuality = qualityMode === "auto" ? autoQualityLevel : qualityMode;
+    sendInput({ t: "q", mode: effectiveQuality });
+    updateQualitySelectDisplay();
 
     if (!fileUploader) {
       fileUploader = new FileUploader(sendInput);
@@ -2326,6 +2461,17 @@ const savedUsername = localStorage.getItem("beam_username");
 if (savedUsername) {
   usernameInput.value = savedUsername;
   passwordInput.focus();
+}
+
+// Restore saved quality mode selection
+const savedQualityMode = localStorage.getItem(QUALITY_MODE_KEY);
+if (savedQualityMode) {
+  qualityMode = savedQualityMode as "auto" | "high" | "low";
+  const qualitySelect = document.getElementById("quality-select") as HTMLSelectElement | null;
+  if (qualitySelect) {
+    qualitySelect.value = savedQualityMode;
+  }
+  updateQualitySelectDisplay();
 }
 
 // Restore saved session timeout selection

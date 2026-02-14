@@ -691,6 +691,20 @@
       .bandwidth-indicator.bw-yellow { color: #facc15; }
       .bandwidth-indicator.bw-red { color: #ff6b6b; }
 
+      /* Network quality dot (next to quality selector) */
+      .nq-dot {
+        display: none;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #666;
+        flex-shrink: 0;
+      }
+      .nq-dot.visible { display: inline-block; }
+      .nq-dot.nq-good { background: #4ade80; }
+      .nq-dot.nq-fair { background: #facc15; }
+      .nq-dot.nq-poor { background: #ff6b6b; }
+
       /* Idle timeout warning banner */
       #idle-warning {
         display: none;
@@ -1781,9 +1795,11 @@
         </select>
         <div class="status-separator" aria-hidden="true"></div>
         <select class="status-select" id="quality-select" title="Quality mode" aria-label="Quality mode">
+          <option value="auto">Auto</option>
           <option value="high">High</option>
           <option value="low">Low</option>
         </select>
+        <span class="nq-dot" id="nq-dot" title="Network quality" aria-hidden="true"></span>
         <div class="status-separator" aria-hidden="true"></div>
         <select class="status-select" id="scroll-speed-select" title="Scroll speed" aria-label="Scroll speed">
           <option value="0.5">Scroll 0.5x</option>

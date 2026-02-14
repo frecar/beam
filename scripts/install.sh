@@ -139,7 +139,7 @@ if ! "$INSTALL_DIR/beam-server" --help >/dev/null 2>&1; then
     exit 1
 fi
 
-PORT=$(grep -oP 'port\s*=\s*\K\d+' "$CONFIG_DIR/beam.toml" 2>/dev/null || echo "8443")
+PORT=$(grep -oP 'port\s*=\s*\K\d+' "$CONFIG_DIR/beam.toml" 2>/dev/null || echo "8444")
 
 ok ""
 ok "Beam installed successfully!"

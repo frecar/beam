@@ -10,7 +10,7 @@ use beam_protocol::{AuthRequest, AuthResponse, BeamConfig, IceServerInfo, Signal
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 use crate::auth;
@@ -175,7 +175,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(Arc::clone(&state));
 
     // Serve static files (configurable path, defaults to "web/dist")
-    let serve_dir = ServeDir::new(&state.config.server.web_root);
+    let serve_dir = ServeDir::new(&state.config.server.web_root).fallback(ServeFile::new(format!(
+        "{}/index.html",
+        state.config.server.web_root
+    )));
 
     api.fallback_service(serve_dir)
         .layer(axum::middleware::from_fn(security_headers))

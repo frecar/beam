@@ -2,7 +2,7 @@
 
 [server]
 bind = "0.0.0.0"
-port = 8443
+port = 8444
 # web_root = "/usr/share/beam/web/dist"  # Default: "web/dist" (relative to CWD)
 # tls_cert = "/etc/beam/cert.pem"    # Auto-generated if absent
 # tls_key = "/etc/beam/key.pem"      # Auto-generated if absent
