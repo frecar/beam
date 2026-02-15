@@ -99,6 +99,7 @@ async function detectKeyboardLayout(): Promise<string> {
 export class InputHandler {
   private target: HTMLElement;
   private videoElement: HTMLVideoElement | null;
+  private localCursor: HTMLElement | null;
   private sendInput: (event: InputEvent) => void;
   private active = false;
   private pointerLocked = false;
@@ -137,12 +138,18 @@ export class InputHandler {
   private onTouchMove = this.handleTouchMove.bind(this);
   private onTouchEnd = this.handleTouchEnd.bind(this);
 
+  // Coalescing state
+  private pendingMouseMove: { x: number; y: number } | null = null;
+  private pendingRelativeMouseMove: { dx: number; dy: number } | null = null;
+  private animationFrameId: number | null = null;
+
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(target: HTMLElement, sendInput: (event: InputEvent) => void) {
     this.target = target;
     this.videoElement = target.querySelector("video");
+    this.localCursor = document.getElementById("local-cursor");
     this.sendInput = sendInput;
   }
 
@@ -257,6 +264,17 @@ export class InputHandler {
     this.target.removeEventListener("touchmove", this.onTouchMove);
     this.target.removeEventListener("touchend", this.onTouchEnd);
     this.cancelLongPress();
+
+    // Cancel pending mouse-move coalescing
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+    this.pendingMouseMove = null;
+    this.pendingRelativeMouseMove = null;
+
+    // Hide local cursor
+    this.localCursor?.classList.remove("visible");
 
     // Exit pointer lock if active
     if (this.pointerLocked && document.pointerLockElement) {
@@ -415,26 +433,81 @@ export class InputHandler {
 
   private handleMouseMove(e: MouseEvent): void {
     if (this.pointerLocked) {
-      // Pointer lock: send raw pixel deltas
+      // Pointer lock: aggregate pixel deltas
       const dx = e.movementX;
       const dy = e.movementY;
       if (dx !== 0 || dy !== 0) {
-        this.sendInput({ t: "rm", dx, dy });
+        if (!this.pendingRelativeMouseMove) {
+          this.pendingRelativeMouseMove = { dx, dy };
+        } else {
+          this.pendingRelativeMouseMove.dx += dx;
+          this.pendingRelativeMouseMove.dy += dy;
+        }
+        this.scheduleFrame();
       }
     } else {
       // Normal: send absolute coordinates
       const coords = this.getVideoCoords(e);
       if (coords) {
-        this.sendInput({ t: "m", x: coords.x, y: coords.y });
+        this.pendingMouseMove = coords;
+        this.scheduleFrame();
       }
     }
+  }
+
+  private scheduleFrame(): void {
+    if (this.animationFrameId !== null) return;
+    this.animationFrameId = requestAnimationFrame(() => {
+      this.animationFrameId = null;
+      if (this.pendingMouseMove) {
+        this.sendInput({ t: "m", x: this.pendingMouseMove.x, y: this.pendingMouseMove.y });
+        this.updateLocalCursor(this.pendingMouseMove.x, this.pendingMouseMove.y);
+        this.pendingMouseMove = null;
+      }
+      if (this.pendingRelativeMouseMove) {
+        this.sendInput({ t: "rm", dx: this.pendingRelativeMouseMove.dx, dy: this.pendingRelativeMouseMove.dy });
+        this.pendingRelativeMouseMove = null;
+      }
+    });
+  }
+
+  /** Update local cursor visual position (0-1 normalized coordinates) */
+  private updateLocalCursor(x: number, y: number): void {
+    if (!this.localCursor || !this.videoElement || this.pointerLocked) return;
+
+    const video = this.videoElement;
+    const rect = video.getBoundingClientRect();
+    const videoAspect = video.videoWidth / video.videoHeight || rect.width / rect.height;
+    const containerAspect = rect.width / rect.height;
+
+    let renderWidth: number, renderHeight: number, offsetX: number, offsetY: number;
+    if (containerAspect > videoAspect) {
+      renderHeight = rect.height;
+      renderWidth = rect.height * videoAspect;
+      offsetX = (rect.width - renderWidth) / 2;
+      offsetY = 0;
+    } else {
+      renderWidth = rect.width;
+      renderHeight = rect.width / videoAspect;
+      offsetX = 0;
+      offsetY = (rect.height - renderHeight) / 2;
+    }
+
+    const left = offsetX + x * renderWidth;
+    const top = offsetY + y * renderHeight;
+
+    this.localCursor.style.left = `${left}px`;
+    this.localCursor.style.top = `${top}px`;
+    this.localCursor.classList.add("visible");
   }
 
   private handleMouseDown(e: MouseEvent): void {
     e.preventDefault();
     const coords = this.getVideoCoords(e);
     if (coords) {
+      // Send coordinates immediately for clicks to ensure accuracy
       this.sendInput({ t: "m", x: coords.x, y: coords.y });
+      this.pendingMouseMove = null;
     }
 
     // Middle-click (button 1): try to sync browser clipboard to the remote
@@ -513,6 +586,9 @@ export class InputHandler {
 
   private handlePointerLockChange(): void {
     this.pointerLocked = document.pointerLockElement === this.target;
+    if (this.pointerLocked && this.localCursor) {
+      this.localCursor.classList.remove("visible");
+    }
   }
 
   // --- Resize ---
@@ -632,7 +708,9 @@ export class InputHandler {
     const touch = e.touches[0];
     const coords = this.getTouchVideoCoords(touch);
     if (coords) {
+      // Send coordinates immediately for clicks to ensure accuracy
       this.sendInput({ t: "m", x: coords.x, y: coords.y });
+      this.pendingMouseMove = null;
     }
 
     // Start long-press timer for right-click
@@ -673,7 +751,8 @@ export class InputHandler {
 
     const coords = this.getTouchVideoCoords(touch);
     if (coords) {
-      this.sendInput({ t: "m", x: coords.x, y: coords.y });
+      this.pendingMouseMove = coords;
+      this.scheduleFrame();
     }
   }
 

@@ -80,9 +80,11 @@ pub async fn remove_channel(registry: &ChannelRegistry, session_id: Uuid) {
 /// Only one browser per session at a time. Connecting a new browser
 /// kicks the previous one with close code 4001 ("replaced").
 pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry: ChannelRegistry) {
+    tracing::info!(%session_id, "Browser WebSocket upgrade request");
     let channel = get_or_create_channel(&registry, session_id).await;
 
     // Kick any existing browser for this session
+    tracing::info!(%session_id, "Kicking any existing browsers for this session");
     channel.browser_kick.notify_waiters();
 
     let mut from_agent = channel.to_browser.subscribe();
@@ -191,6 +193,7 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
 /// Agent sends → to_browser channel (browser reads these).
 /// Agent receives ← to_agent channel wrapped in AgentCommand::Signal.
 pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: ChannelRegistry) {
+    tracing::info!(%session_id, "Agent WebSocket upgrade request");
     let channel = get_or_create_channel(&registry, session_id).await;
     let mut from_browser = channel.to_agent.subscribe();
 

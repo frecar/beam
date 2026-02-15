@@ -691,6 +691,24 @@
       .bandwidth-indicator.bw-yellow { color: #facc15; }
       .bandwidth-indicator.bw-red { color: #ff6b6b; }
 
+      /* Local cursor rendering */
+      #local-cursor {
+        display: none;
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        background: rgba(74, 222, 128, 0.8); /* green dot */
+        border: 2px solid white;
+        border-radius: 50%;
+        pointer-events: none;
+        z-index: 100;
+        transform: translate(-50%, -50%); /* Center on coordinates */
+        box-shadow: 0 0 4px rgba(0,0,0,0.5);
+      }
+      #local-cursor.visible {
+        display: block;
+      }
+
       /* Network quality dot (next to quality selector) */
       .nq-dot {
         display: none;
@@ -1605,6 +1623,7 @@
     <!-- Desktop View -->
     <div id="desktop-view" role="application" aria-label="Remote desktop" tabindex="-1">
       <video id="remote-video" autoplay playsinline></video>
+      <div id="local-cursor" aria-hidden="true"></div>
 
       <!-- File upload drop overlay -->
       <div id="file-drop-overlay" aria-hidden="true">

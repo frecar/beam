@@ -394,24 +394,25 @@ fn build_encoder_element(
 ) -> anyhow::Result<gst::Element> {
     let elem = match encoder_type {
         EncoderType::Nvidia => ElementFactory::make(name)
-            .property_from_str("preset", "low-latency")
-            .property_from_str("rc-mode", "vbr")
+            .property_from_str("preset", "low-latency-hq")
+            .property_from_str("rc-mode", "cbr-ld-hq")
             .property("bitrate", bitrate)
             .property("gop-size", i32::MAX)
             .property("zerolatency", true)
             .property("rc-lookahead", 0u32)
             .property("bframes", 0u32)
             .property("strict-gop", true)
-            .property("qp-max-i", 20i32)
-            .property("qp-max-p", 23i32)
-            .property("vbv-buffer-size", 200_000u32)
+            .property("qp-max-i", 25i32)
+            .property("qp-max-p", 28i32)
+            .property("vbv-buffer-size", bitrate / 60) // 1 frame buffer
             .build()
             .context("Failed to create nvh264enc")?,
         EncoderType::VaApi => ElementFactory::make(name)
             .property_from_str("rate-control", "cbr")
+            .property_from_str("bitrate-control", "cbr")
             .property("bitrate", bitrate)
             .property("target-usage", 7u32)
-            .property("key-int-max", 30u32)
+            .property("key-int-max", 60u32)
             .build()
             .context("Failed to create vah264enc")?,
         EncoderType::Software => ElementFactory::make(name)

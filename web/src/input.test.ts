@@ -6,7 +6,7 @@ import type { InputEvent } from "./connection";
 // stale .js build artifact sitting next to it. Vite transforms .ts files
 // through esbuild regardless of how they're referenced.
 // @ts-expect-error -- absolute .ts path not recognized by tsc but works in vite
-const { InputHandler } = await import("/home/frecar/code/remotedesktop/web/src/input.ts");
+const { InputHandler } = await import("/home/frecar/code/beam/web/src/input.ts");
 
 describe("roundToEven", () => {
   it("rounds odd numbers down to even", () => {
@@ -123,6 +123,7 @@ describe("InputHandler scroll multiplier", () => {
     vi.stubGlobal("document", {
       addEventListener: () => {},
       removeEventListener: () => {},
+      getElementById: () => null,
       pointerLockElement: null,
       fullscreenElement: null,
     });

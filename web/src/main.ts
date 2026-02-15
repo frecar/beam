@@ -1747,56 +1747,78 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
   showLoading("Authenticating...");
   setStatus("connecting", "Authenticating...");
 
-  try {
-    const response = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(Object.assign({
-        username,
-        password,
-        // Subtract the 28px status bar from viewport height so the remote
-        // desktop resolution matches the actual video area.
-        // Round down to even numbers (H.264 encoders require even dimensions).
-        viewport_width: Math.floor(window.innerWidth / 2) * 2,
-        viewport_height: Math.floor((window.innerHeight - 28) / 2) * 2,
-      }, sessionTimeoutSelect.value ? { idle_timeout: parseInt(sessionTimeoutSelect.value, 10) } : {})),
-    });
+  const MAX_RETRIES = 3;
+  const BASE_DELAY = 1000;
 
-    if (!response.ok) {
-      const text = await response.text();
-      let message = "Authentication failed.";
-      try {
-        const body = JSON.parse(text) as { error?: string };
-        if (body.error) message = body.error;
-      } catch {
-        // Use default message
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(Object.assign({
+          username,
+          password,
+          // Subtract the 28px status bar from viewport height so the remote
+          // desktop resolution matches the actual video area.
+          // Round down to even numbers (H.264 encoders require even dimensions).
+          viewport_width: Math.floor(window.innerWidth / 2) * 2,
+          viewport_height: Math.floor((window.innerHeight - 28) / 2) * 2,
+        }, sessionTimeoutSelect.value ? { idle_timeout: parseInt(sessionTimeoutSelect.value, 10) } : {})),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        let message = "Authentication failed.";
+        try {
+          const body = JSON.parse(text) as { error?: string };
+          if (body.error) message = body.error;
+        } catch {
+          // Use default message
+        }
+
+        // Only retry on 5xx or network errors, not on 4xx (auth failures)
+        if (response.status >= 500 && attempt < MAX_RETRIES) {
+          const delay = BASE_DELAY * Math.pow(2, attempt);
+          updateLoadingStatus(`Retrying (${attempt + 1}/${MAX_RETRIES}) in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+
+        throw new Error(message);
       }
-      throw new Error(message);
+
+      const data = (await response.json()) as LoginResponse;
+
+      // Persist session for reconnect on page refresh / browser crash
+      saveSession(data);
+      localStorage.setItem("beam_username", username);
+      // Save timeout selection for next login
+      localStorage.setItem(SESSION_TIMEOUT_KEY, sessionTimeoutSelect.value);
+      currentToken = data.token;
+      currentSessionId = data.session_id;
+      currentReleaseToken = data.release_token ?? null;
+      sessionUsername = username;
+      // Update idle timeout from server response
+      if (data.idle_timeout !== undefined) {
+        effectiveIdleTimeoutSecs = data.idle_timeout;
+      }
+      scheduleTokenRefresh();
+
+      updateLoadingStatus("Starting session...");
+      await startConnection(data.session_id, data.token);
+      return; // Success
+    } catch (err) {
+      if (attempt < MAX_RETRIES && (!(err instanceof Error) || !err.message.includes("Invalid credentials"))) {
+        const delay = BASE_DELAY * Math.pow(2, attempt);
+        updateLoadingStatus(`Retrying (${attempt + 1}/${MAX_RETRIES}) after error...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      const message = err instanceof Error ? err.message : "Connection failed.";
+      showLoadingError(message);
+      setStatus("error", message);
+      return;
     }
-
-    const data = (await response.json()) as LoginResponse;
-
-    // Persist session for reconnect on page refresh / browser crash
-    saveSession(data);
-    localStorage.setItem("beam_username", username);
-    // Save timeout selection for next login
-    localStorage.setItem(SESSION_TIMEOUT_KEY, sessionTimeoutSelect.value);
-    currentToken = data.token;
-    currentSessionId = data.session_id;
-    currentReleaseToken = data.release_token ?? null;
-    sessionUsername = username;
-    // Update idle timeout from server response
-    if (data.idle_timeout !== undefined) {
-      effectiveIdleTimeoutSecs = data.idle_timeout;
-    }
-    scheduleTokenRefresh();
-
-    updateLoadingStatus("Starting session...");
-    await startConnection(data.session_id, data.token);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Connection failed.";
-    showLoadingError(message);
-    setStatus("error", message);
   }
 }
 
@@ -2483,18 +2505,36 @@ if (savedTimeout !== null) {
 // Attempt to resume previous session on page load
 const savedSession = loadSession();
 if (savedSession) {
-  try {
-    currentToken = savedSession.token;
-    currentSessionId = savedSession.session_id;
-    currentReleaseToken = savedSession.release_token ?? null;
-    sessionUsername = localStorage.getItem("beam_username");
-    if (savedSession.idle_timeout !== undefined) {
-      effectiveIdleTimeoutSecs = savedSession.idle_timeout;
+  (async () => {
+    try {
+      // First verify the session exists on the server to avoid stuck "reconnecting" state
+      const resp = await fetch("/api/sessions", {
+        headers: { Authorization: `Bearer ${savedSession.token}` },
+      });
+
+      if (!resp.ok) {
+        throw new Error("Session invalid");
+      }
+
+      const sessions = await resp.json() as { id: string }[];
+      if (!sessions.some(s => s.id === savedSession.session_id)) {
+        throw new Error("Session not found on server");
+      }
+
+      currentToken = savedSession.token;
+      currentSessionId = savedSession.session_id;
+      currentReleaseToken = savedSession.release_token ?? null;
+      sessionUsername = localStorage.getItem("beam_username");
+      if (savedSession.idle_timeout !== undefined) {
+        effectiveIdleTimeoutSecs = savedSession.idle_timeout;
+      }
+      scheduleTokenRefresh();
+      showLoading("Resuming session...");
+      startConnection(savedSession.session_id, savedSession.token);
+    } catch (err) {
+      console.warn("Could not resume previous session:", err);
+      clearSession();
+      showLogin();
     }
-    scheduleTokenRefresh();
-    showLoading("Reconnecting...");
-    startConnection(savedSession.session_id, savedSession.token);
-  } catch {
-    clearSession();
-  }
+  })();
 }

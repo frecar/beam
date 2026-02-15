@@ -255,17 +255,21 @@ export class BeamConnection {
     };
 
     this.ws.onclose = (event: CloseEvent) => {
-      if (!this.intentionalDisconnect) {
-        // If the WebSocket never opened, the server rejected the upgrade
-        // (likely 401 expired/invalid token). Don't retry — go back to login.
-        if (!wsOpened && event.code === 1006) {
-          console.error("WebSocket rejected (likely auth failure), not retrying");
-          this.reconnectFailedCallback?.();
-          return;
+      console.log(`WebSocket closed: code=${event.code} reason=${event.reason} clean=${event.wasClean} intentional=${this.intentionalDisconnect}`);
+      // Small delay to allow intentionalDisconnect to be set if it was a fast logout
+      setTimeout(() => {
+        if (!this.intentionalDisconnect) {
+          // If the WebSocket never opened, the server rejected the upgrade
+          // (likely 401 expired/invalid token). Don't retry — go back to login.
+          if (!wsOpened && event.code === 1006) {
+            console.error("WebSocket rejected (likely auth failure), not retrying");
+            this.reconnectFailedCallback?.();
+            return;
+          }
+          this.scheduleReconnect();
         }
-        this.scheduleReconnect();
-      }
-      this.disconnectCallback?.();
+        this.disconnectCallback?.();
+      }, 50);
     };
 
     this.ws.onerror = () => {
@@ -583,6 +587,7 @@ export class BeamConnection {
   }
 
   private scheduleReconnect(): void {
+    console.log(`Scheduling reconnect: intentional=${this.intentionalDisconnect} timer=${!!this.reconnectTimer} attempt=${this.reconnectAttempt}`);
     if (this.intentionalDisconnect || this.reconnectTimer) return;
 
     if (this.reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {

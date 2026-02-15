@@ -24,6 +24,14 @@
 - Deploy and restart: `sudo make deploy`
 - Uninstall: `sudo make uninstall`
 
+## Configuration
+- Default port: `8444` (avoids conflict with DCV on 8443)
+- SPA Fallback: Enabled (unknown paths serve `index.html`)
+- Performance:
+  - Input: Unordered DataChannels, coalesced mouse moves (RAF)
+  - Visual: Local cursor rendering for zero-latency feel
+  - Video: Ultra-low latency encoder tuning (`cbr-low-delay-hq`)
+
 ## Project Structure
 - `crates/agent`: Remote desktop agent (Rust)
 - `crates/server`: Signaling and authentication server (Rust)
