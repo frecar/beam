@@ -1702,7 +1702,7 @@ function toggleFullscreen(): void {
 
 /** Update the forward keys button to reflect current state */
 function updateForwardKeysButton(enabled: boolean): void {
-  btnForwardKeys.textContent = enabled ? "Fwd Keys: On" : "Fwd Keys";
+  btnForwardKeys.textContent = enabled ? "Capturing" : "Capture";
   btnForwardKeys.classList.toggle("active", enabled);
   btnForwardKeys.setAttribute("aria-pressed", String(enabled));
 }
