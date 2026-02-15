@@ -2,11 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { roundToEven, isSignificantResize } from "./resize";
 import type { InputEvent } from "./connection";
 
-// Use absolute path to ensure vite resolves the .ts source file, not the
-// stale .js build artifact sitting next to it. Vite transforms .ts files
-// through esbuild regardless of how they're referenced.
-// @ts-expect-error -- absolute .ts path not recognized by tsc but works in vite
-const { InputHandler } = await import("/home/frecar/code/beam/web/src/input.ts");
+import { InputHandler } from "./input";
 
 describe("roundToEven", () => {
   it("rounds odd numbers down to even", () => {
