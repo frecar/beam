@@ -10,7 +10,7 @@ use beam_protocol::{AuthRequest, AuthResponse, BeamConfig, IceServerInfo, Signal
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 use crate::auth;
@@ -174,11 +174,41 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(RequestBodyLimitLayer::new(65_536)) // 64KB max request body
         .with_state(Arc::clone(&state));
 
-    // Serve static files (configurable path, defaults to "web/dist")
-    let serve_dir = ServeDir::new(&state.config.server.web_root).fallback(ServeFile::new(format!(
-        "{}/index.html",
-        state.config.server.web_root
-    )));
+    // Serve static files with SPA-aware fallback.
+    // - Paths WITH a file extension that don't exist on disk → 404
+    //   (prevents serving index.html as JS/CSS, which browsers reject)
+    // - Paths WITHOUT a file extension → serve index.html for client-side routing
+    let web_root_for_fallback = state.config.server.web_root.clone();
+    let serve_dir = ServeDir::new(&state.config.server.web_root).fallback(tower::service_fn(
+        move |req: axum::http::Request<axum::body::Body>| {
+            let web_root = web_root_for_fallback.clone();
+            async move {
+                let path = req.uri().path();
+                let has_extension = path.rsplit('/').next().is_some_and(|seg| seg.contains('.'));
+
+                if has_extension {
+                    Ok(axum::http::Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .header("content-type", "text/plain")
+                        .body(axum::body::Body::from("Not found"))
+                        .unwrap())
+                } else {
+                    match tokio::fs::read(format!("{}/index.html", web_root)).await {
+                        Ok(index) => Ok(axum::http::Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "text/html; charset=utf-8")
+                            .body(axum::body::Body::from(index))
+                            .unwrap()),
+                        Err(_) => Ok(axum::http::Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .header("content-type", "text/plain")
+                            .body(axum::body::Body::from("Not found"))
+                            .unwrap()),
+                    }
+                }
+            }
+        },
+    ));
 
     api.fallback_service(serve_dir)
         .layer(axum::middleware::from_fn(security_headers))

@@ -201,7 +201,10 @@ jobs:
             apt-get update -qq &&
             dpkg -i /debs/beam_*_${{ matrix.arch }}.deb || apt-get install -f -y -qq &&
             beam-server --version &&
-            beam-doctor --help || true
+            beam-doctor --help || true &&
+            test -f /usr/share/beam/web/dist/index.html &&
+            ls /usr/share/beam/web/dist/assets/*.js >/dev/null 2>&1 &&
+            echo 'Web assets verified OK'
           "
 
   publish-apt:

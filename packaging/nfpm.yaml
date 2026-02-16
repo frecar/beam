@@ -54,8 +54,9 @@ contents:
     file_info:
       mode: 0755
 
-  - src: staging/usr/share/beam/web/dist/
-    dst: /usr/share/beam/web/dist/
+  - src: staging/usr/share/beam/web/dist
+    dst: /usr/share/beam/web/dist
+    type: tree
 
   - src: config/beam-production.toml
     dst: /etc/beam/beam.toml
