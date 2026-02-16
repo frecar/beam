@@ -38,8 +38,16 @@ impl VirtualDisplay {
 
         let display_str = format!(":{display_num}");
 
-        // Start Xorg with the dummy driver
-        let mut child = Command::new("Xorg")
+        // Start Xorg with the dummy driver.
+        // Use the real Xorg binary directly, bypassing Xorg.wrap which rejects
+        // non-console users in systemd service contexts even with
+        // allowed_users=anybody in Xwrapper.config.
+        let xorg_bin = if std::path::Path::new("/usr/lib/xorg/Xorg").exists() {
+            "/usr/lib/xorg/Xorg"
+        } else {
+            "Xorg"
+        };
+        let mut child = Command::new(xorg_bin)
             .arg(&display_str)
             .arg("-config")
             .arg(&config_path)
