@@ -664,9 +664,16 @@ Section "Screen"
     EndSubSection
 EndSection
 
+Section "ServerFlags"
+    Option "AutoAddDevices" "false"
+    Option "AutoEnableDevices" "false"
+    Option "DontVTSwitch" "true"
+EndSection
+
 Section "ServerLayout"
     Identifier  "Beam Layout"
     Screen      "Beam Screen"
+    Option "AutoAddDevices" "false"
 EndSection
 "#,
     )

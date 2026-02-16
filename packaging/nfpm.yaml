@@ -21,19 +21,19 @@ depends:
   - libopus0
   - libpam0g
   - xserver-xorg-core
+  - xserver-xorg-video-dummy
+  - x11-xserver-utils
+  - x11-xkb-utils
 
 recommends:
   - gstreamer1.0-plugins-bad
   - gstreamer1.0-plugins-ugly
-  - xserver-xorg-video-dummy
+  - xfce4
   - pulseaudio | pipewire-pulse
-  - x11-xserver-utils
-  - x11-xkb-utils
   - xclip
   - libcap2-bin
 
 suggests:
-  - xfce4
   - gnome-keyring
   - gstreamer1.0-vaapi
   - xdotool

@@ -83,6 +83,24 @@ else
     fail "Xorg not found — install xserver-xorg-core"
 fi
 
+# Check Xwrapper.config allows non-console users
+if [ -f /etc/X11/Xwrapper.config ]; then
+    if grep -qs 'allowed_users=anybody' /etc/X11/Xwrapper.config; then
+        pass "Xwrapper allows non-console users"
+    else
+        fail "Xwrapper restricts X to console users — run: echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config"
+    fi
+else
+    warn "No /etc/X11/Xwrapper.config — Xorg may reject virtual display creation"
+fi
+
+# Check dummy video driver
+if [ -f /usr/lib/xorg/modules/drivers/dummy_drv.so ]; then
+    pass "Xorg dummy driver installed"
+else
+    fail "Xorg dummy driver missing — install xserver-xorg-video-dummy"
+fi
+
 if command -v xrandr >/dev/null 2>&1; then
     pass "xrandr found"
 else

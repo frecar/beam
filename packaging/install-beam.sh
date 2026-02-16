@@ -9,7 +9,7 @@ echo "Installing Beam Remote Desktop..."
 
 # Add GPG key
 mkdir -p /etc/apt/keyrings
-curl -fsSL "${REPO_URL}/gpg/beam.gpg" | gpg --dearmor -o /etc/apt/keyrings/beam.gpg
+curl -fsSL "${REPO_URL}/gpg/beam.gpg" | gpg --batch --yes --dearmor -o /etc/apt/keyrings/beam.gpg
 
 # Add APT source
 ARCH=$(dpkg --print-architecture)

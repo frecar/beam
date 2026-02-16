@@ -16,6 +16,17 @@ if command -v setcap >/dev/null 2>&1; then
     setcap cap_sys_nice=ep /usr/local/bin/beam-agent 2>/dev/null || true
 fi
 
+# Allow non-console users to start Xorg (required for virtual displays)
+if [ -d /etc/X11 ]; then
+    if ! grep -qs 'allowed_users=anybody' /etc/X11/Xwrapper.config 2>/dev/null; then
+        cat > /etc/X11/Xwrapper.config << 'XWRAP'
+# Configured by Beam to allow virtual display creation
+allowed_users=anybody
+needs_root_rights=no
+XWRAP
+    fi
+fi
+
 # Reload udev rules for uinput access
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
