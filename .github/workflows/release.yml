@@ -236,17 +236,29 @@ jobs:
       - name: Prepare APT repository
         run: |
           mkdir -p apt-repo/pool/main/b/beam apt-repo/gpg
+          mkdir -p apt-repo/dists/stable/main/binary-amd64
+          mkdir -p apt-repo/dists/stable/main/binary-arm64
           cp deb-amd64/*.deb deb-arm64/*.deb apt-repo/pool/main/b/beam/
 
-          # Generate package index
           cd apt-repo
-          dpkg-scanpackages pool/ > Packages
-          gzip -k Packages
 
-          # Generate Release file
-          apt-ftparchive release . > Release
+          # Generate per-architecture package indices
+          dpkg-scanpackages --arch amd64 pool/ > dists/stable/main/binary-amd64/Packages
+          gzip -k dists/stable/main/binary-amd64/Packages
+
+          dpkg-scanpackages --arch arm64 pool/ > dists/stable/main/binary-arm64/Packages
+          gzip -k dists/stable/main/binary-arm64/Packages
+
+          # Generate Release file with architecture info
+          cd dists/stable
+          apt-ftparchive -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+            -o APT::FTPArchive::Release::Components="main" \
+            -o APT::FTPArchive::Release::Suite="stable" \
+            release . > Release
           gpg --batch --yes --armor --detach-sign --output Release.gpg Release
           gpg --batch --yes --armor --clearsign --output InRelease Release
+
+          cd ../..
 
           # Export public key
           gpg --armor --export ${GPG_KEY_ID} > gpg/beam.gpg

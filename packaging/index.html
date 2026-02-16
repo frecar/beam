@@ -975,7 +975,7 @@
                 <span class="terminal-prompt">$</span>
                 <span class="terminal-cmd">beam-server <span class="terminal-flag">--version</span></span>
               </div>
-              <div class="terminal-output">beam-server 0.1.5</div>
+              <div class="terminal-output">beam-server 0.1.6</div>
               <div class="terminal-output">&nbsp;</div>
               <div class="terminal-output">Open <span class="terminal-url">https://your-server:8444</span> in any browser.</div>
               <div class="terminal-output">Log in with any Linux user account.</div>
@@ -1077,7 +1077,7 @@
 <span class="comment"># Add the repository</span>
 <span class="cmd">echo</span> "deb [arch=$(dpkg --print-architecture) \
   signed-by=/etc/apt/keyrings/beam.gpg] \
-  https://frecar.github.io/beam ./" \
+  https://frecar.github.io/beam stable main" \
   | <span class="cmd">sudo</span> tee /etc/apt/sources.list.d/beam.list
 
 <span class="comment"># Install</span>
