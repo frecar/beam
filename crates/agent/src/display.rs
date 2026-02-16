@@ -301,17 +301,19 @@ impl VirtualDisplay {
                     let keyring_dir = format!("/tmp/beam-keyring-{display_num}");
                     let keyring_data_dir = format!("/tmp/beam-keyring-{display_num}/data");
                     let keyrings_dir = format!("{keyring_data_dir}/keyrings");
-                    let _ = fs::create_dir_all(&keyring_dir);
+
+                    // Clean up stale keyring data from previous sessions.
+                    // Different users may have used this display number, leaving
+                    // directories owned by another user (mode 700) that we can't
+                    // write into. Fresh start ensures correct ownership.
+                    let _ = fs::remove_dir_all(&keyring_dir);
                     let _ = fs::create_dir_all(&keyrings_dir);
 
                     // Pre-create the "login" keyring and default alias so Chrome
                     // and other libsecret consumers don't prompt "Set password
                     // for new keyring". The --unlock flag will adopt and unlock
                     // this keyring with the empty password from stdin.
-                    let login_keyring_path = format!("{keyrings_dir}/login.keyring");
-                    if !std::path::Path::new(&login_keyring_path).exists() {
-                        let _ = fs::write(&login_keyring_path, b"");
-                    }
+                    let _ = fs::write(format!("{keyrings_dir}/login.keyring"), b"");
                     let _ = fs::write(format!("{keyrings_dir}/default"), "login");
 
                     // Use a shell pipe to reliably deliver the empty password
