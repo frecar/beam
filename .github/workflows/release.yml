@@ -251,27 +251,8 @@ jobs:
           # Export public key
           gpg --armor --export ${GPG_KEY_ID} > gpg/beam.gpg
 
-      - name: Create landing page
-        run: |
-          cat > apt-repo/index.html << 'HTMLEOF'
-          <!DOCTYPE html>
-          <html><head><title>Beam Remote Desktop</title></head>
-          <body>
-          <h1>Beam Remote Desktop</h1>
-          <p>GPU-accelerated remote desktop for Ubuntu, streaming to any browser via WebRTC.</p>
-          <h2>Install</h2>
-          <pre>
-          curl -fsSL https://frecar.github.io/beam/install | sudo bash
-          </pre>
-          <p>Or manually:</p>
-          <pre>
-          curl -fsSL https://frecar.github.io/beam/gpg/beam.gpg | sudo tee /etc/apt/keyrings/beam.gpg > /dev/null
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/beam.gpg] https://frecar.github.io/beam/apt stable main" | sudo tee /etc/apt/sources.list.d/beam.list
-          sudo apt-get update && sudo apt-get install beam
-          </pre>
-          <p><a href="https://github.com/frecar/beam">GitHub</a></p>
-          </body></html>
-          HTMLEOF
+      - name: Copy landing page
+        run: cp packaging/index.html apt-repo/index.html
 
       - name: Finalize repository
         run: |
