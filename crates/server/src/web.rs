@@ -1024,9 +1024,11 @@ async fn release_session(
 
     tracing::info!(%id, "Session release requested, starting 60s grace period");
 
-    // Get the cancel flag and spawn the grace-period cleanup task
-    let cancel = match state.session_manager.start_grace_period(id).await {
-        Some(c) => c,
+    // Get the generation counter and spawn the grace-period cleanup task.
+    // Each new grace period bumps the generation, so overlapping timers
+    // from rapid disconnect/reconnect cycles don't race with each other.
+    let (gen_counter, my_gen) = match state.session_manager.start_grace_period(id).await {
+        Some(pair) => pair,
         None => {
             return (StatusCode::NOT_FOUND, "Session not found").into_response();
         }
@@ -1036,8 +1038,9 @@ async fn release_session(
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
-        // Check if the grace period was cancelled (browser reconnected)
-        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        // Check if the grace period was cancelled (browser reconnected or
+        // a newer grace period superseded this one)
+        if gen_counter.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
             tracing::info!(%id, "Grace period cancelled — browser reconnected");
             return;
         }

@@ -81,6 +81,11 @@ contents:
     file_info:
       mode: 0700
 
+  - dst: /var/log/beam/
+    type: dir
+    file_info:
+      mode: 0755
+
 scripts:
   postinstall: packaging/scripts/postinstall.sh
   preremove: packaging/scripts/preremove.sh

@@ -259,6 +259,9 @@ async fn main() -> Result<()> {
         )
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
 
+    // Clean up old agent logs on startup (keep last 20, remove >24h old)
+    cleanup_old_agent_logs(24 * 3600, 20);
+
     // Print startup banner
     tracing::info!("===========================================");
     tracing::info!(
@@ -379,4 +382,38 @@ async fn main() -> Result<()> {
     tracing::info!("Beam server shut down cleanly (sessions persisted)");
 
     Ok(())
+}
+
+/// Remove old agent logs from /var/log/beam/, keeping at most `max_count`
+/// and removing any older than `max_age_secs`.
+fn cleanup_old_agent_logs(max_age_secs: u64, max_count: usize) {
+    let dir = std::path::Path::new("/var/log/beam");
+    let _ = std::fs::create_dir_all(dir);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let now = std::time::SystemTime::now();
+    let mut logs: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("agent-") && n.ends_with(".log"))
+        })
+        .filter_map(|e| {
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((e.path(), mtime))
+        })
+        .collect();
+
+    // Sort newest first
+    logs.sort_by(|a, b| b.1.cmp(&a.1));
+
+    for (i, (path, mtime)) in logs.iter().enumerate() {
+        let age = now.duration_since(*mtime).unwrap_or_default().as_secs();
+        if i >= max_count || age > max_age_secs {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }

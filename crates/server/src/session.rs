@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -130,9 +130,10 @@ struct ManagedSession {
     pub agent_token: String,
     /// Short token for browser tab close release (sent via sendBeacon)
     pub release_token: String,
-    /// Set to true when a browser WebSocket reconnects, cancelling any
-    /// pending grace-period cleanup spawned by the release endpoint.
-    pub grace_cancel: Arc<AtomicBool>,
+    /// Generation counter for grace-period cancellation. Each new grace period
+    /// increments this; the spawned timer checks if the generation still matches.
+    /// This avoids a race where overlapping grace periods share a single boolean.
+    pub grace_generation: Arc<AtomicU64>,
     /// Number of times the agent has been restarted after unexpected exits
     pub restart_count: u32,
     /// Per-session idle timeout override in seconds. None = use global default.
@@ -219,7 +220,7 @@ impl SessionManager {
                 last_activity: now,
                 agent_token: agent_token.clone(),
                 release_token: release_token.clone(),
-                grace_cancel: Arc::new(AtomicBool::new(false)),
+                grace_generation: Arc::new(AtomicU64::new(0)),
                 restart_count: 0,
                 idle_timeout_override,
             };
@@ -243,6 +244,8 @@ impl SessionManager {
         let _ = std::fs::remove_dir_all(format!("/tmp/beam-pulse-{display_num}"));
         // Remove stale X lock file if Xorg didn't clean up
         let _ = std::fs::remove_file(format!("/tmp/.X{display_num}-lock"));
+        // Keyring dir may be owned by a different user (mode 700); server runs as root
+        let _ = std::fs::remove_dir_all(format!("/tmp/beam-keyring-{display_num}"));
 
         // Spawn the agent process (outside the write lock to avoid holding it during spawn)
         let agent_process = match self.spawn_agent(&info, server_url, &agent_token).await {
@@ -333,9 +336,17 @@ impl SessionManager {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
 
-            // Clean up agent log file
+            // Preserve agent log for post-mortem debugging
             let log_path = format!("/tmp/beam-agent-{session_id}.log");
-            let _ = std::fs::remove_file(&log_path);
+            let archive_dir = "/var/log/beam";
+            let _ = std::fs::create_dir_all(archive_dir);
+            let archive_path = format!("{archive_dir}/agent-{session_id}.log");
+            if std::fs::rename(&log_path, &archive_path).is_err() {
+                // rename fails across filesystems; fall back to copy + delete
+                if std::fs::copy(&log_path, &archive_path).is_ok() {
+                    let _ = std::fs::remove_file(&log_path);
+                }
+            }
 
             // Now that the agent has exited, recycle the display number
             self.display_pool.write().await.release(display_num);
@@ -450,26 +461,28 @@ impl SessionManager {
             .unwrap_or(false)
     }
 
-    /// Prepare a grace-period cleanup for a session. Resets the cancel flag
-    /// and returns it so the caller can spawn a background cleanup task.
+    /// Prepare a grace-period cleanup for a session. Increments the generation
+    /// counter and returns (counter_arc, generation) so the caller can spawn a
+    /// background timer that checks if the generation still matches.
     ///
-    /// Returns the `Arc<AtomicBool>` cancel flag. Setting it to `true`
-    /// (e.g., when a browser WebSocket reconnects) cancels the cleanup.
-    pub async fn start_grace_period(&self, session_id: Uuid) -> Option<Arc<AtomicBool>> {
+    /// Each call invalidates all previously spawned grace-period timers because
+    /// their generation won't match. This avoids the race where overlapping
+    /// grace periods share a single boolean cancel flag.
+    pub async fn start_grace_period(&self, session_id: Uuid) -> Option<(Arc<AtomicU64>, u64)> {
         let sessions = self.sessions.read().await;
         sessions.get(&session_id).map(|s| {
-            // Reset cancel flag for a fresh grace period
-            s.grace_cancel.store(false, Ordering::SeqCst);
-            Arc::clone(&s.grace_cancel)
+            let generation = s.grace_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            (Arc::clone(&s.grace_generation), generation)
         })
     }
 
     /// Cancel any pending grace-period cleanup for a session.
-    /// Called when a browser WebSocket reconnects.
+    /// Called when a browser WebSocket reconnects. Bumps the generation
+    /// so any sleeping timer will see a mismatch and abort.
     pub async fn cancel_grace_period(&self, session_id: Uuid) {
         let sessions = self.sessions.read().await;
         if let Some(s) = sessions.get(&session_id) {
-            s.grace_cancel.store(true, Ordering::SeqCst);
+            s.grace_generation.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -516,6 +529,7 @@ impl SessionManager {
         let _ = std::fs::remove_file(format!("/tmp/beam-pulse-{display_num}.pa"));
         let _ = std::fs::remove_dir_all(format!("/tmp/beam-pulse-{display_num}"));
         let _ = std::fs::remove_file(format!("/tmp/.X{display_num}-lock"));
+        let _ = std::fs::remove_dir_all(format!("/tmp/beam-keyring-{display_num}"));
 
         let child = self.spawn_agent(&info, server_url, &new_token).await?;
         let new_pid = child.id();
@@ -820,7 +834,7 @@ impl SessionManager {
                 last_activity: now,
                 agent_token: persisted.agent_token,
                 release_token,
-                grace_cancel: Arc::new(AtomicBool::new(false)),
+                grace_generation: Arc::new(AtomicU64::new(0)),
                 restart_count: 0,
                 idle_timeout_override: None, // restored sessions use global default
             };
@@ -969,11 +983,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grace_cancel_flag_works() {
-        let flag = Arc::new(AtomicBool::new(false));
-        assert!(!flag.load(Ordering::SeqCst));
-        flag.store(true, Ordering::SeqCst);
-        assert!(flag.load(Ordering::SeqCst));
+    async fn grace_generation_counter_works() {
+        let counter = Arc::new(AtomicU64::new(0));
+        // Start a grace period — generation bumps from 0 to 1
+        let my_gen = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        assert_eq!(my_gen, 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // Cancel (reconnect) — bumps to 2
+        counter.fetch_add(1, Ordering::SeqCst);
+        // The old timer's generation (1) no longer matches (2)
+        assert_ne!(counter.load(Ordering::SeqCst), my_gen);
+
+        // Start a second grace period — bumps to 3
+        let my_gen2 = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        assert_eq!(my_gen2, 3);
+        // First timer still mismatches
+        assert_ne!(counter.load(Ordering::SeqCst), my_gen);
+        // Second timer matches
+        assert_eq!(counter.load(Ordering::SeqCst), my_gen2);
     }
 
     #[test]
@@ -1019,7 +1047,7 @@ mod tests {
                     last_activity: 0,
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
-                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    grace_generation: Arc::new(AtomicU64::new(0)),
                     restart_count: 0,
                     idle_timeout_override: None,
                 },
@@ -1095,7 +1123,7 @@ mod tests {
                     last_activity: 0,
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
-                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    grace_generation: Arc::new(AtomicU64::new(0)),
                     restart_count: 0,
                     idle_timeout_override: None,
                 },
@@ -1138,7 +1166,7 @@ mod tests {
                         last_activity: 0,
                         agent_token: "token".to_string(),
                         release_token: "release".to_string(),
-                        grace_cancel: Arc::new(AtomicBool::new(false)),
+                        grace_generation: Arc::new(AtomicU64::new(0)),
                         restart_count: 0,
                         idle_timeout_override: None,
                     },
@@ -1197,7 +1225,7 @@ mod tests {
                     last_activity: now.saturating_sub(120),
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
-                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    grace_generation: Arc::new(AtomicU64::new(0)),
                     restart_count: 0,
                     idle_timeout_override: Some(60),
                 },
@@ -1220,7 +1248,7 @@ mod tests {
                     last_activity: now.saturating_sub(120),
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
-                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    grace_generation: Arc::new(AtomicU64::new(0)),
                     restart_count: 0,
                     idle_timeout_override: Some(86400),
                 },
@@ -1243,7 +1271,7 @@ mod tests {
                     last_activity: now.saturating_sub(120),
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
-                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    grace_generation: Arc::new(AtomicU64::new(0)),
                     restart_count: 0,
                     idle_timeout_override: None,
                 },
@@ -1295,7 +1323,7 @@ mod tests {
                     last_activity: 0,
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
-                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    grace_generation: Arc::new(AtomicU64::new(0)),
                     restart_count: 0,
                     idle_timeout_override: Some(7200),
                 },
@@ -1335,7 +1363,7 @@ mod tests {
                     last_activity: 0,
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
-                    grace_cancel: Arc::new(AtomicBool::new(false)),
+                    grace_generation: Arc::new(AtomicU64::new(0)),
                     restart_count: 0,
                     idle_timeout_override: None,
                 },
