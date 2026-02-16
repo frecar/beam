@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -308,20 +308,16 @@ impl WebRTCPeer {
     }
 
     pub async fn handle_offer(&self, sdp: &str) -> anyhow::Result<String> {
-        // Log SDP at debug level (verbose, only needed for codec negotiation issues)
-        debug!("=== OFFER SDP START ===");
+        // Log SDP codec lines at info level to diagnose negotiation
+        info!("=== OFFER SDP (codec lines) ===");
         for line in sdp.lines() {
             if line.starts_with("m=")
                 || line.starts_with("a=rtpmap:")
                 || line.starts_with("a=fmtp:")
-                || line.starts_with("a=group:")
-                || line.starts_with("a=mid:")
-                || line.starts_with("a=ssrc:")
             {
-                debug!(sdp_line = line, "Offer SDP");
+                info!(sdp_line = line, "Offer");
             }
         }
-        debug!("=== OFFER SDP END ===");
 
         let offer =
             RTCSessionDescription::offer(sdp.to_string()).context("Failed to parse SDP offer")?;
@@ -342,21 +338,16 @@ impl WebRTCPeer {
             .await
             .context("Failed to set local description")?;
 
-        // Log SDP at debug level
-        debug!("=== ANSWER SDP START ===");
+        // Log answer SDP codec lines
+        info!("=== ANSWER SDP (codec lines) ===");
         for line in answer.sdp.lines() {
             if line.starts_with("m=")
                 || line.starts_with("a=rtpmap:")
                 || line.starts_with("a=fmtp:")
-                || line.starts_with("a=group:")
-                || line.starts_with("a=mid:")
-                || line.starts_with("a=ssrc:")
-                || line.starts_with("a=bundle")
             {
-                debug!(sdp_line = line, "Answer SDP");
+                info!(sdp_line = line, "Answer");
             }
         }
-        debug!("=== ANSWER SDP END ===");
         Ok(answer.sdp)
     }
 
