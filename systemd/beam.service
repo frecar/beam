@@ -11,9 +11,13 @@ RestartSec=5
 LimitNOFILE=65536
 
 # Security hardening
-ProtectSystem=strict
-ReadWritePaths=/var/lib/beam /tmp /etc/beam
-ProtectHome=yes
+# NOTE: ProtectSystem and ProtectHome must not be strict/yes because
+# the server spawns agent processes as real users that need:
+# - Home directory access (desktop config, file transfers)
+# - /var/log write access (Xorg logs when using setuid wrapper)
+# - /run/user access (PulseAudio, D-Bus)
+ProtectSystem=full
+ProtectHome=no
 NoNewPrivileges=no
 PrivateTmp=no
 

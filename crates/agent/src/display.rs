@@ -75,6 +75,10 @@ impl VirtualDisplay {
         // Need to own the config_arg string for the lifetime of the Command
         let config_arg_owned = config_arg.to_string();
 
+        // Capture Xorg stderr to diagnose startup failures
+        let xorg_log_path = format!("/tmp/beam-xorg-stderr-{display_num}.log");
+        let xorg_log = std::fs::File::create(&xorg_log_path).ok();
+
         let mut child = Command::new(xorg_bin)
             .arg(&display_str)
             .arg("-config")
@@ -84,7 +88,7 @@ impl VirtualDisplay {
             .arg("-nolisten")
             .arg("tcp")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(xorg_log.map(Stdio::from).unwrap_or_else(Stdio::null))
             .spawn()
             .with_context(|| format!("Failed to start Xorg on {display_str}"))?;
 
@@ -97,6 +101,12 @@ impl VirtualDisplay {
         // Verify the display is running (check if process exited early)
         match child.try_wait() {
             Ok(Some(status)) => {
+                // Read Xorg stderr for diagnosis
+                if let Ok(stderr) = fs::read_to_string(&xorg_log_path)
+                    && !stderr.is_empty()
+                {
+                    tracing::error!("Xorg stderr output:\n{stderr}");
+                }
                 bail!("Xorg exited immediately with status: {status} on :{display_num}");
             }
             Ok(None) => {} // still running, good

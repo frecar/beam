@@ -29,6 +29,7 @@ recommends:
   - gstreamer1.0-plugins-bad
   - gstreamer1.0-plugins-ugly
   - xfce4
+  - dbus-x11
   - pulseaudio | pipewire-pulse
   - xclip
   - libcap2-bin
