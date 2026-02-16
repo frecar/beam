@@ -27,7 +27,7 @@ GPU-accelerated remote desktop for Linux, streaming to any browser via WebRTC.
 
 ```bash
 curl -fsSL https://frecar.github.io/beam/gpg/beam.gpg | sudo tee /etc/apt/keyrings/beam.gpg > /dev/null
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/beam.gpg] https://frecar.github.io/beam/apt stable main" | sudo tee /etc/apt/sources.list.d/beam.list
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/beam.gpg] https://frecar.github.io/beam ./" | sudo tee /etc/apt/sources.list.d/beam.list
 sudo apt-get update && sudo apt-get install beam
 ```
 

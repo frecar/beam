@@ -14,7 +14,7 @@ curl -fsSL "${REPO_URL}/gpg/beam.gpg" -o /etc/apt/keyrings/beam.gpg
 # Add APT source
 ARCH=$(dpkg --print-architecture)
 cat > /etc/apt/sources.list.d/beam.list << EOF
-deb [arch=${ARCH} signed-by=/etc/apt/keyrings/beam.gpg] ${REPO_URL}/apt stable main
+deb [arch=${ARCH} signed-by=/etc/apt/keyrings/beam.gpg] ${REPO_URL} ./
 EOF
 
 # Install
