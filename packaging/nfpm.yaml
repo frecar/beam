@@ -1,0 +1,84 @@
+name: beam
+arch: "${ARCH}"
+platform: linux
+version: v${VERSION}
+maintainer: "Beam Contributors"
+description: "GPU-accelerated remote desktop streaming to any browser via WebRTC"
+vendor: "Beam"
+homepage: "https://github.com/frecar/beam"
+license: "MIT"
+
+depends:
+  - libc6 (>= 2.38)
+  - libgstreamer1.0-0 (>= 1.24)
+  - gstreamer1.0-plugins-base
+  - gstreamer1.0-plugins-good
+  - libxcb1
+  - libxcb-shm0
+  - libxcb-randr0
+  - libxcb-xfixes0
+  - libpulse0
+  - libopus0
+  - libpam0g
+  - xserver-xorg-core
+
+recommends:
+  - gstreamer1.0-plugins-bad
+  - gstreamer1.0-plugins-ugly
+  - xserver-xorg-video-dummy
+  - pulseaudio | pipewire-pulse
+  - x11-xserver-utils
+  - x11-xkb-utils
+  - xclip
+  - libcap2-bin
+
+suggests:
+  - xfce4
+  - gnome-keyring
+  - gstreamer1.0-vaapi
+  - xdotool
+
+contents:
+  - src: staging/usr/local/bin/beam-server
+    dst: /usr/local/bin/beam-server
+    file_info:
+      mode: 0755
+
+  - src: staging/usr/local/bin/beam-agent
+    dst: /usr/local/bin/beam-agent
+    file_info:
+      mode: 0755
+
+  - src: staging/usr/local/bin/beam-doctor
+    dst: /usr/local/bin/beam-doctor
+    file_info:
+      mode: 0755
+
+  - src: staging/usr/share/beam/web/dist/
+    dst: /usr/share/beam/web/dist/
+
+  - src: config/beam-production.toml
+    dst: /etc/beam/beam.toml
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: systemd/beam.service
+    dst: /etc/systemd/system/beam.service
+    file_info:
+      mode: 0644
+
+  - src: packaging/99-beam-uinput.rules
+    dst: /etc/udev/rules.d/99-beam-uinput.rules
+    file_info:
+      mode: 0644
+
+  - dst: /var/lib/beam/sessions/
+    type: dir
+    file_info:
+      mode: 0700
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh

@@ -21,60 +21,40 @@ GPU-accelerated remote desktop for Ubuntu, streaming to any browser via WebRTC.
 - **Adaptive bitrate** — adjusts video quality based on network conditions (VA-API/software encoders)
 - **Performance overlay** — press F9 to see RTT, FPS, bitrate, packet loss, and resolution
 
-## Quick Start
+## Install (Ubuntu 24.04)
 
-### Install from Source
+### APT Repository (Recommended)
+
+```bash
+curl -fsSL https://frecar.github.io/beam/gpg/beam.gpg | sudo tee /etc/apt/keyrings/beam.gpg > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/beam.gpg] https://frecar.github.io/beam/apt stable main" | sudo tee /etc/apt/sources.list.d/beam.list
+sudo apt-get update && sudo apt-get install beam
+```
+
+Or use the one-liner:
+```bash
+curl -fsSL https://frecar.github.io/beam/install | sudo bash
+```
+
+After installation, open `https://<your-server>:8444` and log in with any Linux user account.
+
+### Build from Source
 
 ```bash
 git clone https://github.com/frecar/beam.git
 cd beam
-sudo make install         # installs deps, builds, and installs everything
+sudo make install
 sudo systemctl enable --now beam
 ```
 
-Open `https://<your-server>:8444` (default port, configurable in `/etc/beam/beam.toml`) and log in with any Linux user account.
+Requires Ubuntu 24.04 (x86_64 or ARM64). GPU recommended but not required. Rust and Node.js are installed automatically if not present.
 
-### Requirements
-
-- Ubuntu 22.04 or 24.04 LTS (x86_64 or ARM64)
-- GPU recommended (NVIDIA, AMD, or Intel) but not required
-
-Rust and Node.js are installed automatically if not present.
-
-### Verify Installation
+## Verify
 
 ```bash
-make doctor
+beam-server --version
+beam-doctor
 ```
-
-### TLS Certificate
-
-Beam auto-generates a self-signed certificate on first run. Browsers will show a security warning — click through it or set up a trusted certificate:
-
-**Option A: mkcert (recommended for LAN/dev)**
-```bash
-# Install mkcert (creates a local CA trusted by your browser)
-sudo apt install libnss3-tools
-curl -JLO "https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v*-linux-amd64"
-sudo mv mkcert-* /usr/local/bin/mkcert && sudo chmod +x /usr/local/bin/mkcert
-mkcert -install
-
-# Generate cert for your hostname
-mkcert -cert-file /etc/beam/cert.pem -key-file /etc/beam/key.pem "$(hostname)" "$(hostname -I | awk '{print $1}')"
-sudo systemctl restart beam
-```
-
-**Option B: Let's Encrypt (internet-facing servers)**
-```bash
-sudo apt install certbot
-sudo certbot certonly --standalone -d beam.example.com
-# Update /etc/beam/beam.toml:
-# tls_cert = "/etc/letsencrypt/live/beam.example.com/fullchain.pem"
-# tls_key = "/etc/letsencrypt/live/beam.example.com/privkey.pem"
-sudo systemctl restart beam
-```
-
-**Option C: Existing certificate** — set `tls_cert` and `tls_key` in `/etc/beam/beam.toml`.
 
 ## Configuration
 
@@ -110,13 +90,95 @@ stun_urls = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
 # turn_credential = "secret"
 ```
 
-## Development
+### TLS Certificate
 
-### Setup
+Beam auto-generates a self-signed certificate on first run. Browsers will show a security warning — click through it or set up a trusted certificate:
+
+**Option A: mkcert (recommended for LAN/dev)**
+```bash
+# Install mkcert (creates a local CA trusted by your browser)
+sudo apt install libnss3-tools
+curl -JLO "https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v*-linux-amd64"
+sudo mv mkcert-* /usr/local/bin/mkcert && sudo chmod +x /usr/local/bin/mkcert
+mkcert -install
+
+# Generate cert for your hostname
+mkcert -cert-file /etc/beam/cert.pem -key-file /etc/beam/key.pem "$(hostname)" "$(hostname -I | awk '{print $1}')"
+sudo systemctl restart beam
+```
+
+**Option B: Let's Encrypt (internet-facing servers)**
+```bash
+sudo apt install certbot
+sudo certbot certonly --standalone -d beam.example.com
+# Update /etc/beam/beam.toml:
+# tls_cert = "/etc/letsencrypt/live/beam.example.com/fullchain.pem"
+# tls_key = "/etc/letsencrypt/live/beam.example.com/privkey.pem"
+sudo systemctl restart beam
+```
+
+**Option C: Existing certificate** — set `tls_cert` and `tls_key` in `/etc/beam/beam.toml`.
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| F11 | Toggle fullscreen |
+| F9 | Toggle performance overlay (RTT, FPS, bitrate, loss, resolution) |
+| Esc | Exit fullscreen |
+
+## Troubleshooting
+
+Run the diagnostic tool:
+```bash
+beam-doctor
+```
+
+### Server starts but browser shows blank page
+- Check that the web client is built: `ls web/dist/index.html`
+- For installed systems, verify `web_root` in `/etc/beam/beam.toml` points to the right directory
+- Run `make doctor` to check encoder availability
+
+### Black screen after login
+- Check agent logs: `journalctl -u beam -f` and `/tmp/beam-agent-*.log`
+- Press F9 to open the performance overlay and check if frames are arriving
+- This usually means H.264 frames aren't reaching the browser — force a reconnect (refresh the page)
+
+### Connection fails behind corporate firewall
+- WebRTC requires UDP connectivity. Configure a TURN server in `/etc/beam/beam.toml` under `[ice]`
+
+### Non-US keyboard layout
+- Beam auto-detects your keyboard layout in Chrome/Edge using the Keyboard Layout Map API
+- If auto-detection doesn't work (Firefox, Safari), use the layout selector in the status bar
+- Your layout choice is saved automatically for future sessions
+
+View logs:
+```bash
+journalctl -u beam -f
+```
+
+## Uninstall
+
+**APT package:**
+```bash
+sudo apt-get remove beam        # keep configuration
+sudo apt-get purge beam         # remove everything
+```
+
+**Source install:**
+```bash
+sudo make uninstall
+```
+
+---
+
+## Contributing
+
+### Development Setup
 
 ```bash
-./scripts/dev-setup.sh    # validates toolchain and libraries
-make doctor               # shows system status
+./scripts/dev-setup.sh
+make doctor
 ```
 
 ### Build and Run
@@ -125,9 +187,9 @@ make doctor               # shows system status
 make dev                  # builds everything, starts server in debug mode
 ```
 
-The server runs at `https://localhost:8444` (default port). Log in with your Linux credentials. The `make dev` target ensures `beam-agent` is in PATH so sessions work correctly.
+The server runs at `https://localhost:8444`. Log in with your Linux credentials.
 
-### Common Targets
+### Make Targets
 
 ```
 make dev            Build and run server (debug)
@@ -140,15 +202,7 @@ make doctor         Check system readiness
 sudo make deploy    Build release, deploy, restart service
 ```
 
-### Deploy Changes
-
-After modifying code on a machine running Beam:
-
-```bash
-sudo make deploy          # builds release, copies binaries, restarts service
-```
-
-## Architecture
+### Architecture
 
 ```
 Browser (TypeScript)         Server (Rust/Axum)           Agent (Rust, per-user)
@@ -169,7 +223,7 @@ Browser (TypeScript)         Server (Rust/Axum)           Agent (Rust, per-user)
 
 The server handles authentication and signaling. When a user logs in, it spawns a per-user agent process that creates an isolated virtual display, captures the screen via XCB shared memory, encodes with GStreamer (NVENC/VA-API/x264), and streams to the browser over WebRTC.
 
-## Project Structure
+### Project Structure
 
 ```
 beam/
@@ -181,42 +235,6 @@ beam/
   config/       # Default configuration
   scripts/      # Install/uninstall/dev-setup scripts
   systemd/      # Service file
-```
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| F11 | Toggle fullscreen |
-| F9 | Toggle performance overlay (RTT, FPS, bitrate, loss, resolution) |
-| Esc | Exit fullscreen |
-
-## Troubleshooting
-
-### Server starts but browser shows blank page
-- Check that the web client is built: `ls web/dist/index.html`
-- For installed systems, verify `web_root` in `/etc/beam/beam.toml` points to the right directory
-- Run `make doctor` to check encoder availability
-
-### Black screen after login
-- Check agent logs: `journalctl -u beam -f` and `/tmp/beam-agent-*.log`
-- Press F9 to open the performance overlay and check if frames are arriving
-- This usually means H.264 frames aren't reaching the browser — force a reconnect (refresh the page)
-
-### Connection fails behind corporate firewall
-- WebRTC requires UDP connectivity. Configure a TURN server in `/etc/beam/beam.toml` under `[ice]`
-
-### Non-US keyboard layout
-- Beam auto-detects your keyboard layout in Chrome/Edge using the Keyboard Layout Map API
-- If auto-detection doesn't work (Firefox, Safari), use the layout selector in the status bar
-- Your layout choice is saved automatically for future sessions
-
-## Uninstall
-
-```bash
-sudo make uninstall
-# or
-sudo ./scripts/uninstall.sh
 ```
 
 ## License

@@ -333,6 +333,48 @@ fn parse_args() -> anyhow::Result<Args> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "-V" | "--version" => {
+                println!("beam-agent {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "-h" | "--help" => {
+                println!("beam-agent - Beam Remote Desktop capture agent");
+                println!();
+                println!("USAGE:");
+                println!("    beam-agent [OPTIONS]");
+                println!();
+                println!("OPTIONS:");
+                println!("    --display <DISPLAY>          X11 display [default: :0]");
+                println!("    --server-url <URL>           Signaling server WebSocket URL");
+                println!("    --session-id <UUID>          Session identifier (required)");
+                println!("    --ice-servers <JSON>         ICE server configuration (JSON)");
+                println!(
+                    "    --agent-token <TOKEN>        Agent authentication token (prefer BEAM_AGENT_TOKEN env)"
+                );
+                println!(
+                    "    --tls-cert <PATH>            TLS certificate to pin for server connection"
+                );
+                println!("    --width <PIXELS>             Initial display width [default: 1920]");
+                println!("    --height <PIXELS>            Initial display height [default: 1080]");
+                println!("    --framerate <FPS>            Target framerate [default: 60]");
+                println!(
+                    "    --bitrate <KBPS>             Initial video bitrate [default: 100000]"
+                );
+                println!(
+                    "    --min-bitrate <KBPS>         Adaptive bitrate lower bound [default: 5000]"
+                );
+                println!(
+                    "    --max-bitrate <KBPS>         Adaptive bitrate upper bound [default: 80000]"
+                );
+                println!(
+                    "    --encoder <NAME>             Force encoder (nvh264enc, vah264enc, x264enc)"
+                );
+                println!("    --max-width <PIXELS>         Maximum resize width [default: 3840]");
+                println!("    --max-height <PIXELS>        Maximum resize height [default: 2160]");
+                println!("    -V, --version                Print version and exit");
+                println!("    -h, --help                   Print this help and exit");
+                std::process::exit(0);
+            }
             "--display" => {
                 i += 1;
                 display = args.get(i).context("Missing --display value")?.clone();

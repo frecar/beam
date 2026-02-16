@@ -8,12 +8,52 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version-check:
+    name: Verify version consistency
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract and compare versions
+        run: |
+          CARGO_VERSION=$(grep -A5 '\[workspace.package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)"/\1/')
+          NPM_VERSION=$(node -p "require('./web/package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+
+          echo "Cargo.toml version: ${CARGO_VERSION}"
+          echo "package.json version: ${NPM_VERSION}"
+          echo "Git tag version: ${TAG_VERSION}"
+
+          MISMATCH=0
+          if [ "${CARGO_VERSION}" != "${TAG_VERSION}" ]; then
+            echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match git tag (${TAG_VERSION})"
+            MISMATCH=1
+          fi
+          if [ "${NPM_VERSION}" != "${TAG_VERSION}" ]; then
+            echo "::error::package.json version (${NPM_VERSION}) does not match git tag (${TAG_VERSION})"
+            MISMATCH=1
+          fi
+          if [ "${CARGO_VERSION}" != "${NPM_VERSION}" ]; then
+            echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match package.json version (${NPM_VERSION})"
+            MISMATCH=1
+          fi
+          if [ "${MISMATCH}" -eq 1 ]; then
+            echo "::error::Version mismatch detected. All versions must match: Cargo.toml, package.json, and git tag."
+            exit 1
+          fi
+          echo "All versions match: ${CARGO_VERSION}"
+
   build-web:
     name: Build web client
+    needs: [version-check]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +76,7 @@ jobs:
 
   build-binary:
     name: Build ${{ matrix.target }}
+    needs: [version-check]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -83,9 +124,173 @@ jobs:
             target/release/beam-server
             target/release/beam-agent
 
+  package-deb:
+    name: Package .deb (${{ matrix.arch }})
+    needs: [build-web, build-binary]
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            artifact_arch: x86_64
+          - arch: arm64
+            artifact_arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download web dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-${{ matrix.artifact_arch }}
+          path: binaries-${{ matrix.artifact_arch }}
+
+      - name: Create staging directory
+        run: |
+          mkdir -p staging/usr/local/bin staging/usr/share/beam/web/dist
+          cp binaries-${{ matrix.artifact_arch }}/beam-server staging/usr/local/bin/
+          cp binaries-${{ matrix.artifact_arch }}/beam-agent staging/usr/local/bin/
+          cp scripts/beam-doctor staging/usr/local/bin/
+          chmod 755 staging/usr/local/bin/*
+          cp -r web-dist/* staging/usr/share/beam/web/dist/
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update -qq && sudo apt-get install -y nfpm
+
+      - name: Build .deb package
+        run: |
+          VERSION=$(grep -A5 '\[workspace.package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)"/\1/')
+          ARCH=${{ matrix.arch }} VERSION=${VERSION} nfpm package \
+            --config packaging/nfpm.yaml \
+            --packager deb \
+            --target beam_${VERSION}_${{ matrix.arch }}.deb
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: beam_*.deb
+
+  test-package:
+    name: Test .deb (${{ matrix.arch }})
+    needs: [package-deb]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Download .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+
+      - name: Test .deb install in Docker
+        run: |
+          docker run --rm -v $(pwd):/debs ubuntu:24.04 bash -c "
+            apt-get update -qq &&
+            dpkg -i /debs/beam_*_${{ matrix.arch }}.deb || apt-get install -f -y -qq &&
+            beam-server --version &&
+            beam-doctor --help || true
+          "
+
+  publish-apt:
+    name: Publish APT repository
+    needs: [test-package]
+    runs-on: ubuntu-24.04
+    if: success()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download .deb (amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-amd64
+          path: deb-amd64
+
+      - name: Download .deb (arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-arm64
+          path: deb-arm64
+
+      - name: Install packaging tools
+        run: sudo apt-get update -qq && sudo apt-get install -y dpkg-dev
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | gpg --batch --import
+          GPG_KEY_ID=$(gpg --list-keys --with-colons | grep '^pub' | head -1 | cut -d: -f5)
+          echo "GPG_KEY_ID=${GPG_KEY_ID}" >> $GITHUB_ENV
+
+      - name: Prepare APT repository
+        run: |
+          mkdir -p apt-repo/pool/main/b/beam apt-repo/gpg
+          cp deb-amd64/*.deb deb-arm64/*.deb apt-repo/pool/main/b/beam/
+
+          # Generate package index
+          cd apt-repo
+          dpkg-scanpackages pool/ > Packages
+          gzip -k Packages
+
+          # Generate Release file
+          apt-ftparchive release . > Release
+          gpg --batch --yes --armor --detach-sign --output Release.gpg Release
+          gpg --batch --yes --armor --clearsign --output InRelease Release
+
+          # Export public key
+          gpg --armor --export ${GPG_KEY_ID} > gpg/beam.gpg
+
+      - name: Create landing page
+        run: |
+          cat > apt-repo/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html><head><title>Beam Remote Desktop</title></head>
+          <body>
+          <h1>Beam Remote Desktop</h1>
+          <p>GPU-accelerated remote desktop for Ubuntu, streaming to any browser via WebRTC.</p>
+          <h2>Install</h2>
+          <pre>
+          curl -fsSL https://frecar.github.io/beam/install | sudo bash
+          </pre>
+          <p>Or manually:</p>
+          <pre>
+          curl -fsSL https://frecar.github.io/beam/gpg/beam.gpg | sudo tee /etc/apt/keyrings/beam.gpg > /dev/null
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/beam.gpg] https://frecar.github.io/beam/apt stable main" | sudo tee /etc/apt/sources.list.d/beam.list
+          sudo apt-get update && sudo apt-get install beam
+          </pre>
+          <p><a href="https://github.com/frecar/beam">GitHub</a></p>
+          </body></html>
+          HTMLEOF
+
+      - name: Finalize repository
+        run: |
+          cp packaging/install-beam.sh apt-repo/install || true
+          touch apt-repo/.nojekyll
+
+      - name: Deploy to gh-pages
+        run: |
+          cd apt-repo
+          git init
+          git checkout -b gh-pages
+          git add -A
+          git commit -m "Update APT repository - ${GITHUB_REF_NAME}"
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git push --force origin gh-pages
+
   package:
     name: Create release
-    needs: [build-web, build-binary]
+    needs: [build-web, build-binary, test-package]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -115,10 +320,17 @@ jobs:
             sha256sum "${DIR}.tar.gz" >> checksums.txt
           done
 
+      - name: Add .deb checksums
+        run: |
+          sha256sum deb-amd64/*.deb >> checksums.txt
+          sha256sum deb-arm64/*.deb >> checksums.txt
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
             beam-*.tar.gz
+            deb-amd64/*.deb
+            deb-arm64/*.deb
             checksums.txt

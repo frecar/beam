@@ -40,3 +40,31 @@
 - `config/`: Configuration files
 - `scripts/`: Setup and installation scripts
 - `systemd/`: Systemd service unit
+
+## Versioning & Release
+
+- **Version source of truth**: `Cargo.toml` `[workspace.package]` version field
+- **Must sync**: `web/package.json` version field (validated by `make version-check`)
+- **Semver**: patch for fixes, minor for features, major for breaking changes
+
+### Release Process
+1. Bump version in `Cargo.toml` (`[workspace.package]` version) and `web/package.json`
+2. Commit: `git commit -am "Bump version to X.Y.Z"`
+3. Tag: `git tag vX.Y.Z`
+4. Push: `git push && git push --tags`
+5. CI builds binaries, packages .deb, tests package, publishes to APT repo and GitHub Releases
+
+### APT Repository
+- Hosted on GitHub Pages (`gh-pages` branch)
+- URL: `https://frecar.github.io/beam/apt`
+- GPG key: `https://frecar.github.io/beam/gpg/beam.gpg`
+
+### Package Paths (must stay consistent across install.sh, Makefile, systemd, nfpm.yaml)
+- `/usr/local/bin/beam-server` — signaling server binary
+- `/usr/local/bin/beam-agent` — capture agent binary
+- `/usr/local/bin/beam-doctor` — diagnostic tool
+- `/usr/share/beam/web/dist/` — web client files
+- `/etc/beam/beam.toml` — configuration (preserved on upgrade)
+- `/etc/systemd/system/beam.service` — systemd unit
+- `/etc/udev/rules.d/99-beam-uinput.rules` — uinput permissions
+- `/var/lib/beam/sessions/` — runtime session data

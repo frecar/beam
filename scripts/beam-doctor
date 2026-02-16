@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# beam-doctor — Beam Remote Desktop diagnostic tool
+# Checks runtime dependencies, service status, and configuration.
+set -uo pipefail
+
+OK=0; WARN=0; FAIL=0
+green="\033[32m"; yellow="\033[33m"; red="\033[31m"; bold="\033[1m"; reset="\033[0m"
+
+pass()  { OK=$((OK+1));   printf "${green}[OK]${reset}   %s\n" "$1"; }
+warn()  { WARN=$((WARN+1)); printf "${yellow}[WARN]${reset} %s\n" "$1"; }
+fail()  { FAIL=$((FAIL+1)); printf "${red}[FAIL]${reset} %s\n" "$1"; }
+
+# --- GStreamer ---
+echo ""
+printf "${bold}GStreamer${reset}\n"
+
+# Check GStreamer version (>= 1.24 required)
+if command -v gst-inspect-1.0 >/dev/null 2>&1; then
+    ver=$(gst-inspect-1.0 --version 2>/dev/null | head -1 | awk '{print $NF}')
+    major=$(echo "$ver" | cut -d. -f1)
+    minor=$(echo "$ver" | cut -d. -f2)
+    if [ "$major" -ge 1 ] 2>/dev/null && [ "$minor" -ge 24 ] 2>/dev/null; then
+        pass "GStreamer $ver"
+    elif [ "$major" -ge 1 ] 2>/dev/null && [ "$minor" -ge 20 ] 2>/dev/null; then
+        warn "GStreamer $ver (minimum: 1.20, recommended: 1.24+)"
+    else
+        fail "GStreamer $ver is too old (need >= 1.24)"
+    fi
+else
+    fail "GStreamer not found — install gstreamer1.0-tools"
+fi
+
+# Check required GStreamer elements
+for element in ximagesrc; do
+    if gst-inspect-1.0 "$element" >/dev/null 2>&1; then
+        pass "$element element available"
+    else
+        fail "$element not found — install gstreamer1.0-plugins-good"
+    fi
+done
+
+# Check encoder elements (at least one required)
+encoder_found=false
+for enc in nvh264enc vah264enc x264enc; do
+    if gst-inspect-1.0 "$enc" >/dev/null 2>&1; then
+        pass "$enc encoder available"
+        encoder_found=true
+    fi
+done
+if ! $encoder_found; then
+    fail "No H.264 encoder found — install gstreamer1.0-plugins-bad (NVIDIA), gstreamer1.0-vaapi (AMD/Intel), or gstreamer1.0-plugins-ugly (software)"
+fi
+
+# --- GPU ---
+echo ""
+printf "${bold}GPU${reset}\n"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if nvidia-smi >/dev/null 2>&1; then
+        gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+        pass "NVIDIA GPU: $gpu"
+    else
+        warn "nvidia-smi found but failed — check GPU driver"
+    fi
+elif [ -d /sys/class/drm ]; then
+    vendor=$(cat /sys/class/drm/card0/device/vendor 2>/dev/null || echo "")
+    case "$vendor" in
+        0x1002) pass "AMD GPU detected" ;;
+        0x8086) pass "Intel GPU detected" ;;
+        *) warn "No dedicated GPU detected — will use software encoding (x264)" ;;
+    esac
+else
+    warn "No GPU detected — will use software encoding (x264)"
+fi
+
+# --- X11 Tools ---
+echo ""
+printf "${bold}X11 Tools${reset}\n"
+
+if command -v Xorg >/dev/null 2>&1; then
+    pass "Xorg found"
+else
+    fail "Xorg not found — install xserver-xorg-core"
+fi
+
+if command -v xrandr >/dev/null 2>&1; then
+    pass "xrandr found"
+else
+    fail "xrandr not found — install x11-xserver-utils"
+fi
+
+if command -v xclip >/dev/null 2>&1; then
+    pass "xclip found"
+else
+    warn "xclip not found — install xclip (clipboard sync won't work)"
+fi
+
+if command -v setxkbmap >/dev/null 2>&1; then
+    pass "setxkbmap found"
+else
+    warn "setxkbmap not found — install x11-xkb-utils (keyboard layout sync won't work)"
+fi
+
+# --- Audio ---
+echo ""
+printf "${bold}Audio${reset}\n"
+
+if command -v pulseaudio >/dev/null 2>&1; then
+    pass "PulseAudio found"
+elif command -v pipewire >/dev/null 2>&1 && command -v pipewire-pulse >/dev/null 2>&1; then
+    pass "PipeWire (with PulseAudio compat) found"
+else
+    warn "PulseAudio/PipeWire not found — audio streaming won't work"
+fi
+
+# --- Service ---
+echo ""
+printf "${bold}Service${reset}\n"
+
+if systemctl is-active --quiet beam 2>/dev/null; then
+    pass "beam.service is running"
+else
+    if systemctl is-enabled --quiet beam 2>/dev/null; then
+        warn "beam.service is enabled but not running"
+    else
+        warn "beam.service is not running"
+    fi
+fi
+
+# Check port 8444
+PORT=8444
+if [ -f /etc/beam/beam.toml ]; then
+    configured_port=$(grep -oP '^\s*port\s*=\s*\K\d+' /etc/beam/beam.toml 2>/dev/null || echo "")
+    if [ -n "$configured_port" ]; then
+        PORT=$configured_port
+    fi
+fi
+
+if command -v ss >/dev/null 2>&1; then
+    if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+        pass "Port ${PORT} is listening"
+    else
+        warn "Port ${PORT} is not listening"
+    fi
+fi
+
+# --- Configuration ---
+echo ""
+printf "${bold}Configuration${reset}\n"
+
+if [ -f /etc/beam/beam.toml ]; then
+    pass "Config file: /etc/beam/beam.toml"
+    if [ -r /etc/beam/beam.toml ]; then
+        pass "Config file is readable"
+    else
+        fail "Config file is not readable"
+    fi
+
+    # Check TLS cert if configured
+    tls_cert=$(grep -oP '^\s*tls_cert\s*=\s*"\K[^"]+' /etc/beam/beam.toml 2>/dev/null || echo "")
+    if [ -n "$tls_cert" ]; then
+        if [ -r "$tls_cert" ]; then
+            pass "TLS cert readable: $tls_cert"
+        else
+            fail "TLS cert not readable: $tls_cert"
+        fi
+    else
+        pass "TLS: using auto-generated self-signed certificate"
+    fi
+else
+    warn "No config file at /etc/beam/beam.toml"
+fi
+
+# --- Runtime ---
+echo ""
+printf "${bold}Runtime${reset}\n"
+
+if [ -d /var/lib/beam ]; then
+    if [ -w /var/lib/beam ]; then
+        pass "/var/lib/beam exists and is writable"
+    else
+        # Check if we're root or if the service user can write
+        if [ "$(id -u)" -eq 0 ]; then
+            pass "/var/lib/beam exists"
+        else
+            warn "/var/lib/beam exists but is not writable by current user (this is OK — the service runs as root)"
+        fi
+    fi
+else
+    warn "/var/lib/beam does not exist (created on first run)"
+fi
+
+if [ -d /var/lib/beam/sessions ]; then
+    session_count=$(find /var/lib/beam/sessions -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    pass "Active sessions: $session_count"
+else
+    pass "No active sessions"
+fi
+
+# Check web root
+WEB_ROOT="/usr/share/beam/web/dist"
+if [ -f /etc/beam/beam.toml ]; then
+    configured_root=$(grep -oP '^\s*web_root\s*=\s*"\K[^"]+' /etc/beam/beam.toml 2>/dev/null || echo "")
+    if [ -n "$configured_root" ]; then
+        WEB_ROOT=$configured_root
+    fi
+fi
+if [ -f "${WEB_ROOT}/index.html" ]; then
+    pass "Web root: ${WEB_ROOT}"
+else
+    fail "Web root missing: ${WEB_ROOT}/index.html not found"
+fi
+
+# --- Summary ---
+echo ""
+total=$((OK + WARN + FAIL))
+printf "${bold}Doctor summary:${reset} "
+printf "${green}${OK} passed${reset}, "
+printf "${yellow}${WARN} warnings${reset}, "
+if [ "$FAIL" -gt 0 ]; then
+    printf "${red}${FAIL} failures${reset}\n"
+else
+    printf "${green}${FAIL} failures${reset}\n"
+fi
+echo ""
+
+if [ "$FAIL" -gt 0 ]; then
+    exit 1
+fi

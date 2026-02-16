@@ -27,6 +27,25 @@ fn parse_args() -> (PathBuf, Option<u16>) {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "-V" | "--version" => {
+                println!("beam-server {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "-h" | "--help" => {
+                println!("beam-server - Beam Remote Desktop signaling server");
+                println!();
+                println!("USAGE:");
+                println!("    beam-server [OPTIONS]");
+                println!();
+                println!("OPTIONS:");
+                println!(
+                    "    -c, --config <PATH>    Configuration file [default: ./config/beam.toml]"
+                );
+                println!("    -p, --port <PORT>      Override server port");
+                println!("    -V, --version          Print version and exit");
+                println!("    -h, --help             Print this help and exit");
+                std::process::exit(0);
+            }
             "--config" | "-c" => {
                 if i + 1 < args.len() {
                     config_path = PathBuf::from(&args[i + 1]);
@@ -242,7 +261,10 @@ async fn main() -> Result<()> {
 
     // Print startup banner
     tracing::info!("===========================================");
-    tracing::info!("  Beam Remote Desktop Server v0.1.0");
+    tracing::info!(
+        "  Beam Remote Desktop Server v{}",
+        env!("CARGO_PKG_VERSION")
+    );
     tracing::info!("  Listening on https://{bind_addr}");
     tracing::info!("===========================================");
 
