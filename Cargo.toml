@@ -3,7 +3,7 @@ members = ["crates/server", "crates/agent", "crates/protocol"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.13"
+version = "0.1.14"
 edition = "2024"
 license = "MIT"
 authors = ["Beam Contributors"]
@@ -52,10 +52,9 @@ gstreamer-app = { version = "0.24", features = ["v1_24"] }
 gstreamer-video = "0.24"
 
 # X11
-x11rb = { version = "0.13", features = ["shm", "randr", "xfixes", "allow-unsafe-code"] }
+x11rb = { version = "0.13", features = ["shm", "randr", "xfixes", "xtest", "allow-unsafe-code"] }
 
 # Input
-input-linux = "0.7"
 nix = { version = "0.31", features = ["ioctl", "fs", "process", "signal", "user"] }
 
 # Audio

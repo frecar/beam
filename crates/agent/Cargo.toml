@@ -23,7 +23,6 @@ gstreamer = { workspace = true }
 gstreamer-app = { workspace = true }
 gstreamer-video = { workspace = true }
 x11rb = { workspace = true }
-input-linux = { workspace = true }
 nix = { workspace = true }
 libpulse-binding = { workspace = true }
 libpulse-simple-binding = { workspace = true }

@@ -46,7 +46,7 @@ struct InputCallbackCtx {
 }
 
 /// Build the reusable input event callback that dispatches input events
-/// to the appropriate subsystem (uinput, clipboard, resize, layout, quality).
+/// to the appropriate subsystem (XTEST, clipboard, resize, layout, quality).
 fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send + Sync> {
     let InputCallbackCtx {
         injector,
@@ -646,9 +646,12 @@ async fn main() -> anyhow::Result<()> {
 
     let session_id = args.session_id;
 
-    // Create input injector
+    // Create input injector (uses XTEST extension — no uinput needed)
+    let input_width = Arc::new(std::sync::atomic::AtomicU32::new(args.width));
+    let input_height = Arc::new(std::sync::atomic::AtomicU32::new(args.height));
     let injector = Arc::new(Mutex::new(
-        InputInjector::new().context("Failed to create input injector")?,
+        InputInjector::new(&args.display, Arc::clone(&input_width), Arc::clone(&input_height))
+            .context("Failed to create input injector")?,
     ));
 
     // Create clipboard bridge
@@ -751,6 +754,8 @@ async fn main() -> anyhow::Result<()> {
     let display_for_capture = args.display.clone();
     let kf_flag_for_capture = Arc::clone(&force_keyframe);
     let capture_wake_for_thread = Arc::clone(&capture_wake);
+    let input_width_for_capture = Arc::clone(&input_width);
+    let input_height_for_capture = Arc::clone(&input_height);
 
     let capture_handle = std::thread::Builder::new()
         .name("capture-encode".into())
@@ -853,6 +858,10 @@ async fn main() -> anyhow::Result<()> {
                             encoder.force_keyframe();
                             first_capture_logged = false;
                             first_encode_logged = false;
+
+                            // 6. Update input injector dimensions for mouse coordinate mapping
+                            input_width_for_capture.store(new_w, Ordering::Relaxed);
+                            input_height_for_capture.store(new_h, Ordering::Relaxed);
 
                             info!(
                                 width = new_w, height = new_h,
