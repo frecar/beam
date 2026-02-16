@@ -1,6 +1,6 @@
 # Beam
 
-GPU-accelerated remote desktop for Ubuntu, streaming to any browser via WebRTC.
+GPU-accelerated remote desktop for Linux, streaming to any browser via WebRTC.
 
 <!-- Replace with actual screenshot: ![Beam desktop session](docs/screenshot.png) -->
 
@@ -21,7 +21,7 @@ GPU-accelerated remote desktop for Ubuntu, streaming to any browser via WebRTC.
 - **Adaptive bitrate** — adjusts video quality based on network conditions (VA-API/software encoders)
 - **Performance overlay** — press F9 to see RTT, FPS, bitrate, packet loss, and resolution
 
-## Install (Ubuntu 24.04)
+## Install (Ubuntu 24.04+ / Debian 13+)
 
 ### APT Repository (Recommended)
 
@@ -47,7 +47,7 @@ sudo make install
 sudo systemctl enable --now beam
 ```
 
-Requires Ubuntu 24.04 (x86_64 or ARM64). GPU recommended but not required. Rust and Node.js are installed automatically if not present.
+Requires Ubuntu 24.04+ or Debian 13+ (x86_64 or ARM64). GPU recommended but not required. Rust and Node.js are installed automatically if not present.
 
 ## Verify
 
