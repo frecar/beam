@@ -16,15 +16,15 @@ if command -v setcap >/dev/null 2>&1; then
     setcap cap_sys_nice=ep /usr/local/bin/beam-agent 2>/dev/null || true
 fi
 
-# Allow non-console users to start Xorg (required for virtual displays)
+# Allow non-console users to start Xorg with root privileges (required for
+# virtual displays). needs_root_rights=yes is needed so Xorg can access
+# /dev/tty0 for VT management when spawned from a systemd service.
 if [ -d /etc/X11 ]; then
-    if ! grep -qs 'allowed_users=anybody' /etc/X11/Xwrapper.config 2>/dev/null; then
-        cat > /etc/X11/Xwrapper.config << 'XWRAP'
+    cat > /etc/X11/Xwrapper.config << 'XWRAP'
 # Configured by Beam to allow virtual display creation
 allowed_users=anybody
-needs_root_rights=no
+needs_root_rights=yes
 XWRAP
-    fi
 fi
 
 # Reload udev rules for uinput access

@@ -20,37 +20,65 @@ pub struct VirtualDisplay {
     desktop_child: Option<Child>,
     pulse_child: Option<Child>,
     cursor_child: Option<Child>,
-    config_path: String,
+    /// Temp config path to clean up on drop (None for package-installed static config)
+    cleanup_config: Option<String>,
 }
 
 impl VirtualDisplay {
     /// Create and start a new virtual X display on the given display number.
     pub fn start(display_num: u32, width: u32, height: u32) -> Result<Self> {
-        let config_path = format!("/tmp/beam-xorg-{display_num}.conf");
+        let config_path = String::from("/etc/X11/beam-xorg.conf");
 
-        // Remove stale config from previous sessions (may be owned by different user)
-        let _ = fs::remove_file(&config_path);
+        // Use the static config installed by the package. When running from
+        // source/dev, generate a temporary config in /tmp as fallback.
+        if !std::path::Path::new(&config_path).exists() {
+            let tmp_config_path = format!("/tmp/beam-xorg-{display_num}.conf");
+            let _ = fs::remove_file(&tmp_config_path);
+            let config = generate_xorg_config(width, height);
+            fs::write(&tmp_config_path, &config)
+                .with_context(|| format!("Failed to write Xorg config to {tmp_config_path}"))?;
+            return Self::start_with_config(display_num, width, height, tmp_config_path);
+        }
 
-        // Write Xorg config with dummy driver
-        let config = generate_xorg_config(width, height);
-        fs::write(&config_path, &config)
-            .with_context(|| format!("Failed to write Xorg config to {config_path}"))?;
+        Self::start_with_config(display_num, width, height, config_path)
+    }
 
+    fn start_with_config(
+        display_num: u32,
+        width: u32,
+        height: u32,
+        config_path: String,
+    ) -> Result<Self> {
         let display_str = format!(":{display_num}");
 
-        // Start Xorg with the dummy driver.
-        // Use the real Xorg binary directly, bypassing Xorg.wrap which rejects
-        // non-console users in systemd service contexts even with
-        // allowed_users=anybody in Xwrapper.config.
-        let xorg_bin = if std::path::Path::new("/usr/lib/xorg/Xorg").exists() {
-            "/usr/lib/xorg/Xorg"
+        // Determine how to invoke Xorg based on config location.
+        // Package installs: config in /etc/X11/, use Xorg wrapper (setuid) with
+        // relative path. Xwrapper.config has allowed_users=anybody +
+        // needs_root_rights=yes so Xorg can access /dev/tty0 for VT management.
+        // Dev/source installs: config in /tmp, use Xorg binary directly with
+        // absolute path (no elevated privilege restrictions).
+        let (xorg_bin, config_arg): (&str, &str) = if config_path.starts_with("/etc/X11/") {
+            // Relative path required when Xorg runs with elevated privileges
+            let filename = config_path.rsplit('/').next().unwrap_or(&config_path);
+            // We need to store the filename for the lifetime of the arg
+            // Use "Xorg" which resolves to the wrapper
+            ("Xorg", filename)
         } else {
-            "Xorg"
+            // Dev mode: use direct binary with absolute path
+            if std::path::Path::new("/usr/lib/xorg/Xorg").exists() {
+                ("/usr/lib/xorg/Xorg", config_path.as_str())
+            } else {
+                ("Xorg", config_path.as_str())
+            }
         };
+
+        // Need to own the config_arg string for the lifetime of the Command
+        let config_arg_owned = config_arg.to_string();
+
         let mut child = Command::new(xorg_bin)
             .arg(&display_str)
             .arg("-config")
-            .arg(&config_path)
+            .arg(&config_arg_owned)
             .arg("-noreset")
             .arg("-novtswitch")
             .arg("-nolisten")
@@ -81,13 +109,28 @@ impl VirtualDisplay {
             bail!("Xorg failed to start on :{display_num}");
         }
 
+        // When using the static package config (no per-session modeline),
+        // set the requested resolution via xrandr after Xorg starts.
+        if config_path == "/etc/X11/beam-xorg.conf"
+            && let Err(e) = set_display_resolution(&display_str, width, height)
+        {
+            warn!("Failed to set initial resolution {width}x{height}: {e}");
+        }
+
+        // Only delete temp configs on drop, not the static package config
+        let cleanup_config = if config_path.starts_with("/tmp/") {
+            Some(config_path)
+        } else {
+            None
+        };
+
         Ok(Self {
             display_num,
             xorg_child: Some(child),
             desktop_child: None,
             pulse_child: None,
             cursor_child: None,
-            config_path,
+            cleanup_config,
         })
     }
 
@@ -543,7 +586,9 @@ impl Drop for VirtualDisplay {
         if let Some(ref mut child) = self.xorg_child {
             stop_child(child, "xorg", self.display_num);
         }
-        let _ = fs::remove_file(&self.config_path);
+        if let Some(ref path) = self.cleanup_config {
+            let _ = fs::remove_file(path);
+        }
         // Clean up PA and XFCE config files
         let _ = fs::remove_dir_all(format!("/tmp/beam-pulse-{}", self.display_num));
         let _ = fs::remove_file(format!("/tmp/beam-pulse-{}.pa", self.display_num));
