@@ -43,20 +43,38 @@
 
 ## Versioning & Release
 
-- **Version source of truth**: `Cargo.toml` `[workspace.package]` version field
-- **Must sync**: `web/package.json` version field (validated by `make version-check`)
-- **Semver**: patch for fixes, minor for features, major for breaking changes
+**CRITICAL**: Version bumps require updating THREE files in sync:
+1. `Cargo.toml` — `[workspace.package]` version field (source of truth)
+2. `web/package.json` — version field (must match exactly)
+3. `Cargo.lock` — regenerate by running `cargo check` after editing Cargo.toml
 
-### Release Process
-1. Bump version in `Cargo.toml` (`[workspace.package]` version) and `web/package.json`
-2. Commit: `git commit -am "Bump version to X.Y.Z"`
-3. Tag: `git tag vX.Y.Z`
-4. Push: `git push && git push --tags`
-5. CI builds binaries, packages .deb, tests package, publishes to APT repo and GitHub Releases
+**Before committing any version bump**: run `make version-check` — this MUST pass or CI will block the release.
+
+### When to Bump
+
+Follow strict semver:
+- **Patch** (0.1.1 → 0.1.2): Bug fixes, performance improvements, internal refactors
+- **Minor** (0.1.2 → 0.2.0): New features, new capabilities, backward-compatible changes
+- **Major** (0.2.0 → 1.0.0): Breaking changes to config, API, or behavior that require user action
+
+### Release Process (DO NOT SKIP STEPS)
+
+1. Update versions in `Cargo.toml` and `web/package.json`, then run `cargo check` to update `Cargo.lock`
+2. Validate: `make version-check`
+3. Commit all three files: `git add Cargo.toml Cargo.lock web/package.json && git commit -m "Bump version to X.Y.Z"`
+4. Tag and push: `git tag vX.Y.Z && git push && git push --tags`
+5. CI verifies version match, builds binaries, packages .deb, tests install, publishes to APT repo and GitHub Releases
+
+### Common Mistakes
+
+- Forgetting `web/package.json` → CI rejects the release
+- Forgetting `cargo check` after editing Cargo.toml → Cargo.lock out of sync
+- Tagging before pushing the version bump commit → tag points to wrong code
+- Pushing tag before `git push` on main → CI builds stale code
 
 ### APT Repository
 - Hosted on GitHub Pages (`gh-pages` branch)
-- URL: `https://frecar.github.io/beam/apt`
+- Landing page: `https://frecar.github.io/beam/`
 - GPG key: `https://frecar.github.io/beam/gpg/beam.gpg`
 
 ### Package Paths (must stay consistent across install.sh, Makefile, systemd, nfpm.yaml)
