@@ -84,5 +84,5 @@ Follow strict semver:
 - `/usr/share/beam/web/dist/` — web client files
 - `/etc/beam/beam.toml` — configuration (preserved on upgrade)
 - `/etc/systemd/system/beam.service` — systemd unit
-- `/etc/udev/rules.d/99-beam-uinput.rules` — uinput permissions
+- `/etc/X11/beam-xorg.conf` — static Xorg config for dummy driver
 - `/var/lib/beam/sessions/` — runtime session data

@@ -33,9 +33,10 @@ recommends:
   - pulseaudio | pipewire-pulse
   - xclip
   - libcap2-bin
+  - gnome-keyring
 
 suggests:
-  - gnome-keyring
+  - xfce4-whiskermenu-plugin
   - gstreamer1.0-vaapi
   - xdotool
 

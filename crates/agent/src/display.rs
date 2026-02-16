@@ -300,8 +300,20 @@ impl VirtualDisplay {
                     let display_num = display_for_xfconf.trim_start_matches(':');
                     let keyring_dir = format!("/tmp/beam-keyring-{display_num}");
                     let keyring_data_dir = format!("/tmp/beam-keyring-{display_num}/data");
+                    let keyrings_dir = format!("{keyring_data_dir}/keyrings");
                     let _ = fs::create_dir_all(&keyring_dir);
-                    let _ = fs::create_dir_all(&keyring_data_dir);
+                    let _ = fs::create_dir_all(&keyrings_dir);
+
+                    // Pre-create the "login" keyring and default alias so Chrome
+                    // and other libsecret consumers don't prompt "Set password
+                    // for new keyring". The --unlock flag will adopt and unlock
+                    // this keyring with the empty password from stdin.
+                    let login_keyring_path = format!("{keyrings_dir}/login.keyring");
+                    if !std::path::Path::new(&login_keyring_path).exists() {
+                        let _ = fs::write(&login_keyring_path, b"");
+                    }
+                    let _ = fs::write(format!("{keyrings_dir}/default"), "login");
+
                     // Use a shell pipe to reliably deliver the empty password
                     // to --unlock via stdin. Direct Stdio::piped() + drop has
                     // a race condition with --foreground (daemon may not have
@@ -332,7 +344,9 @@ impl VirtualDisplay {
                     }
                 }
 
-                let settings: &[(&str, &str, &str, &str)] = &[
+                let has_whiskermenu = which_exists("xfce4-popup-whiskermenu");
+
+                let mut settings: Vec<(&str, &str, &str, &str)> = vec![
                     // Disable compositor (biggest latency offender)
                     ("xfwm4", "/general/use_compositing", "bool", "false"),
                     // Disable workspace zoom animation
@@ -350,13 +364,17 @@ impl VirtualDisplay {
                     ("xsettings", "/Gtk/CursorBlink", "bool", "false"),
                     // Force Greybird theme (consistent, well-tested with our CSS override)
                     ("xsettings", "/Net/ThemeName", "string", "Greybird"),
-                    // Replace default Applications Menu with Whisker Menu.
-                    // Whisker Menu uses a two-pane layout (categories + apps)
-                    // instead of cascading GtkMenu submenus, completely
-                    // bypassing the 225ms hardcoded MENU_POPUP_DELAY in GTK3.
-                    // Also provides built-in type-to-search.
-                    ("xfce4-panel", "/plugins/plugin-1", "string", "whiskermenu"),
                 ];
+
+                // Replace default Applications Menu with Whisker Menu if installed.
+                // Whisker Menu uses a two-pane layout (categories + apps)
+                // instead of cascading GtkMenu submenus, completely
+                // bypassing the 225ms hardcoded MENU_POPUP_DELAY in GTK3.
+                if has_whiskermenu {
+                    settings.push(("xfce4-panel", "/plugins/plugin-1", "string", "whiskermenu"));
+                } else {
+                    info!("Whisker Menu not installed, keeping default applicationsmenu");
+                }
 
                 for (channel, prop, typ, value) in settings {
                     let mut cmd = Command::new("xfconf-query");
@@ -379,24 +397,26 @@ impl VirtualDisplay {
                     }
                 }
 
-                // Restart the panel to pick up the Whisker Menu plugin swap.
+                // Restart the panel only if we swapped to Whisker Menu.
                 // The plugin type change via xfconf only takes effect after
                 // the panel reloads its plugin instances.
-                let mut cmd = Command::new("xfce4-panel");
-                cmd.env("DISPLAY", &display_for_xfconf).arg("--restart");
-                if let Some(ref addr) = dbus_addr {
-                    cmd.env("DBUS_SESSION_BUS_ADDRESS", addr);
-                }
-                match cmd.output() {
-                    Ok(output) if output.status.success() => {
-                        info!("Panel restarted with Whisker Menu");
+                if has_whiskermenu {
+                    let mut cmd = Command::new("xfce4-panel");
+                    cmd.env("DISPLAY", &display_for_xfconf).arg("--restart");
+                    if let Some(ref addr) = dbus_addr {
+                        cmd.env("DBUS_SESSION_BUS_ADDRESS", addr);
                     }
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        warn!("Panel restart failed: {stderr}");
-                    }
-                    Err(e) => {
-                        warn!("Failed to restart panel: {e}");
+                    match cmd.output() {
+                        Ok(output) if output.status.success() => {
+                            info!("Panel restarted with Whisker Menu");
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            warn!("Panel restart failed: {stderr}");
+                        }
+                        Err(e) => {
+                            warn!("Failed to restart panel: {e}");
+                        }
                     }
                 }
 
