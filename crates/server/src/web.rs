@@ -1059,7 +1059,7 @@ async fn release_session(
 
 /// GET /api/health - server health check (no auth required, minimal info for load balancers)
 async fn health_check() -> impl IntoResponse {
-    Json(json!({ "status": "ok" }))
+    Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
 }
 
 /// GET /api/health/detailed - full health info (requires JWT auth)

@@ -29,6 +29,7 @@ recommends:
   - gstreamer1.0-plugins-bad
   - gstreamer1.0-plugins-ugly
   - xfce4
+  - xfce4-whiskermenu-plugin
   - dbus-x11
   - pulseaudio | pipewire-pulse
   - xclip
@@ -36,7 +37,6 @@ recommends:
   - gnome-keyring
 
 suggests:
-  - xfce4-whiskermenu-plugin
   - gstreamer1.0-vaapi
   - xdotool
 

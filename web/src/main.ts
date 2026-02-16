@@ -2502,6 +2502,12 @@ if (savedTimeout !== null) {
   sessionTimeoutSelect.value = savedTimeout;
 }
 
+// Fetch server version for login screen
+fetch("/api/health").then(r => r.json()).then((data: { version?: string }) => {
+  const el = document.getElementById("version-footer");
+  if (el && data.version) el.textContent = `v${data.version}`;
+}).catch(() => { /* silently ignore */ });
+
 // Attempt to resume previous session on page load
 const savedSession = loadSession();
 if (savedSession) {

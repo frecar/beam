@@ -355,6 +355,14 @@
         color: var(--text-kbd);
       }
 
+      .version-footer {
+        margin-top: 24px;
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.3);
+        text-align: center;
+        user-select: none;
+      }
+
       /* Loading state (replaces form content during connection) */
       .login-loading {
         display: flex;
@@ -1618,6 +1626,7 @@
           <button type="button" class="loading-cancel" id="loading-cancel">Cancel</button>
         </div>
       </div>
+      <div class="version-footer" id="version-footer"></div>
     </main>
 
     <!-- Desktop View -->
