@@ -103,23 +103,22 @@ impl WebRTCPeer {
         ];
 
         // Register H.264 profiles matching encoder output.
-        // nvh264enc SPS header is 67 4d 40 28 = Main profile (0x4d),
-        // constraint_set1_flag=1 (0x40), Level 4.0 (0x28).
-        // We register 42e01f (Constrained Baseline) as well because Chrome
-        // always offers it and can decode Main profile data regardless of SDP.
-        // webrtc-rs fmtp matching compares first 2 bytes of profile-level-id,
-        // so we need to match what Chrome offers exactly.
+        // Level 5.1 (0x33) supports up to 4096x2304@30fps / 3840x2160@30fps,
+        // covering all resolutions we might send (up to 4K).
+        // Chrome always offers Constrained Baseline so we register that first.
+        // webrtc-rs fmtp matching compares first 2 bytes of profile-level-id.
         let h264_fmtp = match encoder_type {
             EncoderType::Nvidia => {
-                info!("Registering H.264 for NVIDIA encoder (42e01f + 4d001f)");
-                // Register Constrained Baseline first (Chrome always offers this)
+                // nvh264enc outputs Main profile (SPS: 4d 40 xx).
+                // Register both Constrained Baseline and Main at Level 5.1.
+                info!("Registering H.264 for NVIDIA encoder (42e033 + 4d0033)");
                 media_engine.register_codec(
                     RTCRtpCodecParameters {
                         capability: RTCRtpCodecCapability {
                             mime_type: MIME_TYPE_H264.to_string(),
                             clock_rate: 90000,
                             channels: 0,
-                            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_string(),
+                            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033".to_string(),
                             rtcp_feedback: h264_feedback.clone(),
                         },
                         payload_type: 125,
@@ -127,14 +126,13 @@ impl WebRTCPeer {
                     },
                     RTPCodecType::Video,
                 )?;
-                // Also register Main profile for exact match if Chrome offers it
                 media_engine.register_codec(
                     RTCRtpCodecParameters {
                         capability: RTCRtpCodecCapability {
                             mime_type: MIME_TYPE_H264.to_string(),
                             clock_rate: 90000,
                             channels: 0,
-                            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f".to_string(),
+                            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d0033".to_string(),
                             rtcp_feedback: h264_feedback,
                         },
                         payload_type: 102,
@@ -142,11 +140,12 @@ impl WebRTCPeer {
                     },
                     RTPCodecType::Video,
                 )?;
-                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033"
             }
             _ => {
+                // Software/VA-API encoders: Constrained Baseline Level 5.1
                 info!(
-                    "Registering H.264 Constrained Baseline profile for {:?} encoder",
+                    "Registering H.264 Constrained Baseline Level 5.1 for {:?} encoder",
                     encoder_type
                 );
                 media_engine.register_codec(
@@ -155,7 +154,7 @@ impl WebRTCPeer {
                             mime_type: MIME_TYPE_H264.to_string(),
                             clock_rate: 90000,
                             channels: 0,
-                            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_string(),
+                            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033".to_string(),
                             rtcp_feedback: h264_feedback,
                         },
                         payload_type: 125,
@@ -163,7 +162,7 @@ impl WebRTCPeer {
                     },
                     RTPCodecType::Video,
                 )?;
-                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033"
             }
         };
 
