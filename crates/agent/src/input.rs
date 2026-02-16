@@ -1,262 +1,135 @@
 use anyhow::Context;
-use input_linux::sys::input_event;
-use input_linux::{
-    AbsoluteAxis, AbsoluteEvent, AbsoluteInfo, AbsoluteInfoSetup, EventKind, EventTime, InputId,
-    Key, KeyEvent, KeyState, RelativeAxis, RelativeEvent, SynchronizeEvent, UInputHandle,
-};
-use std::fs::{File, OpenOptions};
-use tracing::debug;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use tracing::info;
+use x11rb::connection::{Connection, RequestConnection};
+use x11rb::protocol::xproto;
+use x11rb::protocol::xtest;
+use x11rb::rust_connection::RustConnection;
 
-const ABS_MAX: i32 = 65535;
-
+/// Input injector using X11 XTEST extension.
+///
+/// Injects keyboard, mouse, and scroll events directly into the X server
+/// via XTestFakeInput. This bypasses udev/uinput entirely — no kernel
+/// device creation needed, works regardless of AutoAddDevices setting.
 pub struct InputInjector {
-    keyboard: UInputHandle<File>,
-    mouse: UInputHandle<File>,
-    /// Separate device for relative mouse — mixing ABS and REL axes on one
-    /// device causes libinput to misclassify it, breaking absolute positioning.
-    rel_mouse: UInputHandle<File>,
+    conn: RustConnection,
+    root: xproto::Window,
+    width: Arc<AtomicU32>,
+    height: Arc<AtomicU32>,
     /// Accumulated fractional scroll for smooth trackpad support
     scroll_accum_x: f64,
     scroll_accum_y: f64,
 }
 
 impl InputInjector {
-    pub fn new() -> anyhow::Result<Self> {
-        let keyboard = Self::create_keyboard().context("Failed to create virtual keyboard")?;
-        let mouse = Self::create_mouse().context("Failed to create virtual mouse")?;
-        let rel_mouse =
-            Self::create_rel_mouse().context("Failed to create virtual relative mouse")?;
-        debug!("Input injector initialized");
+    pub fn new(
+        x_display: &str,
+        width: Arc<AtomicU32>,
+        height: Arc<AtomicU32>,
+    ) -> anyhow::Result<Self> {
+        let (conn, screen_num) =
+            RustConnection::connect(Some(x_display)).context("Failed to connect to X display")?;
+        let root = conn.setup().roots[screen_num].root;
+
+        // Verify XTEST extension is available
+        let _ = conn
+            .extension_information(xtest::X11_EXTENSION_NAME)
+            .context("Failed to query XTEST extension")?
+            .ok_or_else(|| anyhow::anyhow!("XTEST extension not available"))?;
+
+        info!(display = x_display, "Input injector initialized via XTEST");
         Ok(Self {
-            keyboard,
-            mouse,
-            rel_mouse,
+            conn,
+            root,
+            width,
+            height,
             scroll_accum_x: 0.0,
             scroll_accum_y: 0.0,
         })
     }
 
-    fn open_uinput() -> anyhow::Result<File> {
-        OpenOptions::new()
-            .write(true)
-            .open("/dev/uinput")
-            .context("Failed to open /dev/uinput (check permissions)")
-    }
-
-    fn create_keyboard() -> anyhow::Result<UInputHandle<File>> {
-        let file = Self::open_uinput()?;
-        let handle = UInputHandle::new(file);
-
-        handle.set_evbit(EventKind::Key)?;
-        handle.set_evbit(EventKind::Synchronize)?;
-
-        // Enable all standard keys (codes 1..=248 cover ESC through standard keyboard keys)
-        for code in 1..=248u16 {
-            if let Ok(key) = Key::from_code(code) {
-                handle.set_keybit(key)?;
-            }
-        }
-
-        let id = InputId {
-            bustype: 0x03, // BUS_USB
-            vendor: 0x1234,
-            product: 0x5678,
-            version: 1,
-        };
-
-        handle.create(&id, b"Beam Virtual Keyboard\0", 0, &[])?;
-        debug!("Virtual keyboard created");
-        Ok(handle)
-    }
-
-    fn create_mouse() -> anyhow::Result<UInputHandle<File>> {
-        let file = Self::open_uinput()?;
-        let handle = UInputHandle::new(file);
-
-        handle.set_evbit(EventKind::Key)?;
-        handle.set_evbit(EventKind::Absolute)?;
-        handle.set_evbit(EventKind::Relative)?;
-        handle.set_evbit(EventKind::Synchronize)?;
-
-        // Mouse buttons
-        handle.set_keybit(Key::ButtonLeft)?;
-        handle.set_keybit(Key::ButtonRight)?;
-        handle.set_keybit(Key::ButtonMiddle)?;
-
-        // Absolute axes for positioning
-        handle.set_absbit(AbsoluteAxis::X)?;
-        handle.set_absbit(AbsoluteAxis::Y)?;
-
-        // Relative axes for scroll (NOT REL_X/REL_Y — those go on a separate
-        // device to avoid libinput misclassifying this as a relative device)
-        handle.set_relbit(RelativeAxis::Wheel)?;
-        handle.set_relbit(RelativeAxis::HorizontalWheel)?;
-        // High-resolution scroll for smooth trackpad
-        handle.set_relbit(RelativeAxis::WheelHiRes)?;
-        handle.set_relbit(RelativeAxis::HorizontalWheelHiRes)?;
-
-        let abs_x = AbsoluteInfoSetup {
-            axis: AbsoluteAxis::X,
-            info: AbsoluteInfo {
-                value: 0,
-                minimum: 0,
-                maximum: ABS_MAX,
-                fuzz: 0,
-                flat: 0,
-                resolution: 0,
-            },
-        };
-
-        let abs_y = AbsoluteInfoSetup {
-            axis: AbsoluteAxis::Y,
-            info: AbsoluteInfo {
-                value: 0,
-                minimum: 0,
-                maximum: ABS_MAX,
-                fuzz: 0,
-                flat: 0,
-                resolution: 0,
-            },
-        };
-
-        let id = InputId {
-            bustype: 0x03, // BUS_USB
-            vendor: 0x1234,
-            product: 0x5679,
-            version: 1,
-        };
-
-        handle.create(&id, b"Beam Virtual Mouse\0", 0, &[abs_x, abs_y])?;
-        debug!("Virtual mouse created");
-        Ok(handle)
-    }
-
-    /// Separate device for relative mouse movement (pointer lock mode).
-    /// Must be a different device from the absolute mouse to prevent
-    /// libinput from misclassifying the absolute device.
-    fn create_rel_mouse() -> anyhow::Result<UInputHandle<File>> {
-        let file = Self::open_uinput()?;
-        let handle = UInputHandle::new(file);
-
-        handle.set_evbit(EventKind::Key)?;
-        handle.set_evbit(EventKind::Relative)?;
-        handle.set_evbit(EventKind::Synchronize)?;
-
-        // Mouse buttons (needed for click-drag in pointer lock)
-        handle.set_keybit(Key::ButtonLeft)?;
-        handle.set_keybit(Key::ButtonRight)?;
-        handle.set_keybit(Key::ButtonMiddle)?;
-
-        // Relative axes for pointer lock movement
-        handle.set_relbit(RelativeAxis::X)?;
-        handle.set_relbit(RelativeAxis::Y)?;
-
-        let id = InputId {
-            bustype: 0x03, // BUS_USB
-            vendor: 0x1234,
-            product: 0x567a,
-            version: 1,
-        };
-
-        handle.create(&id, b"Beam Virtual Relative Mouse\0", 0, &[])?;
-        debug!("Virtual relative mouse created");
-        Ok(handle)
-    }
-
+    /// Inject a keyboard event. `code` is a Linux evdev keycode.
+    /// X11 keycode = evdev keycode + 8.
     pub fn inject_key(&mut self, code: u16, pressed: bool) -> anyhow::Result<()> {
-        let key = Key::from_code(code).map_err(|_| anyhow::anyhow!("Invalid key code: {code}"))?;
-        let time = EventTime::default();
-        let events = [
-            KeyEvent::new(time, key, KeyState::pressed(pressed))
-                .into_event()
-                .into_raw(),
-            SynchronizeEvent::report(time).into_event().into_raw(),
-        ];
-        self.keyboard.write(&events)?;
+        let x_keycode = (code + 8) as u8;
+        let event_type = if pressed {
+            xproto::KEY_PRESS_EVENT
+        } else {
+            xproto::KEY_RELEASE_EVENT
+        };
+        xtest::fake_input(&self.conn, event_type, x_keycode, 0, self.root, 0, 0, 0)?;
+        self.conn.flush()?;
         Ok(())
     }
 
-    /// Convert normalized [0.0, 1.0] coordinate to absolute uinput value.
-    fn normalize_to_abs(v: f64) -> i32 {
-        (v.clamp(0.0, 1.0) * ABS_MAX as f64) as i32
-    }
-
+    /// Inject absolute mouse movement from normalized [0.0, 1.0] coordinates.
     pub fn inject_mouse_move_abs(&mut self, x: f64, y: f64) -> anyhow::Result<()> {
-        let abs_x = Self::normalize_to_abs(x);
-        let abs_y = Self::normalize_to_abs(y);
-        let time = EventTime::default();
-        let events: [input_event; 3] = [
-            AbsoluteEvent::new(time, AbsoluteAxis::X, abs_x)
-                .into_event()
-                .into_raw(),
-            AbsoluteEvent::new(time, AbsoluteAxis::Y, abs_y)
-                .into_event()
-                .into_raw(),
-            SynchronizeEvent::report(time).into_event().into_raw(),
-        ];
-        self.mouse.write(&events)?;
+        let w = self.width.load(Ordering::Relaxed);
+        let h = self.height.load(Ordering::Relaxed);
+        let px = (x.clamp(0.0, 1.0) * w as f64) as i16;
+        let py = (y.clamp(0.0, 1.0) * h as f64) as i16;
+        // detail=0 for absolute motion, root=target window
+        xtest::fake_input(
+            &self.conn,
+            xproto::MOTION_NOTIFY_EVENT,
+            0, // false = absolute
+            0,
+            self.root,
+            px,
+            py,
+            0,
+        )?;
+        self.conn.flush()?;
         Ok(())
     }
 
+    /// Inject relative mouse movement (pointer lock mode).
     pub fn inject_mouse_move_rel(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
-        let dx_i = dx.round() as i32;
-        let dy_i = dy.round() as i32;
+        let dx_i = dx.round() as i16;
+        let dy_i = dy.round() as i16;
         if dx_i == 0 && dy_i == 0 {
             return Ok(());
         }
-        let time = EventTime::default();
-        let mut events: Vec<input_event> = Vec::with_capacity(3);
-        if dx_i != 0 {
-            events.push(
-                RelativeEvent::new(time, RelativeAxis::X, dx_i)
-                    .into_event()
-                    .into_raw(),
-            );
-        }
-        if dy_i != 0 {
-            events.push(
-                RelativeEvent::new(time, RelativeAxis::Y, dy_i)
-                    .into_event()
-                    .into_raw(),
-            );
-        }
-        events.push(SynchronizeEvent::report(time).into_event().into_raw());
-        self.rel_mouse.write(&events)?;
+        // detail=1 for relative motion
+        xtest::fake_input(
+            &self.conn,
+            xproto::MOTION_NOTIFY_EVENT,
+            1, // true = relative
+            0,
+            x11rb::NONE, // no root for relative
+            dx_i,
+            dy_i,
+            0,
+        )?;
+        self.conn.flush()?;
         Ok(())
     }
 
-    /// Map browser button index to Linux input key.
-    /// 0=left, 1=middle, 2=right (matches MouseEvent.button).
-    fn map_button(button: u8) -> anyhow::Result<Key> {
+    /// Map browser button index to X11 button number.
+    /// Browser: 0=left, 1=middle, 2=right → X11: 1=left, 2=middle, 3=right
+    fn map_button(button: u8) -> anyhow::Result<u8> {
         match button {
-            0 => Ok(Key::ButtonLeft),
-            1 => Ok(Key::ButtonMiddle),
-            2 => Ok(Key::ButtonRight),
+            0 => Ok(1), // left
+            1 => Ok(2), // middle
+            2 => Ok(3), // right
             _ => anyhow::bail!("Unknown mouse button: {button}"),
         }
     }
 
     pub fn inject_button(&mut self, button: u8, pressed: bool) -> anyhow::Result<()> {
-        let key = Self::map_button(button)?;
-        let time = EventTime::default();
-        let events = [
-            KeyEvent::new(time, key, KeyState::pressed(pressed))
-                .into_event()
-                .into_raw(),
-            SynchronizeEvent::report(time).into_event().into_raw(),
-        ];
-        self.mouse.write(&events)?;
+        let x_button = Self::map_button(button)?;
+        let event_type = if pressed {
+            xproto::BUTTON_PRESS_EVENT
+        } else {
+            xproto::BUTTON_RELEASE_EVENT
+        };
+        xtest::fake_input(&self.conn, event_type, x_button, 0, self.root, 0, 0, 0)?;
+        self.conn.flush()?;
         Ok(())
     }
 
-    /// Convert pixel scroll delta to high-resolution scroll units.
-    /// 30 pixels ≈ 1 scroll notch ≈ 120 hi-res units.
-    fn pixel_to_hires(pixels: f64) -> i32 {
-        (pixels / 30.0 * 120.0) as i32
-    }
-
     /// Accumulate fractional scroll and return discrete notch count.
-    /// Updates the accumulator, subtracting any emitted discrete value.
     fn accumulate_scroll(accum: &mut f64, pixels_per_notch: f64) -> i32 {
         *accum += pixels_per_notch;
         let discrete = *accum as i32;
@@ -266,62 +139,79 @@ impl InputInjector {
         discrete
     }
 
-    /// Inject scroll events with smooth trackpad support.
-    ///
-    /// Pixel-level scroll deltas from the browser are accumulated and converted
-    /// to discrete scroll events. Also sends high-resolution scroll events for
-    /// applications that support them (REL_WHEEL_HI_RES).
+    /// Inject scroll events.
+    /// X11 scroll uses button 4/5 (vertical) and 6/7 (horizontal).
+    /// Each scroll notch is a press+release of the corresponding button.
     pub fn inject_scroll(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
-        let time = EventTime::default();
-        let mut events = Vec::with_capacity(5);
-
-        // Send high-resolution scroll events (120 units = 1 notch)
-        // This preserves trackpad smoothness for apps that support it.
+        // Vertical scroll: button 4 = up, button 5 = down
         if dy.abs() > 0.001 {
-            let hires_value = Self::pixel_to_hires(-dy);
-            if hires_value != 0 {
-                events.push(
-                    RelativeEvent::new(time, RelativeAxis::WheelHiRes, hires_value)
-                        .into_event()
-                        .into_raw(),
-                );
-            }
-
             let discrete_y = Self::accumulate_scroll(&mut self.scroll_accum_y, -dy / 30.0);
-            if discrete_y != 0 {
-                events.push(
-                    RelativeEvent::new(time, RelativeAxis::Wheel, discrete_y)
-                        .into_event()
-                        .into_raw(),
-                );
+            let (button, count) = if discrete_y > 0 {
+                (4u8, discrete_y as u32) // scroll up
+            } else if discrete_y < 0 {
+                (5u8, (-discrete_y) as u32) // scroll down
+            } else {
+                (0, 0)
+            };
+            for _ in 0..count {
+                xtest::fake_input(
+                    &self.conn,
+                    xproto::BUTTON_PRESS_EVENT,
+                    button,
+                    0,
+                    self.root,
+                    0,
+                    0,
+                    0,
+                )?;
+                xtest::fake_input(
+                    &self.conn,
+                    xproto::BUTTON_RELEASE_EVENT,
+                    button,
+                    0,
+                    self.root,
+                    0,
+                    0,
+                    0,
+                )?;
             }
         }
 
+        // Horizontal scroll: button 6 = left, button 7 = right
         if dx.abs() > 0.001 {
-            let hires_value = Self::pixel_to_hires(dx);
-            if hires_value != 0 {
-                events.push(
-                    RelativeEvent::new(time, RelativeAxis::HorizontalWheelHiRes, hires_value)
-                        .into_event()
-                        .into_raw(),
-                );
-            }
-
             let discrete_x = Self::accumulate_scroll(&mut self.scroll_accum_x, dx / 30.0);
-            if discrete_x != 0 {
-                events.push(
-                    RelativeEvent::new(time, RelativeAxis::HorizontalWheel, discrete_x)
-                        .into_event()
-                        .into_raw(),
-                );
+            let (button, count) = if discrete_x > 0 {
+                (7u8, discrete_x as u32) // scroll right
+            } else if discrete_x < 0 {
+                (6u8, (-discrete_x) as u32) // scroll left
+            } else {
+                (0, 0)
+            };
+            for _ in 0..count {
+                xtest::fake_input(
+                    &self.conn,
+                    xproto::BUTTON_PRESS_EVENT,
+                    button,
+                    0,
+                    self.root,
+                    0,
+                    0,
+                    0,
+                )?;
+                xtest::fake_input(
+                    &self.conn,
+                    xproto::BUTTON_RELEASE_EVENT,
+                    button,
+                    0,
+                    self.root,
+                    0,
+                    0,
+                    0,
+                )?;
             }
         }
 
-        if !events.is_empty() {
-            events.push(SynchronizeEvent::report(time).into_event().into_raw());
-            self.mouse.write(&events)?;
-        }
-
+        self.conn.flush()?;
         Ok(())
     }
 }
@@ -330,55 +220,21 @@ impl InputInjector {
 mod tests {
     use super::*;
 
-    // --- Coordinate normalization ---
-
-    #[test]
-    fn normalize_to_abs_origin() {
-        assert_eq!(InputInjector::normalize_to_abs(0.0), 0);
-    }
-
-    #[test]
-    fn normalize_to_abs_max() {
-        assert_eq!(InputInjector::normalize_to_abs(1.0), ABS_MAX);
-    }
-
-    #[test]
-    fn normalize_to_abs_center() {
-        let center = InputInjector::normalize_to_abs(0.5);
-        // Should be approximately half of ABS_MAX
-        assert!((center - ABS_MAX / 2).abs() <= 1);
-    }
-
-    #[test]
-    fn normalize_to_abs_clamps_negative() {
-        assert_eq!(InputInjector::normalize_to_abs(-0.5), 0);
-        assert_eq!(InputInjector::normalize_to_abs(-100.0), 0);
-    }
-
-    #[test]
-    fn normalize_to_abs_clamps_above_one() {
-        assert_eq!(InputInjector::normalize_to_abs(1.5), ABS_MAX);
-        assert_eq!(InputInjector::normalize_to_abs(100.0), ABS_MAX);
-    }
-
     // --- Button mapping ---
 
     #[test]
     fn button_left() {
-        assert!(matches!(InputInjector::map_button(0), Ok(Key::ButtonLeft)));
+        assert_eq!(InputInjector::map_button(0).unwrap(), 1);
     }
 
     #[test]
     fn button_middle() {
-        assert!(matches!(
-            InputInjector::map_button(1),
-            Ok(Key::ButtonMiddle)
-        ));
+        assert_eq!(InputInjector::map_button(1).unwrap(), 2);
     }
 
     #[test]
     fn button_right() {
-        assert!(matches!(InputInjector::map_button(2), Ok(Key::ButtonRight)));
+        assert_eq!(InputInjector::map_button(2).unwrap(), 3);
     }
 
     #[test]
@@ -400,13 +256,10 @@ mod tests {
     #[test]
     fn accumulate_scroll_fractional_accumulates() {
         let mut accum = 0.0;
-        // Three small scrolls that should accumulate to 1 notch
         assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.3), 0);
         assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.3), 0);
         assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.3), 0);
-        // Fourth push should cross the threshold
         assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.3), 1);
-        // Remaining fraction should be ~0.2
         assert!((accum - 0.2).abs() < 0.001);
     }
 
@@ -431,59 +284,15 @@ mod tests {
         InputInjector::accumulate_scroll(&mut accum, 0.5);
         assert!((accum - 0.5).abs() < 0.001);
         InputInjector::accumulate_scroll(&mut accum, 0.5);
-        // Should have emitted 1, remainder 0
         assert!(accum.abs() < 0.001);
     }
 
     #[test]
     fn accumulate_scroll_direction_change() {
         let mut accum = 0.0;
-        // Scroll up partially
         InputInjector::accumulate_scroll(&mut accum, 0.5);
         assert!((accum - 0.5).abs() < 0.001);
-        // Reverse direction — should cancel out
         InputInjector::accumulate_scroll(&mut accum, -0.5);
         assert!(accum.abs() < 0.001);
-    }
-
-    // --- Pixel-to-hires conversion ---
-
-    #[test]
-    fn pixel_to_hires_one_notch() {
-        // 30 pixels = 1 notch = 120 hi-res units
-        assert_eq!(InputInjector::pixel_to_hires(30.0), 120);
-    }
-
-    #[test]
-    fn pixel_to_hires_negative() {
-        assert_eq!(InputInjector::pixel_to_hires(-30.0), -120);
-    }
-
-    #[test]
-    fn pixel_to_hires_half_notch() {
-        assert_eq!(InputInjector::pixel_to_hires(15.0), 60);
-    }
-
-    #[test]
-    fn pixel_to_hires_tiny_delta() {
-        // Very small pixel delta → 0 hi-res units (below threshold)
-        assert_eq!(InputInjector::pixel_to_hires(0.1), 0);
-    }
-
-    // --- Relative mouse zero-movement check ---
-
-    #[test]
-    fn rel_move_rounds_small_to_zero() {
-        // Values < 0.5 round to 0 and should be skipped
-        assert_eq!(0.4f64.round() as i32, 0);
-        assert_eq!((-0.4f64).round() as i32, 0);
-        assert_eq!(0.0f64.round() as i32, 0);
-    }
-
-    #[test]
-    fn rel_move_rounds_to_nonzero() {
-        assert_eq!(0.5f64.round() as i32, 1);
-        assert_eq!((-0.5f64).round() as i32, -1); // banker's rounding, but cast is truncation after round
-        assert_eq!(1.7f64.round() as i32, 2);
     }
 }

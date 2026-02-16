@@ -70,11 +70,6 @@ contents:
     file_info:
       mode: 0644
 
-  - src: packaging/99-beam-uinput.rules
-    dst: /etc/udev/rules.d/99-beam-uinput.rules
-    file_info:
-      mode: 0644
-
   - src: packaging/beam-xorg.conf
     dst: /etc/X11/beam-xorg.conf
     file_info:
