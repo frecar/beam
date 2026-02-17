@@ -549,6 +549,7 @@ async fn main() -> anyhow::Result<()> {
     const IDLE_TIMEOUT_MS: u64 = 300_000; // 5 minutes of no input -> idle mode
     const IDLE_FRAMERATE: u32 = 5; // Low framerate when no input -- saves GPU/CPU
     const BACKGROUND_FRAMERATE: u32 = 1; // Minimal framerate when browser tab is hidden
+    const ENCODER_RESET_COOLDOWN: Duration = Duration::from_secs(5); // Throttle encoder recreation to protect NVENC
 
     let display_for_capture = args.display.clone();
     let kf_flag_for_capture = Arc::clone(&force_keyframe);
@@ -587,6 +588,7 @@ async fn main() -> anyhow::Result<()> {
             let mut was_backgrounded = false;
             let mut first_capture_logged = false;
             let mut first_encode_logged = false;
+            let mut last_encoder_reset = Instant::now(); // Track last encoder recreation for throttling
 
             loop {
                 if shutdown_for_capture.load(Ordering::Relaxed) {
@@ -683,23 +685,33 @@ async fn main() -> anyhow::Result<()> {
                             encoder.force_keyframe();
                         }
                         CaptureCommand::ResetEncoder => {
-                            info!("Recreating encoder pipeline for fresh IDR (reconnection)");
-                            let new_encoder = match Encoder::with_encoder_preference(
-                                screen_capture.width(),
-                                screen_capture.height(),
-                                current_framerate,
-                                current_bitrate,
-                                encoder_pref.as_deref(),
-                            ) {
-                                Ok(enc) => enc,
-                                Err(e) => {
-                                    error!("Failed to recreate encoder: {e:#}");
-                                    continue;
-                                }
-                            };
-                            encoder = new_encoder;
-                            first_encode_logged = false;
-                            info!("Encoder pipeline recreated (next frame will be IDR)");
+                            let elapsed = last_encoder_reset.elapsed();
+                            if elapsed < ENCODER_RESET_COOLDOWN {
+                                debug!(
+                                    cooldown_remaining_ms = (ENCODER_RESET_COOLDOWN - elapsed).as_millis() as u64,
+                                    "ResetEncoder throttled, sending force_keyframe instead"
+                                );
+                                encoder.force_keyframe();
+                            } else {
+                                info!("Recreating encoder pipeline for fresh IDR (reconnection)");
+                                let new_encoder = match Encoder::with_encoder_preference(
+                                    screen_capture.width(),
+                                    screen_capture.height(),
+                                    current_framerate,
+                                    current_bitrate,
+                                    encoder_pref.as_deref(),
+                                ) {
+                                    Ok(enc) => enc,
+                                    Err(e) => {
+                                        error!("Failed to recreate encoder: {e:#}");
+                                        continue;
+                                    }
+                                };
+                                encoder = new_encoder;
+                                first_encode_logged = false;
+                                last_encoder_reset = Instant::now();
+                                info!("Encoder pipeline recreated (next frame will be IDR)");
+                            }
                         }
                     }
                 }

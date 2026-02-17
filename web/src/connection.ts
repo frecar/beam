@@ -51,6 +51,7 @@ const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
+const MIN_RECONNECT_INTERVAL_MS = 10_000; // Minimum time between full reconnects
 
 /**
  * Manages WebRTC connection to the Beam server via WebSocket signaling.
@@ -81,6 +82,7 @@ export class BeamConnection {
   private agentExitedCallback: VoidCallback | null = null;
   private iceAutoReconnectCountdown: ReturnType<typeof setInterval> | null = null;
   private iceServers: RTCIceServer[] = DEFAULT_ICE_SERVERS;
+  private lastFullReconnectTime = 0;
 
   constructor(sessionId: string, token: string) {
     this.sessionId = sessionId;
@@ -245,7 +247,9 @@ export class BeamConnection {
 
     this.ws.onopen = () => {
       wsOpened = true;
-      this.reconnectAttempt = 0;
+      // NOTE: reconnectAttempt is NOT reset here. It resets only when ICE
+      // reaches "connected"/"completed" state. This prevents WiFi flaps
+      // (WS connects but ICE fails) from defeating exponential backoff.
       this.setupPeerConnection();
     };
 
@@ -361,6 +365,12 @@ export class BeamConnection {
       console.log("ICE connection state:", state);
 
       if (state === "connected" || state === "completed") {
+        // ICE actually connected: safe to reset backoff now.
+        // This is the ONLY place reconnectAttempt resets — not WS onopen —
+        // so WiFi flaps (WS up, ICE fails) escalate backoff correctly.
+        this.reconnectAttempt = 0;
+        this.lastFullReconnectTime = 0;
+
         // ICE recovered or connected: cancel any pending auto-reconnect
         const wasCountingDown = this.iceDisconnectTimer !== null || this.iceAutoReconnectCountdown !== null;
         this.cancelIceAutoReconnect();
@@ -602,7 +612,16 @@ export class BeamConnection {
       MAX_RECONNECT_DELAY_MS,
     );
     const jitter = Math.random() * baseDelay * 0.3;
-    const delay = Math.round(baseDelay + jitter);
+    let delay = Math.round(baseDelay + jitter);
+
+    // Enforce minimum interval between full reconnects to prevent
+    // WiFi flap storms from exhausting the server-side encoder.
+    const now = Date.now();
+    const timeSinceLast = now - this.lastFullReconnectTime;
+    if (this.lastFullReconnectTime > 0 && timeSinceLast < MIN_RECONNECT_INTERVAL_MS) {
+      delay = Math.max(delay, MIN_RECONNECT_INTERVAL_MS - timeSinceLast);
+    }
+
     this.reconnectAttempt++;
 
     console.log(
@@ -612,6 +631,7 @@ export class BeamConnection {
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      this.lastFullReconnectTime = Date.now();
       this.establishConnection();
     }, delay);
   }
