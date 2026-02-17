@@ -80,8 +80,14 @@ impl ScreenCapture {
 
         let shm_size = (width * height * BYTES_PER_PIXEL) as usize;
 
-        // Create POSIX shared memory segment
-        let shm_id = unsafe { libc::shmget(libc::IPC_PRIVATE, shm_size, libc::IPC_CREAT | 0o600) };
+        // Create POSIX shared memory segment. Permissions 0666 because the X
+        // server (Xorg) runs as euid=0 via setuid wrapper, but under systemd's
+        // CapabilityBoundingSet it lacks CAP_IPC_OWNER and cannot bypass IPC DAC
+        // checks. Without world-accessible permissions, Xorg's shmat() fails
+        // with EACCES (euid 0 != segment owner uid, and "other" bits would be 0).
+        // This is safe: IPC_PRIVATE segments can't be discovered by key, and
+        // IPC_RMID (below) prevents new shmat() after both sides attach.
+        let shm_id = unsafe { libc::shmget(libc::IPC_PRIVATE, shm_size, libc::IPC_CREAT | 0o666) };
         if shm_id < 0 {
             bail!("shmget failed: {}", std::io::Error::last_os_error());
         }

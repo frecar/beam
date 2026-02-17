@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.25] - 2026-02-17
+
+Critical bugfix: screen capture still failing on x86_64 under systemd hardening.
+
+### Fixed
+- **MIT-SHM permission denied**: Changed SHM segment permissions from `0o600` to `0o666`. The X server (Xorg) runs as euid=0 via the setuid wrapper, but under systemd's `CapabilityBoundingSet` it lacks `CAP_IPC_OWNER` and cannot bypass IPC permission checks. Without world-accessible permissions, Xorg's `shmat()` fails with `EACCES`. This is safe because `IPC_PRIVATE` segments cannot be discovered by key, and `IPC_RMID` prevents new attachments after both sides connect. This is the standard pattern for X11 MIT-SHM clients.
+
 ## [0.1.24] - 2026-02-17
 
 Critical bugfix: screen capture initialization failure on x86_64 systems.
