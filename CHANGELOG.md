@@ -63,10 +63,6 @@ Security hardening release: rate limiting improvements, file permission tighteni
 - `beam-doctor` diagnostic script
 - Production config file with documented settings
 
-### Changed
-- Default port changed to 8444 (avoids conflict with other services on 8443)
-- SPA fallback enabled for client-side routing
-
 ## [0.1.19] - 2026-02-14
 
 ### Added
