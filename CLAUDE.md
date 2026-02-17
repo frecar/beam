@@ -73,9 +73,10 @@ Follow strict semver:
 - Pushing tag before `git push` on main → CI builds stale code
 
 ### APT Repository
-- Hosted on GitHub Pages (`gh-pages` branch)
+- Hosted on `gh-pages` branch, served via `raw.githubusercontent.com` (avoids GitHub Pages CDN caching)
 - Landing page: `https://frecar.github.io/beam/`
-- GPG key: `https://frecar.github.io/beam/gpg/beam.gpg`
+- APT source: `https://raw.githubusercontent.com/frecar/beam/gh-pages`
+- GPG key: `https://raw.githubusercontent.com/frecar/beam/gh-pages/gpg/beam.gpg`
 
 ### Package Paths (must stay consistent across install.sh, Makefile, systemd, nfpm.yaml)
 - `/usr/local/bin/beam-server` — signaling server binary

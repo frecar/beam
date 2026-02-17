@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Beam Remote Desktop — one-liner install script
-# Usage: curl -fsSL https://frecar.github.io/beam/install | sudo bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/frecar/beam/gh-pages/install | sudo bash
 set -euo pipefail
 
-REPO_URL="https://frecar.github.io/beam"
+REPO_URL="https://raw.githubusercontent.com/frecar/beam/gh-pages"
 
 echo "Installing Beam Remote Desktop..."
 

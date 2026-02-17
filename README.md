@@ -26,14 +26,14 @@ GPU-accelerated remote desktop for Linux, streaming to any browser via WebRTC.
 ### APT Repository (Recommended)
 
 ```bash
-curl -fsSL https://frecar.github.io/beam/gpg/beam.gpg | gpg --dearmor | sudo tee /etc/apt/keyrings/beam.gpg > /dev/null
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/beam.gpg] https://frecar.github.io/beam stable main" | sudo tee /etc/apt/sources.list.d/beam.list
+curl -fsSL https://raw.githubusercontent.com/frecar/beam/gh-pages/gpg/beam.gpg | gpg --dearmor | sudo tee /etc/apt/keyrings/beam.gpg > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/beam.gpg] https://raw.githubusercontent.com/frecar/beam/gh-pages stable main" | sudo tee /etc/apt/sources.list.d/beam.list
 sudo apt-get update && sudo apt-get install beam
 ```
 
 Or use the one-liner:
 ```bash
-curl -fsSL https://frecar.github.io/beam/install | sudo bash
+curl -fsSL https://raw.githubusercontent.com/frecar/beam/gh-pages/install | sudo bash
 ```
 
 After installation, open `https://<your-server>:8444` and log in with any Linux user account.

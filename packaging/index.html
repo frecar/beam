@@ -8,7 +8,7 @@
     <meta property="og:title" content="Beam - GPU-Accelerated Remote Desktop" />
     <meta property="og:description" content="Stream your Linux desktop to any browser. Hardware-accelerated, open source, sub-30ms latency." />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://frecar.github.io/beam/" />
+    <meta property="og:url" content="https://raw.githubusercontent.com/frecar/beam/gh-pages/" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%234a9eff'/%3E%3C/svg%3E" />
     <style>
       /* ── Reset & Base ──────────────────────────────────── */
@@ -966,7 +966,7 @@
             <div class="terminal-body">
               <div class="terminal-line">
                 <span class="terminal-prompt">$</span>
-                <span class="terminal-cmd">curl <span class="terminal-flag">-fsSL</span> <span class="terminal-url">https://frecar.github.io/beam/install</span> | sudo bash</span>
+                <span class="terminal-cmd">curl <span class="terminal-flag">-fsSL</span> <span class="terminal-url">https://raw.githubusercontent.com/frecar/beam/gh-pages/install</span> | sudo bash</span>
               </div>
               <div class="terminal-output">Installing Beam Remote Desktop...</div>
               <div class="terminal-output terminal-success">&#10003; Beam installed successfully!</div>
@@ -1060,8 +1060,8 @@
                 <span class="install-method-badge">Recommended</span>
               </div>
               <div class="code-block">
-                <button class="copy-btn" onclick="copyCode(this, 'curl -fsSL https://frecar.github.io/beam/install | sudo bash')" aria-label="Copy install command">Copy</button>
-                <pre><span class="cmd">curl</span> -fsSL https://frecar.github.io/beam/install | <span class="cmd">sudo</span> bash</pre>
+                <button class="copy-btn" onclick="copyCode(this, 'curl -fsSL https://raw.githubusercontent.com/frecar/beam/gh-pages/install | sudo bash')" aria-label="Copy install command">Copy</button>
+                <pre><span class="cmd">curl</span> -fsSL https://raw.githubusercontent.com/frecar/beam/gh-pages/install | <span class="cmd">sudo</span> bash</pre>
               </div>
             </div>
 
@@ -1071,13 +1071,13 @@
               </div>
               <div class="code-block">
                 <pre><span class="comment"># Add the signing key</span>
-<span class="cmd">curl</span> -fsSL https://frecar.github.io/beam/gpg/beam.gpg \
+<span class="cmd">curl</span> -fsSL https://raw.githubusercontent.com/frecar/beam/gh-pages/gpg/beam.gpg \
   | gpg --dearmor | <span class="cmd">sudo</span> tee /etc/apt/keyrings/beam.gpg > /dev/null
 
 <span class="comment"># Add the repository</span>
 <span class="cmd">echo</span> "deb [arch=$(dpkg --print-architecture) \
   signed-by=/etc/apt/keyrings/beam.gpg] \
-  https://frecar.github.io/beam stable main" \
+  https://raw.githubusercontent.com/frecar/beam/gh-pages stable main" \
   | <span class="cmd">sudo</span> tee /etc/apt/sources.list.d/beam.list
 
 <span class="comment"># Install</span>
@@ -1321,7 +1321,7 @@
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 2v9M4 8l4 4 4-4"/><path d="M2 14h12"/></svg>
             Install Beam
           </a>
-          <div class="final-cta-code">curl -fsSL https://frecar.github.io/beam/install | sudo bash</div>
+          <div class="final-cta-code">curl -fsSL https://raw.githubusercontent.com/frecar/beam/gh-pages/install | sudo bash</div>
         </div>
       </section>
     </main>
