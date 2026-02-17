@@ -1,9 +1,9 @@
+use crate::CaptureCommand;
 use crate::h264;
 use crate::peer::{self, SharedPeer};
-use crate::CaptureCommand;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -41,7 +41,8 @@ pub(crate) async fn run_video_send_loop(
         if peer_gen != current_peer_gen {
             if current_peer_gen != 0 {
                 info!(
-                    old_peer_gen = current_peer_gen, new_peer_gen = peer_gen,
+                    old_peer_gen = current_peer_gen,
+                    new_peer_gen = peer_gen,
                     "Peer generation changed, resetting video loop state"
                 );
             }
@@ -61,7 +62,10 @@ pub(crate) async fn run_video_send_loop(
             dropped_count += 1;
             was_connected = false;
             if dropped_count == 1 || dropped_count.is_multiple_of(300) {
-                debug!(dropped_count, peer_gen, "Dropping video frame (not connected)");
+                debug!(
+                    dropped_count,
+                    peer_gen, "Dropping video frame (not connected)"
+                );
             }
             continue;
         }
@@ -69,7 +73,10 @@ pub(crate) async fn run_video_send_loop(
         // Force IDR keyframe on first connected frame so the browser
         // decoder can initialize.
         if !was_connected {
-            info!(dropped_before_connect = dropped_count, peer_gen, "WebRTC connected, forcing IDR keyframe");
+            info!(
+                dropped_before_connect = dropped_count,
+                peer_gen, "WebRTC connected, forcing IDR keyframe"
+            );
             force_keyframe.store(true, Ordering::Relaxed);
             was_connected = true;
             waiting_for_idr = true;
@@ -107,8 +114,8 @@ pub(crate) async fn run_video_send_loop(
                             idr_wait_attempts = 0;
                         } else {
                             error!(
-                                resets = encoder_reset_count, peer_gen,
-                                "Exhausted encoder resets, proceeding with P-frames"
+                                resets = encoder_reset_count,
+                                peer_gen, "Exhausted encoder resets, proceeding with P-frames"
                             );
                             waiting_for_idr = false;
                         }
@@ -138,18 +145,35 @@ pub(crate) async fn run_video_send_loop(
 
         let data_len = data.len();
         if video_frame_count < 5 {
-            let hex_preview: String = data.iter().take(32).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            let hex_preview: String = data
+                .iter()
+                .take(32)
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
             debug!(size = data_len, is_idr, hex = %hex_preview, "Frame NAL bytes (pre-write)");
         }
-        match current_peer.write_video_sample(data, frame_duration.as_nanos() as u64).await {
+        match current_peer
+            .write_video_sample(data, frame_duration.as_nanos() as u64)
+            .await
+        {
             Ok(()) => {
                 video_frame_count += 1;
                 frames_since_health_check += 1;
                 if video_frame_count <= 5 {
-                    info!(size = data_len, is_idr, frame = video_frame_count, peer_gen, "Video frame written to WebRTC");
+                    info!(
+                        size = data_len,
+                        is_idr,
+                        frame = video_frame_count,
+                        peer_gen,
+                        "Video frame written to WebRTC"
+                    );
                 }
                 if video_frame_count.is_multiple_of(300) {
-                    info!(video_frame_count, peer_gen, "Video frames written to WebRTC");
+                    info!(
+                        video_frame_count,
+                        peer_gen, "Video frames written to WebRTC"
+                    );
                 }
 
                 // Health check: after writing frames for 5+ seconds,
@@ -176,7 +200,10 @@ pub(crate) async fn run_video_send_loop(
                         was_connected = false;
                         waiting_for_idr = false;
                     } else {
-                        debug!(packets, frames_since_health_check, "Video health check passed");
+                        debug!(
+                            packets,
+                            frames_since_health_check, "Video health check passed"
+                        );
                     }
                     frames_since_health_check = 0;
                     last_health_check = Instant::now();
@@ -201,7 +228,10 @@ pub(crate) async fn run_audio_send_loop(
     let audio_duration_ns = Duration::from_millis(20).as_nanos() as u64;
     while let Some(data) = audio_rx.recv().await {
         let current_peer = peer::snapshot(shared_peer).await;
-        if let Err(e) = current_peer.write_audio_sample(&data, audio_duration_ns).await {
+        if let Err(e) = current_peer
+            .write_audio_sample(&data, audio_duration_ns)
+            .await
+        {
             debug!("Write audio sample: {e:#}");
         }
     }

@@ -1,6 +1,6 @@
+use crate::CaptureCommand;
 use crate::encoder;
 use crate::peer::{self, SharedPeer};
-use crate::CaptureCommand;
 
 use std::time::Duration;
 use tracing::{debug, info};
@@ -20,7 +20,9 @@ pub(crate) async fn run_abr_loop(
     let mut current_bitrate = initial_bitrate;
     let abr_enabled = !matches!(encoder_type, encoder::EncoderType::Nvidia);
     if !abr_enabled {
-        info!("Adaptive bitrate disabled for NVIDIA encoder (runtime changes cause color corruption)");
+        info!(
+            "Adaptive bitrate disabled for NVIDIA encoder (runtime changes cause color corruption)"
+        );
     }
     let mut loss_ema: f64 = 0.0;
     let mut prev_packets_sent: u64 = 0;

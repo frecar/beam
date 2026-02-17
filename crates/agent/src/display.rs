@@ -636,7 +636,10 @@ impl Drop for VirtualDisplay {
                 Ok(Some(_)) => (),
                 Ok(None) => {
                     // Still alive — escalate to SIGKILL on the group
-                    debug!(display = display_num, pid, "Desktop group still alive, sending SIGKILL");
+                    debug!(
+                        display = display_num,
+                        pid, "Desktop group still alive, sending SIGKILL"
+                    );
                     unsafe {
                         libc::kill(-pid, libc::SIGKILL);
                     }

@@ -1,8 +1,8 @@
-use crate::peer::{self, PeerConfig, SharedPeer};
 use crate::CaptureCommand;
+use crate::peer::{self, PeerConfig, SharedPeer};
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
