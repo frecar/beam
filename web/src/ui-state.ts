@@ -22,6 +22,7 @@ export const loadingSpinner = document.getElementById("loading-spinner") as HTML
 export const loadingStatus = document.getElementById("loading-status") as HTMLParagraphElement;
 export const loadingCancel = document.getElementById("loading-cancel") as HTMLButtonElement;
 export const remoteVideo = document.getElementById("remote-video") as HTMLVideoElement;
+export const remoteCanvas = document.getElementById("remote-canvas") as HTMLCanvasElement;
 export const statusBar = document.getElementById("status-bar") as HTMLDivElement;
 export const statusDot = document.getElementById("status-dot") as HTMLDivElement;
 export const statusText = document.getElementById("status-text") as HTMLSpanElement;

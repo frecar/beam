@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
-use beam_protocol::{AgentCommand, SignalingMessage};
+use beam_protocol::{AgentCommand, InputEvent, SignalingMessage, FRAME_MAGIC};
+use bytes::Bytes;
 use tokio::sync::{Notify, RwLock, broadcast};
 use tokio::time::{Duration, Instant, interval};
 use uuid::Uuid;
@@ -15,12 +16,14 @@ const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
 const WS_PONG_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Per-session signaling channel with separate paths for browser→agent and agent→browser.
-/// This prevents echo (messages reflecting back to the sender).
+/// Binary video/audio frames from the agent are relayed via a separate broadcast channel.
 pub struct SignalingChannel {
-    /// Messages from browser clients, consumed by the agent
-    pub to_agent: broadcast::Sender<SignalingMessage>,
-    /// Messages from the agent, consumed by browser clients
-    pub to_browser: broadcast::Sender<SignalingMessage>,
+    /// Text messages (input events) from browser, forwarded to agent as AgentCommand::Input
+    pub to_agent: broadcast::Sender<AgentCommand>,
+    /// Text messages from agent to browser (raw JSON — signaling, clipboard, cursor, file data)
+    pub to_browser: broadcast::Sender<String>,
+    /// Binary video/audio frames from agent, relayed to browser
+    pub video_frames: broadcast::Sender<Bytes>,
     /// Notified when a new browser connects, kicking the previous one.
     /// Only one browser WebSocket per session is supported at a time.
     pub browser_kick: Notify,
@@ -30,9 +33,11 @@ impl SignalingChannel {
     pub fn new() -> Self {
         let (to_agent, _) = broadcast::channel(64);
         let (to_browser, _) = broadcast::channel(64);
+        let (video_frames, _) = broadcast::channel(16);
         Self {
             to_agent,
             to_browser,
+            video_frames,
             browser_kick: Notify::new(),
         }
     }
@@ -74,8 +79,8 @@ pub async fn remove_channel(registry: &ChannelRegistry, session_id: Uuid) {
 
 /// Handle a WebSocket connection from a **browser** client.
 ///
-/// Browser sends → to_agent channel (agent reads these).
-/// Browser receives ← to_browser channel (agent writes these).
+/// Browser sends text → parsed as InputEvent, wrapped in AgentCommand::Input, sent to agent.
+/// Browser receives ← text messages (signaling, clipboard, cursor) + binary video/audio frames.
 ///
 /// Only one browser per session at a time. Connecting a new browser
 /// kicks the previous one with close code 4001 ("replaced").
@@ -88,6 +93,7 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
     channel.browser_kick.notify_waiters();
 
     let mut from_agent = channel.to_browser.subscribe();
+    let mut from_agent_video = channel.video_frames.subscribe();
     // Register our own kick listener AFTER kicking the old browser
     let kicked = channel.browser_kick.notified();
     tokio::pin!(kicked);
@@ -124,37 +130,47 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
                     break;
                 }
             }
-            // Forward agent messages to this browser client
+            // Forward agent text messages (raw JSON) to browser
             result = from_agent.recv() => {
-                let msg = match result {
-                    Ok(m) => m,
+                let text = match result {
+                    Ok(t) => t,
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(%session_id, skipped = n, "Browser consumer lagged, messages dropped");
+                        tracing::warn!(%session_id, skipped = n, "Browser signaling consumer lagged");
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                let json = match serde_json::to_string(&msg) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        tracing::error!("Failed to serialize signaling message: {e}");
-                        continue;
-                    }
-                };
-                if socket.send(Message::Text(json.into())).await.is_err() {
+                if socket.send(Message::Text(text.into())).await.is_err() {
                     tracing::debug!(%session_id, "Browser WebSocket send failed");
                     break;
+                }
+            }
+            // Forward agent binary frames (video/audio) to browser
+            result = from_agent_video.recv() => {
+                match result {
+                    Ok(frame) => {
+                        if socket.send(Message::Binary(frame.to_vec().into())).await.is_err() {
+                            tracing::debug!(%session_id, "Browser WebSocket binary send failed");
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::debug!(%session_id, skipped = n, "Browser video consumer lagged, frames dropped");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             // Receive messages from browser and forward to agent
             Some(result) = socket.recv() => {
                 match result {
                     Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<SignalingMessage>(&text) {
-                            Ok(msg) => {
-                                tracing::debug!(%session_id, ?msg, "Browser → Agent");
-                                if let Err(e) = channel.to_agent.send(msg) {
-                                    tracing::warn!(%session_id, "No agent listening: {e}");
+                        // Try parsing as InputEvent first (most common)
+                        match serde_json::from_str::<InputEvent>(&text) {
+                            Ok(event) => {
+                                let cmd = AgentCommand::Input(event);
+                                if let Err(e) = channel.to_agent.send(cmd) {
+                                    tracing::warn!(%session_id, "No agent listening for input: {e}");
                                 }
                             }
                             Err(e) => {
@@ -190,8 +206,9 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
 
 /// Handle a WebSocket connection from a **beam-agent**.
 ///
-/// Agent sends → to_browser channel (browser reads these).
-/// Agent receives ← to_agent channel wrapped in AgentCommand::Signal.
+/// Agent sends text → forwarded to browser as-is (raw JSON relay).
+/// Agent sends binary → validated and relayed to browser as video/audio frames.
+/// Agent receives ← AgentCommand (input events + shutdown).
 pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: ChannelRegistry) {
     tracing::info!(%session_id, "Agent WebSocket upgrade request");
     let channel = get_or_create_channel(&registry, session_id).await;
@@ -217,17 +234,16 @@ pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: 
                     break;
                 }
             }
-            // Forward browser messages to agent (wrapped in AgentCommand)
+            // Forward browser input/commands to agent
             result = from_browser.recv() => {
-                let msg = match result {
+                let cmd = match result {
                     Ok(m) => m,
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(%session_id, skipped = n, "Agent consumer lagged, messages dropped");
+                        tracing::warn!(%session_id, skipped = n, "Agent consumer lagged, commands dropped");
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                let cmd = AgentCommand::Signal(msg);
                 let json = match serde_json::to_string(&cmd) {
                     Ok(j) => j,
                     Err(e) => {
@@ -240,19 +256,28 @@ pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: 
                     break;
                 }
             }
-            // Receive messages from agent and forward to browser
+            // Receive messages from agent
             Some(result) = socket.recv() => {
                 match result {
                     Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<SignalingMessage>(&text) {
-                            Ok(msg) => {
-                                tracing::debug!(%session_id, ?msg, "Agent → Browser");
-                                if let Err(e) = channel.to_browser.send(msg) {
-                                    tracing::warn!(%session_id, "No browser listening: {e}");
+                        // Relay agent text messages to browser as-is (raw JSON).
+                        // This carries signaling (SessionReady, Error) plus data
+                        // messages (clipboard, cursor shape, file transfer).
+                        tracing::debug!(%session_id, "Agent → Browser text relay");
+                        if let Err(e) = channel.to_browser.send(text.to_string()) {
+                            tracing::warn!(%session_id, "No browser listening: {e}");
+                        }
+                    }
+                    Ok(Message::Binary(data)) => {
+                        // Binary frames: validate magic header, relay to browser
+                        if data.len() >= 4 {
+                            let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                            if magic == FRAME_MAGIC {
+                                if let Err(e) = channel.video_frames.send(Bytes::from(data.to_vec())) {
+                                    tracing::debug!(%session_id, "No browser listening for video: {e}");
                                 }
-                            }
-                            Err(e) => {
-                                tracing::warn!(%session_id, "Invalid agent message: {e}");
+                            } else {
+                                tracing::warn!(%session_id, "Agent sent binary with bad magic: 0x{magic:08x}");
                             }
                         }
                     }

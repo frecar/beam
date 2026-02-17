@@ -5,24 +5,13 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SignalingMessage {
-    /// WebRTC SDP offer from browser
-    Offer { sdp: String, session_id: Uuid },
-    /// WebRTC SDP answer from agent
-    Answer { sdp: String, session_id: Uuid },
-    /// ICE candidate exchange
-    IceCandidate {
-        candidate: String,
-        sdp_mid: Option<String>,
-        sdp_mline_index: Option<u16>,
-        session_id: Uuid,
-    },
     /// Session created successfully
     SessionReady { session_id: Uuid },
     /// Error
     Error { message: String },
 }
 
-/// Input events sent over the WebRTC DataChannel (compact format).
+/// Input events sent over WebSocket (compact format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum InputEvent {
@@ -124,16 +113,6 @@ pub struct AuthResponse {
     pub idle_timeout: Option<u64>,
 }
 
-/// ICE server configuration returned to clients for WebRTC setup.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IceServerInfo {
-    pub urls: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credential: Option<String>,
-}
-
 /// Session information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -146,12 +125,12 @@ pub struct SessionInfo {
 }
 
 /// Internal message from server to agent process.
-/// Uses adjacently tagged representation to avoid tag collision with nested SignalingMessage.
+/// Uses adjacently tagged representation to avoid tag collision with nested types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", content = "data", rename_all = "snake_case")]
 pub enum AgentCommand {
-    /// Forward a signaling message to the agent
-    Signal(SignalingMessage),
+    /// Forward an input event to the agent
+    Input(InputEvent),
     /// Shut down the agent
     Shutdown,
 }
@@ -161,76 +140,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signaling_offer_roundtrip() {
-        let msg = SignalingMessage::Offer {
-            sdp: "v=0\r\n...".to_string(),
+    fn signaling_session_ready_roundtrip() {
+        let msg = SignalingMessage::SessionReady {
             session_id: Uuid::nil(),
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains(r#""type":"offer""#));
+        assert!(json.contains(r#""type":"session_ready""#));
         let parsed: SignalingMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            SignalingMessage::Offer { sdp, .. } => assert_eq!(sdp, "v=0\r\n..."),
-            _ => panic!("Expected Offer"),
+            SignalingMessage::SessionReady { session_id } => {
+                assert_eq!(session_id, Uuid::nil());
+            }
+            _ => panic!("Expected SessionReady"),
         }
     }
 
     #[test]
-    fn signaling_answer_roundtrip() {
-        let msg = SignalingMessage::Answer {
-            sdp: "v=0\r\nanswer".to_string(),
-            session_id: Uuid::nil(),
+    fn signaling_error_roundtrip() {
+        let msg = SignalingMessage::Error {
+            message: "test error".to_string(),
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains(r#""type":"answer""#));
-        let _: SignalingMessage = serde_json::from_str(&json).unwrap();
-    }
-
-    #[test]
-    fn signaling_ice_candidate_snake_case() {
-        let msg = SignalingMessage::IceCandidate {
-            candidate: "candidate:1 1 UDP 2130706431 ...".to_string(),
-            sdp_mid: Some("0".to_string()),
-            sdp_mline_index: Some(0),
-            session_id: Uuid::nil(),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        // Must be snake_case, NOT kebab-case
-        assert!(json.contains(r#""type":"ice_candidate""#));
-        assert!(!json.contains("ice-candidate"));
-
+        assert!(json.contains(r#""type":"error""#));
         let parsed: SignalingMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            SignalingMessage::IceCandidate {
-                candidate,
-                sdp_mid,
-                sdp_mline_index,
-                ..
-            } => {
-                assert!(candidate.starts_with("candidate:"));
-                assert_eq!(sdp_mid, Some("0".to_string()));
-                assert_eq!(sdp_mline_index, Some(0));
-            }
-            _ => panic!("Expected IceCandidate"),
-        }
-    }
-
-    #[test]
-    fn ice_candidate_from_browser_format() {
-        // Simulate what the web client sends
-        let browser_json = r#"{
-            "type": "ice_candidate",
-            "candidate": "candidate:1 1 UDP 2130706431 192.168.1.1 50000 typ host",
-            "sdp_mid": "0",
-            "sdp_mline_index": 0,
-            "session_id": "00000000-0000-0000-0000-000000000000"
-        }"#;
-        let msg: SignalingMessage = serde_json::from_str(browser_json).unwrap();
-        match msg {
-            SignalingMessage::IceCandidate { candidate, .. } => {
-                assert!(candidate.contains("candidate:1"));
-            }
-            _ => panic!("Expected IceCandidate"),
+            SignalingMessage::Error { message } => assert_eq!(message, "test error"),
+            _ => panic!("Expected Error"),
         }
     }
 
@@ -367,27 +302,21 @@ mod tests {
     }
 
     #[test]
-    fn agent_command_wraps_signal() {
-        let offer = SignalingMessage::Offer {
-            sdp: "test".to_string(),
-            session_id: Uuid::nil(),
-        };
-        let cmd = AgentCommand::Signal(offer);
+    fn agent_command_wraps_input() {
+        let event = InputEvent::Key { c: 30, d: true };
+        let cmd = AgentCommand::Input(event);
         let json = serde_json::to_string(&cmd).unwrap();
-        // Uses adjacently tagged: {"cmd":"signal","data":{...SignalingMessage...}}
-        assert!(json.contains(r#""cmd":"signal""#));
+        assert!(json.contains(r#""cmd":"input""#));
         assert!(json.contains(r#""data""#));
-        assert!(json.contains(r#""sdp":"test""#));
-        // The nested SignalingMessage retains its own "type" tag
-        assert!(json.contains(r#""type":"offer""#));
+        assert!(json.contains(r#""t":"k""#));
 
-        // Verify the agent can parse it back
         let parsed: AgentCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            AgentCommand::Signal(SignalingMessage::Offer { sdp, .. }) => {
-                assert_eq!(sdp, "test");
+            AgentCommand::Input(InputEvent::Key { c, d }) => {
+                assert_eq!(c, 30);
+                assert!(d);
             }
-            _ => panic!("Expected Signal(Offer)"),
+            _ => panic!("Expected Input(Key)"),
         }
     }
 
@@ -480,9 +409,5 @@ mod tests {
         assert_eq!(config.session.max_sessions, 8);
         assert_eq!(config.session.default_width, 1920);
         assert_eq!(config.session.default_height, 1080);
-        // ICE defaults
-        assert_eq!(config.ice.stun_urls.len(), 2);
-        assert!(config.ice.turn_urls.is_empty());
-        assert!(config.ice.turn_username.is_none());
     }
 }

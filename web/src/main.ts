@@ -4,7 +4,7 @@ import { FileDownloader, FileUploader } from "./filetransfer";
 import type { DownloadMessage } from "./filetransfer";
 import { InputHandler } from "./input";
 import { performLogin, clearRateLimitTimer } from "./login";
-import { Renderer } from "./renderer";
+import { WebCodecsRenderer } from "./webcodecs-renderer";
 import {
   loadSession, clearSession, sendReleaseBeacon, TokenManager,
 } from "./session";
@@ -13,10 +13,9 @@ import {
   THEME_KEY, AUDIO_MUTED_KEY, SCROLL_SPEED_KEY,
   FORWARD_KEYS_KEY, QUALITY_MODE_KEY, SESSION_TIMEOUT_KEY,
   IDLE_WARNING_BEFORE_SECS, IDLE_CHECK_INTERVAL_MS,
-  computeNetworkScore, updateNetworkQualityDot,
-  updateQualitySelectDisplay, switchAutoQuality,
-  updateBandwidthIndicator, updatePerfOverlay,
-  updateLatencyStats, updateLatencyStatsFps,
+  updateQualitySelectDisplay,
+  updatePerfOverlay,
+  updateLatencyStatsFps,
   showIdleWarning, hideIdleWarning,
   resetLatencyStats, resetNetworkIndicators,
 } from "./settings";
@@ -25,7 +24,7 @@ import {
   type ConnectionState,
   loginForm, usernameInput, passwordInput, connectBtn,
   passwordToggle, sessionTimeoutSelect,
-  loadingCancel, remoteVideo, desktopView,
+  loadingCancel, remoteCanvas, desktopView,
   helpOverlay, perfOverlay, sessionInfoPanel, sipCloseBtn,
   reconnectBtn, reconnectDisconnectBtn, reconnectOverlay,
   clipboardHistoryPanel, chpList, chpClearBtn, chpCloseBtn,
@@ -35,11 +34,11 @@ import {
   fabKeyboard, fabFullscreen, fabScreenshot, fabDisconnect,
   mobileKeyboardInput, sipCopyStatsBtn,
   btnMute, btnForwardKeys, btnTheme,
-  setStatus as setStatusUI, updateConnectionQuality,
+  setStatus as setStatusUI,
   showLoading, hideLoading, showLoadingError,
   showDesktop as showDesktopUI, showLogin as showLoginUI,
-  showReconnectOverlay, updateReconnectCountdown, hideReconnectOverlay,
-  isAutoReconnectCountdown, reconnectDesc,
+  showReconnectOverlay, hideReconnectOverlay,
+  reconnectDesc,
 } from "./ui-state";
 
 // --- Token manager (singleton) ---
@@ -50,19 +49,14 @@ const tokenManager = new TokenManager();
 let effectiveIdleTimeoutSecs = 3600; // updated from login response
 
 let connection: BeamConnection | null = null;
-let renderer: Renderer | null = null;
+let renderer: WebCodecsRenderer | null = null;
 let inputHandler: InputHandler | null = null;
 let clipboardBridge: ClipboardBridge | null = null;
 let fileUploader: FileUploader | null = null;
 let fileDownloader: FileDownloader | null = null;
 let ui: BeamUI | null = null;
-let statsInterval: ReturnType<typeof setInterval> | null = null;
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let connectionTimeout: ReturnType<typeof setTimeout> | null = null;
-
-// Soft reconnect scheduling for resolution changes
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-const RECONNECT_DELAY_MS = 1000; // Give agent time to process resize
 
 // Release token for graceful session cleanup on tab close
 let currentReleaseToken: string | null = null;
@@ -71,53 +65,13 @@ let currentSessionId: string | null = null;
 // Guard against race between heartbeat 404 and user clicking reconnect
 let isReturningToLogin = false;
 
-// For calculating received video bitrate from inbound-rtp stats
-let prevBytesReceived = 0;
-let prevStatsTimestamp = 0;
-let prevPacketsReceived = 0;
-let prevPacketsLost = 0;
-
-// Post-background recovery: detect broken RTP pipeline after extended background.
-// Chrome's jitter buffer / H.264 decoder can corrupt after 30+ seconds backgrounded.
-// Packets arrive (packetsReceived increments) but 0 frames decode. Soft reconnect
-// creates a fresh peer connection — the only reliable fix.
-let backgroundedAt: number | null = null;
-let postBackgroundRecoveryChecks = 0;
-const BACKGROUND_CORRUPTION_THRESHOLD_MS = 30_000;
-const POST_BACKGROUND_RECOVERY_POLLS = 3;
-
-// Cumulative bytes received during this session (for bandwidth indicator)
-let sessionBytesReceived = 0;
-
-// Performance overlay state (updated from stats poll + renderer)
+// Performance overlay state (updated from renderer)
 let perfFps = 0;
-let perfLatency = 0;
-let perfBitrate = 0;
-let perfLoss = 0;
 
-// Decode time tracking (per-frame average from inbound-rtp stats)
-let prevFramesDecoded = 0;
-let prevTotalDecodeTime = 0;
-let currentDecodeTimeMs = 0;
-
-// Running RTT average for tooltip
-let rttSamples: number[] = [];
-const RTT_SAMPLE_WINDOW = 30;
-
-// Tooltip stats
-let lastJitterMs = 0;
-let lastVideoCodec = "";
-let lastVideoResolution = "";
-let totalPacketsReceived = 0;
-let totalPacketsLost = 0;
-
-// Track connection state so quality updates only apply when connected
-let currentConnectionState: ConnectionState = "disconnected";
 
 // --- Auto quality mode ---
 let qualityMode: "auto" | "high" | "low" = "auto";
 let autoQualityLevel: "high" | "low" = "high";
-let qualityScoreHistory: { score: number; time: number }[] = [];
 
 // Idle timeout warning state
 let lastActivity = Date.now();
@@ -148,48 +102,8 @@ let connectedSinceTime: number | null = null;
 let sessionDurationInterval: ReturnType<typeof setInterval> | null = null;
 let sessionUsername: string | null = null;
 
-// Audio stats tracking for session info panel
-let prevAudioBytesReceived = 0;
-let prevAudioStatsTimestamp = 0;
-
-// --- Wrapper for setStatus that tracks connection state ---
 function setStatus(state: ConnectionState, message: string): void {
-  setStatusUI(state, message, (s) => { currentConnectionState = s; });
-}
-
-// --- Network quality monitor ---
-
-/** Feed stats to the network quality monitor (called from pollWebRTCStats) */
-function updateNetworkQualityMonitor(rttMs: number | null, lossPercent: number): void {
-  const score = computeNetworkScore(rttMs, lossPercent);
-  const now = Date.now();
-
-  // Always update the dot (visible regardless of auto mode)
-  updateNetworkQualityDot(score, currentConnectionState);
-
-  if (qualityMode !== "auto") return;
-
-  qualityScoreHistory.push({ score, time: now });
-  // Keep last 15 seconds of history
-  qualityScoreHistory = qualityScoreHistory.filter(s => now - s.time < 15_000);
-
-  if (autoQualityLevel === "high") {
-    // Drop to low: score < 40 sustained for 5 seconds
-    const fiveSecsAgo = now - 5_000;
-    const recent = qualityScoreHistory.filter(s => s.time >= fiveSecsAgo);
-    if (recent.length >= 3 && recent.every(s => s.score < 40)) {
-      const result = switchAutoQuality("low", autoQualityLevel, qualityMode, connection, ui);
-      autoQualityLevel = result.newLevel;
-    }
-  } else {
-    // Restore to high: score > 70 sustained for 10 seconds
-    const tenSecsAgo = now - 10_000;
-    const recent = qualityScoreHistory.filter(s => s.time >= tenSecsAgo);
-    if (recent.length >= 5 && recent.every(s => s.score > 70)) {
-      const result = switchAutoQuality("high", autoQualityLevel, qualityMode, connection, ui);
-      autoQualityLevel = result.newLevel;
-    }
-  }
+  setStatusUI(state, message);
 }
 
 function showDesktop(): void {
@@ -203,158 +117,6 @@ function showDesktop(): void {
 
 function showLogin(): void {
   showLoginUI(closeFab);
-}
-
-/** Extract round-trip latency and quality metrics from WebRTC stats */
-async function pollWebRTCStats(): Promise<void> {
-  if (!connection) return;
-
-  const stats = await connection.getStats();
-  if (!stats) return;
-
-  let rttMs: number | null = null;
-  let bitrateKbps: number | null = null;
-  let packetsLost = 0;
-  let packetsReceived = 0;
-  let currentBytesReceived = 0;
-  let currentTimestamp = 0;
-  let framesDecoded = 0;
-  let totalDecodeTime = 0;
-  let jitterSec = 0;
-  let videoCodecId = "";
-  let inboundVideoFps = 0;
-
-  stats.forEach((report) => {
-    if (report.type === "candidate-pair" && report.state === "succeeded") {
-      const rtt = report.currentRoundTripTime;
-      if (typeof rtt === "number") {
-        rttMs = rtt * 1000;
-      }
-    }
-
-    // Track inbound video stats (we're receiving, not sending video)
-    if (report.type === "inbound-rtp" && report.kind === "video") {
-      packetsReceived = report.packetsReceived || 0;
-      packetsLost = report.packetsLost || 0;
-      currentBytesReceived = report.bytesReceived || 0;
-      currentTimestamp = report.timestamp;
-      framesDecoded = report.framesDecoded || 0;
-      totalDecodeTime = report.totalDecodeTime || 0;
-      if (typeof report.jitter === "number") {
-        jitterSec = report.jitter;
-      }
-      if (typeof report.framesPerSecond === "number") {
-        inboundVideoFps = report.framesPerSecond;
-      }
-      videoCodecId = report.codecId || "";
-    }
-
-  });
-
-  // Resolve video codec name from codec stats
-  if (videoCodecId) {
-    stats.forEach((report) => {
-      if (report.type === "codec" && report.id === videoCodecId) {
-        lastVideoCodec = (report.mimeType || "").replace("video/", "");
-      }
-    });
-  }
-
-  // Calculate actual received video bitrate from inbound-rtp delta
-  if (currentBytesReceived > 0 && prevBytesReceived > 0 && currentTimestamp > prevStatsTimestamp) {
-    const deltaBytes = currentBytesReceived - prevBytesReceived;
-    const deltaSec = (currentTimestamp - prevStatsTimestamp) / 1000;
-    if (deltaSec > 0) {
-      bitrateKbps = Math.round((deltaBytes * 8) / deltaSec / 1000);
-    }
-    sessionBytesReceived += deltaBytes;
-  }
-  prevBytesReceived = currentBytesReceived;
-  prevStatsTimestamp = currentTimestamp;
-
-  // Calculate per-frame decode time
-  if (framesDecoded > prevFramesDecoded && totalDecodeTime > prevTotalDecodeTime) {
-    const deltaFrames = framesDecoded - prevFramesDecoded;
-    const deltaTime = totalDecodeTime - prevTotalDecodeTime;
-    currentDecodeTimeMs = (deltaTime / deltaFrames) * 1000;
-  }
-  prevFramesDecoded = framesDecoded;
-  prevTotalDecodeTime = totalDecodeTime;
-
-  // RTT running average for tooltip
-  if (rttMs !== null) {
-    rttSamples.push(rttMs);
-    if (rttSamples.length > RTT_SAMPLE_WINDOW) rttSamples.shift();
-  }
-
-  // Store stats for tooltip
-  lastJitterMs = jitterSec * 1000;
-  totalPacketsReceived = packetsReceived;
-  totalPacketsLost = packetsLost;
-  if (remoteVideo.videoWidth > 0) {
-    lastVideoResolution = `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`;
-  }
-
-  // Calculate interval loss percentage for better reactivity in auto-quality
-  let intervalLossPercent = 0;
-  const deltaReceived = packetsReceived - prevPacketsReceived;
-  const deltaLost = Math.max(0, packetsLost - prevPacketsLost);
-  if (deltaReceived + deltaLost > 0) {
-    intervalLossPercent = (deltaLost / (deltaReceived + deltaLost)) * 100;
-  }
-  prevPacketsReceived = packetsReceived;
-  prevPacketsLost = packetsLost;
-
-  // Calculate cumulative loss percentage for display
-  const cumulativeLossPercent =
-    packetsReceived > 0 ? (packetsLost / packetsReceived) * 100 : 0;
-
-  // Update latency stats display in status bar
-  updateLatencyStats(rttMs, currentDecodeTimeMs, cumulativeLossPercent,
-    rttSamples, perfFps, lastJitterMs, totalPacketsReceived, totalPacketsLost,
-    lastVideoResolution, lastVideoCodec);
-
-  // Update performance overlay state
-  if (rttMs !== null) perfLatency = rttMs;
-  if (bitrateKbps !== null) perfBitrate = bitrateKbps;
-  perfLoss = Math.round(cumulativeLossPercent * 10) / 10;
-  updatePerfOverlay(perfLatency, perfFps, perfBitrate, perfLoss);
-
-  // Update status bar connection quality indicator based on latency
-  if (rttMs !== null) updateConnectionQuality(rttMs, currentConnectionState);
-
-  // Update bandwidth indicator in status bar
-  updateBandwidthIndicator(bitrateKbps, sessionBytesReceived, currentConnectionState);
-
-  // Feed the network quality monitor with interval loss
-  updateNetworkQualityMonitor(rttMs, intervalLossPercent);
-
-  // Warn if video element has no frames decoded yet (debugging aid)
-  if (remoteVideo.srcObject && remoteVideo.videoWidth === 0 && remoteVideo.videoHeight === 0) {
-    console.warn("Video element has srcObject but 0x0 dimensions - no frames decoded yet");
-  }
-
-  // Post-background recovery: if tab was backgrounded 30+ seconds and FPS stays
-  // at 0 while packets are arriving, the RTP pipeline is corrupted. Trigger a
-  // soft reconnect to get a fresh peer connection (the only reliable fix).
-  if (postBackgroundRecoveryChecks > 0) {
-    if (inboundVideoFps === 0 && deltaReceived > 10) {
-      postBackgroundRecoveryChecks--;
-      if (postBackgroundRecoveryChecks === 0) {
-        console.warn(
-          `Post-background recovery: 0 FPS but ${deltaReceived} packets/s received. ` +
-          `RTP pipeline corrupted — triggering soft reconnect.`
-        );
-        connection?.softReconnect();
-      }
-    } else if (inboundVideoFps > 0) {
-      console.log("Post-background pipeline recovered naturally");
-      postBackgroundRecoveryChecks = 0;
-    }
-  }
-
-  // Update session info panel if visible (reuses the same 2s polling interval)
-  updateSessionInfoStats();
 }
 
 // --- Session info panel ---
@@ -630,7 +392,6 @@ function updateSessionInfoPanel(): void {
   const sipConnectedSince = document.getElementById("sip-connected-since");
 
   if (sipSessionId && currentSessionId) {
-    // Show shortened session ID (first 8 chars)
     sipSessionId.textContent = currentSessionId.substring(0, 8);
     sipSessionId.title = currentSessionId;
   }
@@ -642,186 +403,34 @@ function updateSessionInfoPanel(): void {
   }
 
   updateSessionDuration();
-}
 
-/** Update the session info panel with WebRTC stats (called from pollWebRTCStats) */
-async function updateSessionInfoStats(): Promise<void> {
-  if (!sessionInfoVisible || !connection) return;
-
-  const stats = await connection.getStats();
-  if (!stats) return;
-
-  let iceState = "--";
-  let dtlsState = "--";
-  let localCandidateId = "";
-  let remoteCandidateId = "";
-  let localCandidateType = "--";
-  let remoteCandidateType = "--";
-  let transportProtocol = "--";
-
-  // Video stats
-  let videoCodec = "--";
-  let videoCodecId = "";
-  let videoResolution = "--";
-  let videoFramerate = "--";
-  let videoBitrate = "--";
-  let videoPacketsLost = "--";
-  let videoJitter = "--";
-
-  // Audio stats
-  let audioCodec = "--";
-  let audioCodecId = "";
-  let audioBitrate = "--";
-
-  let currentAudioBytesReceived = 0;
-  let currentAudioTimestamp = 0;
-
-  stats.forEach((report) => {
-    // ICE candidate pair (active)
-    if (report.type === "candidate-pair" && report.state === "succeeded") {
-      localCandidateId = report.localCandidateId || "";
-      remoteCandidateId = report.remoteCandidateId || "";
-    }
-
-    // Transport (DTLS state, ICE state)
-    if (report.type === "transport") {
-      iceState = report.iceState || report.iceLocalCandidateId ? "connected" : "--";
-      dtlsState = report.dtlsState || "--";
-      if (report.selectedCandidatePairId) {
-        // Transport-level ICE state
-        iceState = report.iceState || iceState;
-      }
-    }
-
-    // Local candidate
-    if (report.type === "local-candidate") {
-      if (report.id === localCandidateId) {
-        localCandidateType = report.candidateType || "--";
-        transportProtocol = (report.protocol || "--").toUpperCase();
-      }
-    }
-
-    // Remote candidate
-    if (report.type === "remote-candidate") {
-      if (report.id === remoteCandidateId) {
-        remoteCandidateType = report.candidateType || "--";
-      }
-    }
-
-    // Inbound video RTP
-    if (report.type === "inbound-rtp" && report.kind === "video") {
-      videoCodecId = report.codecId || "";
-      const fw = report.frameWidth;
-      const fh = report.frameHeight;
-      if (fw && fh) {
-        videoResolution = `${fw}x${fh}`;
-      }
-      const fps = report.framesPerSecond;
-      if (typeof fps === "number") {
-        videoFramerate = `${Math.round(fps)} fps`;
-      }
-      const lost = report.packetsLost || 0;
-      const received = report.packetsReceived || 0;
-      videoPacketsLost = `${lost} / ${lost + received}`;
-      const jitter = report.jitter;
-      if (typeof jitter === "number") {
-        videoJitter = `${(jitter * 1000).toFixed(1)} ms`;
-      }
-    }
-
-    // Inbound audio RTP
-    if (report.type === "inbound-rtp" && report.kind === "audio") {
-      audioCodecId = report.codecId || "";
-      currentAudioBytesReceived = report.bytesReceived || 0;
-      currentAudioTimestamp = report.timestamp;
-    }
-  });
-
-  // Resolve codec names from codec stats
-  stats.forEach((report) => {
-    if (report.type === "codec") {
-      if (report.id === videoCodecId) {
-        const mime = report.mimeType || "";
-        videoCodec = mime.replace("video/", "");
-      }
-      if (report.id === audioCodecId) {
-        const mime = report.mimeType || "";
-        audioCodec = mime.replace("audio/", "");
-      }
-    }
-  });
-
-  // Calculate video bitrate from existing perf state
-  if (perfBitrate > 0) {
-    videoBitrate = perfBitrate >= 1000
-      ? `${(perfBitrate / 1000).toFixed(1)} Mbps`
-      : `${perfBitrate} kbps`;
-  }
-
-  // Calculate audio bitrate
-  if (currentAudioBytesReceived > 0 && prevAudioBytesReceived > 0 && currentAudioTimestamp > prevAudioStatsTimestamp) {
-    const deltaBytes = currentAudioBytesReceived - prevAudioBytesReceived;
-    const deltaSec = (currentAudioTimestamp - prevAudioStatsTimestamp) / 1000;
-    if (deltaSec > 0) {
-      const audioKbps = Math.round((deltaBytes * 8) / deltaSec / 1000);
-      audioBitrate = `${audioKbps} kbps`;
-    }
-  }
-  prevAudioBytesReceived = currentAudioBytesReceived;
-  prevAudioStatsTimestamp = currentAudioTimestamp;
-
-  // Audio muted state (renderer controls the video element's muted property)
-  const sipAudioMuted = document.getElementById("sip-audio-muted");
-  if (sipAudioMuted) {
-    sipAudioMuted.textContent = remoteVideo.muted ? "Yes" : "No";
-  }
-
-  // Update DOM elements
+  // Update video stats from renderer
   const setText = (id: string, text: string) => {
     const el = document.getElementById(id);
     if (el) el.textContent = text;
   };
 
-  setText("sip-ice-state", iceState);
-  setText("sip-local-candidate", localCandidateType);
-  setText("sip-remote-candidate", remoteCandidateType);
-  setText("sip-transport", transportProtocol);
-  setText("sip-dtls-state", dtlsState);
-
-  setText("sip-resolution", videoResolution);
-  setText("sip-framerate", videoFramerate);
-  setText("sip-video-codec", videoCodec);
-  setText("sip-video-bitrate", videoBitrate);
-  setText("sip-packets-lost", videoPacketsLost);
-  setText("sip-jitter", videoJitter);
-
-  setText("sip-audio-codec", audioCodec);
-  setText("sip-audio-bitrate", audioBitrate);
-
-  // Apply color classes for ICE state
-  const iceEl = document.getElementById("sip-ice-state");
-  if (iceEl) {
-    iceEl.classList.remove("sip-good", "sip-warn", "sip-bad", "sip-dim");
-    if (iceState === "connected" || iceState === "completed") {
-      iceEl.classList.add("sip-good");
-    } else if (iceState === "checking" || iceState === "new") {
-      iceEl.classList.add("sip-warn");
-    } else if (iceState === "failed" || iceState === "disconnected") {
-      iceEl.classList.add("sip-bad");
+  if (renderer) {
+    const w = renderer.getVideoWidth();
+    const h = renderer.getVideoHeight();
+    if (w > 0 && h > 0) {
+      setText("sip-resolution", `${w}x${h}`);
     }
+    setText("sip-framerate", `${renderer.getFps()} fps`);
+    setText("sip-video-codec", "H.264");
   }
 
-  // Apply color for DTLS state
-  const dtlsEl = document.getElementById("sip-dtls-state");
-  if (dtlsEl) {
-    dtlsEl.classList.remove("sip-good", "sip-warn", "sip-bad", "sip-dim");
-    if (dtlsState === "connected") {
-      dtlsEl.classList.add("sip-good");
-    } else if (dtlsState === "connecting" || dtlsState === "new") {
-      dtlsEl.classList.add("sip-warn");
-    } else if (dtlsState === "failed" || dtlsState === "closed") {
-      dtlsEl.classList.add("sip-bad");
-    }
+  // Transport is now WebSocket
+  setText("sip-ice-state", "N/A (WebSocket)");
+  setText("sip-transport", "WSS");
+  setText("sip-local-candidate", "N/A");
+  setText("sip-remote-candidate", "N/A");
+  setText("sip-dtls-state", "N/A");
+
+  // Audio muted state
+  const sipAudioMuted = document.getElementById("sip-audio-muted");
+  if (sipAudioMuted && renderer) {
+    sipAudioMuted.textContent = renderer.isMuted() ? "Yes" : "No";
   }
 }
 
@@ -840,24 +449,13 @@ function copyStatsToClipboard(): void {
     : "--";
   const duration = connectedSinceTime ? formatDuration(Date.now() - connectedSinceTime) : "--";
 
-  // Connection
-  const iceState = getText("sip-ice-state");
-  const transport = getText("sip-transport");
-  const localCandidate = getText("sip-local-candidate");
-  const remoteCandidate = getText("sip-remote-candidate");
-  const dtlsState = getText("sip-dtls-state");
-
   // Video
   const resolution = getText("sip-resolution");
   const framerate = getText("sip-framerate");
   const videoCodec = getText("sip-video-codec");
-  const videoBitrate = getText("sip-video-bitrate");
-  const packetsLost = getText("sip-packets-lost");
-  const jitter = getText("sip-jitter");
 
   // Audio
   const audioCodec = getText("sip-audio-codec");
-  const audioBitrate = getText("sip-audio-bitrate");
   const audioMuted = getText("sip-audio-muted");
 
   // Client info
@@ -873,21 +471,15 @@ function copyStatsToClipboard(): void {
     `Duration: ${duration}`,
     "",
     "Connection:",
-    `  ICE State: ${iceState}`,
-    `  Transport: ${transport} (${localCandidate} \u2192 ${remoteCandidate})`,
-    `  DTLS: ${dtlsState}`,
+    `  Transport: WebSocket`,
     "",
     "Video:",
     `  Resolution: ${resolution}`,
     `  Framerate: ${framerate}`,
     `  Codec: ${videoCodec}`,
-    `  Bitrate: ${videoBitrate}`,
-    `  Packets lost: ${packetsLost}`,
-    `  Jitter: ${jitter}`,
     "",
     "Audio:",
     `  Codec: ${audioCodec}`,
-    `  Bitrate: ${audioBitrate}`,
     `  Muted: ${audioMuted}`,
     "",
     "Client:",
@@ -936,7 +528,7 @@ function startHeartbeat(sessionId: string): void {
         isReturningToLogin = false;
       }
     } catch {
-      // Network failure -- WebRTC reconnect handles connectivity
+      // Network failure -- WS reconnect handles connectivity
     }
   }, 30_000);
 }
@@ -948,20 +540,6 @@ function stopHeartbeat(): void {
   }
 }
 
-function startStatsPolling(): void {
-  stopStatsPolling();
-  statsInterval = setInterval(() => {
-    pollWebRTCStats();
-  }, 1000);
-}
-
-function stopStatsPolling(): void {
-  if (statsInterval) {
-    clearInterval(statsInterval);
-    statsInterval = null;
-  }
-}
-
 // --- Idle timeout warning ---
 
 /** Record user activity and hide the warning if visible */
@@ -969,15 +547,11 @@ function recordActivity(): void {
   lastActivity = Date.now();
   if (idleWarningVisible) {
     idleWarningVisible = hideIdleWarning(idleWarningVisible);
-    // Send an immediate heartbeat to reset the server-side idle timer
-    // now that the user has returned from being idle.
     sendActivityHeartbeat();
   }
 }
 
-/** Send an extra heartbeat after the user returns from idle.
- *  This resets the server-side `last_activity` timestamp immediately
- *  rather than waiting for the next 30s heartbeat tick. */
+/** Send an extra heartbeat after the user returns from idle. */
 function sendActivityHeartbeat(): void {
   const session = loadSession();
   const currentToken = tokenManager.getToken();
@@ -995,7 +569,6 @@ function startIdleCheck(): void {
   stopIdleCheck();
   lastActivity = Date.now();
 
-  // idle_timeout=0 means disabled on the server -- no warning needed
   if (effectiveIdleTimeoutSecs <= 0) return;
 
   idleCheckInterval = setInterval(() => {
@@ -1026,45 +599,19 @@ function handleDisconnect(): void {
   clipboardBridge = null;
   fileUploader = null;
   fileDownloader = null;
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  stopStatsPolling();
   stopHeartbeat();
   stopIdleCheck();
   tokenManager.clearToken();
   currentReleaseToken = null;
   currentSessionId = null;
-  prevBytesReceived = 0;
-  prevStatsTimestamp = 0;
-  prevPacketsReceived = 0;
-  prevPacketsLost = 0;
-  sessionBytesReceived = 0;
-  prevAudioBytesReceived = 0;
-  prevAudioStatsTimestamp = 0;
-  prevFramesDecoded = 0;
-  prevTotalDecodeTime = 0;
-  currentDecodeTimeMs = 0;
-  rttSamples = [];
-  lastJitterMs = 0;
-  lastVideoCodec = "";
-  lastVideoResolution = "";
-  totalPacketsReceived = 0;
-  totalPacketsLost = 0;
-  backgroundedAt = null;
-  postBackgroundRecoveryChecks = 0;
   connectedSinceTime = null;
   sessionUsername = null;
   hideSessionInfoPanel();
   hideClipboardHistoryPanel();
   hideAdminPanel();
 
-  // Hide bandwidth indicator and network quality dot
+  // Reset indicators
   resetNetworkIndicators();
-  qualityScoreHistory = [];
-
-  // Reset latency stats display
   resetLatencyStats();
 
   // Clear saved session
@@ -1094,10 +641,8 @@ async function handleReconnectClick(): Promise<void> {
   reconnectBtn.disabled = true;
   reconnectBtn.textContent = "Reconnecting...";
 
-  // Try refreshing the token first (it may have expired during the disconnect)
   const refreshed = await tokenManager.refreshToken();
   if (!refreshed) {
-    // Token refresh failed -- session is likely gone
     reconnectBtn.disabled = false;
     reconnectBtn.textContent = defaultLabel;
     reconnectDesc.textContent = "Session expired. Returning to login...";
@@ -1122,11 +667,8 @@ function handleEndSession(): void {
   const session = loadSession();
   const token = tokenManager.getToken();
 
-  // Belt-and-suspenders: send release beacon before the DELETE call.
-  // If the DELETE fails (e.g., network issues), the grace period still runs.
   sendReleaseBeacon(currentSessionId, currentReleaseToken);
 
-  // Fire DELETE request before handleDisconnect clears the token
   if (session && token) {
     fetch(`/api/sessions/${session.session_id}`, {
       method: "DELETE",
@@ -1138,17 +680,10 @@ function handleEndSession(): void {
   ui?.showNotification("Session ended", "info");
 }
 
-/** Capture the current video frame and download it as a PNG */
+/** Capture the current canvas frame and download it as a PNG */
 function captureScreenshot(): void {
-  const video = renderer?.getVideoElement();
-  if (!video || video.videoWidth === 0) return;
-
-  const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  ctx.drawImage(video, 0, 0);
+  const canvas = renderer?.getCanvas();
+  if (!canvas || renderer!.getVideoWidth() === 0) return;
 
   const link = document.createElement("a");
   link.download = `beam-screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
@@ -1208,13 +743,11 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
   const data = await performLogin(setStatus);
   if (!data) return;
 
-  // Set up token and session state
   tokenManager.setToken(data.token);
   tokenManager.setConnection(connection);
   currentSessionId = data.session_id;
   currentReleaseToken = data.release_token ?? null;
   sessionUsername = usernameInput.value.trim();
-  // Update idle timeout from server response
   if (data.idle_timeout !== undefined) {
     effectiveIdleTimeoutSecs = data.idle_timeout;
   }
@@ -1230,21 +763,14 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
 }
 
 async function startConnection(sessionId: string, token: string): Promise<void> {
-  // Clean up any existing connection to prevent stale callbacks from
-  // overwriting state (e.g., old saved session with invalid token retrying
-  // and disabling inputHandler on each disconnect).
   if (connection) {
     connection.disconnect();
     connection = null;
   }
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
 
   setStatus("connecting", "Connecting...");
 
-  // Timeout: if no video track arrives within 20 seconds, show error
+  // Timeout: if no video frame arrives within 20 seconds, show error
   if (connectionTimeout) clearTimeout(connectionTimeout);
   connectionTimeout = setTimeout(() => {
     if (!renderer?.hasStream()) {
@@ -1258,25 +784,13 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
 
   connection = new BeamConnection(sessionId, token);
   tokenManager.setConnection(connection);
-  renderer = new Renderer(remoteVideo, desktopView);
+  renderer = new WebCodecsRenderer(remoteCanvas, desktopView);
 
   // Sync mute button when renderer's mute state changes (e.g. click-to-unmute)
   renderer.onMuteChange((muted) => updateMuteButton(muted));
 
-  // Apply saved audio preference. If the user previously unmuted, the
-  // click-to-unmute one-shot in Renderer will also fire on first click,
-  // but we can pre-set the state here. Due to browser autoplay policy,
-  // unmuting only takes effect after user interaction -- the one-shot click
-  // handler in Renderer covers that case.
-  const savedMuted = localStorage.getItem(AUDIO_MUTED_KEY);
-  if (savedMuted === "false") {
-    // User previously chose to have audio on. We can't auto-unmute due to
-    // autoplay policy, but we update the button to show the intent. The
-    // Renderer's click-to-unmute will fire on first interaction.
-    updateMuteButton(true); // still muted until interaction
-  } else {
-    updateMuteButton(true); // default: muted
-  }
+  // Apply saved audio preference
+  updateMuteButton(true); // default: muted until interaction
 
   // Initialize UI
   ui = new BeamUI();
@@ -1288,10 +802,22 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   renderer.onFpsUpdate((fps) => {
     updateLatencyStatsFps(fps);
     perfFps = fps;
+    // Update perf overlay with just FPS (no RTT/bitrate/loss in WS mode)
+    updatePerfOverlay(0, perfFps, 0, 0);
   });
 
-  connection.onTrack((stream: MediaStream) => {
-    renderer?.attachStream(stream);
+  // Wire video frames from connection to renderer
+  connection.onVideoFrame((flags, width, height, timestampUs, payload) => {
+    renderer?.feedVideoFrame(flags, width, height, timestampUs, payload);
+  });
+
+  // Wire audio frames from connection to renderer
+  connection.onAudioFrame((timestampUs, payload) => {
+    renderer?.feedAudioFrame(timestampUs, payload);
+  });
+
+  // Notify when first video frame is decoded
+  renderer.onFirstFrame(() => {
     hideReconnectOverlay();
     showDesktop();
     setStatus("connected", "Connected");
@@ -1301,52 +827,25 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
       updateSessionInfoPanel();
       startSessionDurationTimer();
     }
-    startStatsPolling();
     startHeartbeat(sessionId);
     startIdleCheck();
-
-    // Notify InputHandler after the first video frame is decoded so it
-    // can safely send resize events. Chrome's H.264 decoder can't handle
-    // mid-stream resolution changes, so we must wait until the decoder
-    // has stabilized on the initial resolution before allowing resizes.
-    const video = remoteVideo as HTMLVideoElement & {
-      requestVideoFrameCallback?: (cb: () => void) => void;
-    };
-    const onFirstFrame = () => {
-      inputHandler?.notifyFirstFrame();
-    };
-    if (video.requestVideoFrameCallback) {
-      video.requestVideoFrameCallback(onFirstFrame);
-    } else {
-      // Fallback for browsers without requestVideoFrameCallback
-      setTimeout(onFirstFrame, 2000);
-    }
+    inputHandler?.notifyFirstFrame();
   });
 
-  connection.onDataChannelOpen(() => {
+  // When WS connection opens, set up input and features
+  connection.onConnected(() => {
     setStatus("connected", "Connected");
     const sendInput = connection!.sendInput.bind(connection!);
 
     if (!inputHandler) {
-      // First connection: set up input capture
       inputHandler = new InputHandler(desktopView, sendInput);
-      // Restore forward keys preference
       const savedForwardKeys = localStorage.getItem(FORWARD_KEYS_KEY) === "true";
       inputHandler.forwardBrowserShortcuts = savedForwardKeys;
       updateForwardKeysButton(savedForwardKeys);
       inputHandler.enable();
 
-      // Schedule a WebRTC soft reconnect when a significant resize happens.
-      // Chrome's H.264 decoder can't handle mid-stream resolution changes,
-      // so we need a fresh PeerConnection after the agent changes xrandr.
-      inputHandler.onResizeNeeded(() => {
-        if (reconnectTimer) clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          console.log("Triggering soft reconnect after significant resize");
-          connection?.softReconnect();
-        }, RECONNECT_DELAY_MS);
-      });
+      // No soft reconnect needed in WebCodecs mode -- the decoder handles
+      // resolution changes inline via reconfiguration.
 
       // Wire up manual layout selector
       const layoutSelect = document.getElementById("layout-select") as HTMLSelectElement | null;
@@ -1365,9 +864,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
           const mode = qualitySelect.value as "auto" | "high" | "low";
           localStorage.setItem(QUALITY_MODE_KEY, mode);
           qualityMode = mode;
-          qualityScoreHistory = [];
           if (mode === "auto") {
-            // Default to high, let the monitor adjust
             autoQualityLevel = "high";
             connection?.sendInput({ t: "q", mode: "high" });
           } else {
@@ -1393,11 +890,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
       }
     }
 
-    // Always re-send layout, quality, and current dimensions on (re)connect.
-    // Sending dimensions immediately is critical: the agent starts at Xorg's
-    // default resolution (2048x1536), which Chrome's H.264 decoder may fail
-    // to decode. Without an immediate resize, no frames decode, so
-    // requestVideoFrameCallback never fires, and we're stuck forever.
+    // Always re-send layout, quality, and current dimensions on (re)connect
     inputHandler.sendLayout();
     inputHandler.sendCurrentDimensions();
     const savedQuality = localStorage.getItem(QUALITY_MODE_KEY) || "auto";
@@ -1440,12 +933,12 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   });
 
   // Handle messages from agent (clipboard sync, cursor shape, file download)
-  connection.onDataChannelMessage((msg) => {
+  connection.onAgentMessage((msg) => {
     if (msg.t === "c" && "text" in msg) {
       clipboardBridge?.handleRemoteClipboard(msg.text);
     }
     if (msg.t === "cur" && "css" in msg) {
-      remoteVideo.style.cursor = msg.css;
+      remoteCanvas.style.cursor = msg.css;
     }
     if (msg.t === "fds" || msg.t === "fdc" || msg.t === "fdd" || msg.t === "fde") {
       fileDownloader?.handleMessage(msg as DownloadMessage);
@@ -1459,7 +952,6 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     inputHandler = null;
     clipboardBridge?.disable();
     clipboardBridge = null;
-    stopStatsPolling();
     stopHeartbeat();
     stopIdleCheck();
   });
@@ -1471,42 +963,10 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   connection.onReconnectFailed(() => {
     setStatus("error", "Connection lost");
     ui?.showNotification("Connection lost. Click Reconnect to try again.", "error");
-    // Show reconnect overlay instead of going back to login.
-    // Keep token and session intact so user can reconnect without re-login.
     showReconnectOverlay();
-    // Restart heartbeat -- onDisconnect already stopped it, but we need it
-    // to detect if the server-side session dies while the overlay is shown.
     const session = loadSession();
     if (session) {
       startHeartbeat(session.session_id);
-    }
-  });
-
-  // Auto-reconnect countdown: ICE detected a network change (disconnected/failed).
-  // Show the overlay with a countdown so the user knows what's happening.
-  // They can click "Reconnect now" to skip the countdown, or wait for auto.
-  connection.onAutoReconnecting((secondsRemaining) => {
-    if (secondsRemaining > 0) {
-      // First callback (e.g. 3): show the overlay with countdown
-      if (!reconnectOverlay.classList.contains("visible") || !isAutoReconnectCountdown) {
-        setStatus("connecting", "Network change detected");
-        showReconnectOverlay("auto-reconnecting", secondsRemaining);
-      } else {
-        // Subsequent callbacks (2, 1): just update the countdown text
-        updateReconnectCountdown(secondsRemaining);
-      }
-    } else {
-      // 0: auto-reconnect is now triggering
-      updateReconnectCountdown(0);
-    }
-  });
-
-  // ICE self-recovered during countdown: cancel the overlay
-  connection.onAutoReconnectRecovered(() => {
-    if (isAutoReconnectCountdown) {
-      hideReconnectOverlay();
-      setStatus("connected", "Connected");
-      ui?.showNotification("Connection recovered", "success");
     }
   });
 
@@ -1519,14 +979,12 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
 
   connection.onReplaced(() => {
     setStatus("error", "Connected from another tab");
-    // Clean up resources but keep session/token so user can take it back
     renderer?.destroy();
     renderer = null;
     inputHandler?.disable();
     inputHandler = null;
     clipboardBridge?.disable();
     clipboardBridge = null;
-    stopStatsPolling();
     stopHeartbeat();
     connection = null;
     showReconnectOverlay("replaced");
@@ -1649,61 +1107,30 @@ loadingCancel.addEventListener("click", () => {
   }
   connection?.disconnect();
   connection = null;
-  // Clear any running rate-limit countdown
   clearRateLimitTimer();
   hideLoading();
   setStatus("disconnected", "Disconnected");
 });
 
-// Track user activity for idle timeout warning.
-// These fire on any mouse/keyboard interaction in the desktop view,
-// resetting the idle timer. The listeners are always attached but
-// recordActivity() is a no-op when no session is active (idleCheckInterval
-// is null, so the warning never shows).
+// Track user activity for idle timeout warning
 desktopView.addEventListener("mousemove", recordActivity);
 desktopView.addEventListener("mousedown", recordActivity);
 desktopView.addEventListener("wheel", recordActivity);
 document.addEventListener("keydown", recordActivity);
 
-// Graceful session release on tab/window close. sendBeacon() is reliable
-// during unload (unlike fetch), and the server starts a 60s grace period.
-// If the user returns (page refresh, back button), the session reconnects
-// and cancels the grace period.
+// Graceful session release on tab/window close
 window.addEventListener("beforeunload", () => {
   sendReleaseBeacon(currentSessionId, currentReleaseToken);
 });
 
-// When the tab becomes visible after being backgrounded, fire an immediate
-// heartbeat. Browsers throttle timers in background tabs, so the regular
-// 30s heartbeat may have been delayed for minutes. An immediate heartbeat
-// resets the server-side idle timer and detects if the session was reaped.
-//
-// Also notify the agent of tab visibility changes so it can reduce capture
-// framerate when the tab is backgrounded (saves GPU/CPU/bandwidth).
+// Tab visibility changes: send heartbeat + notify agent
 document.addEventListener("visibilitychange", () => {
   const visible = document.visibilityState === "visible";
 
-  // Send visibility state to agent via DataChannel
+  // Send visibility state to agent via WS
   if (connection) {
     console.debug(`Tab visibility changed: ${visible ? "visible" : "hidden"}`);
     connection.sendInput({ t: "vs", visible });
-  }
-
-  // Track background duration for post-background RTP pipeline recovery.
-  if (!visible) {
-    backgroundedAt = Date.now();
-    postBackgroundRecoveryChecks = 0;
-  } else if (backgroundedAt && (Date.now() - backgroundedAt) >= BACKGROUND_CORRUPTION_THRESHOLD_MS) {
-    // Tab was backgrounded long enough to potentially corrupt the RTP pipeline.
-    // Start monitoring FPS in the stats polling loop for recovery failure.
-    postBackgroundRecoveryChecks = POST_BACKGROUND_RECOVERY_POLLS;
-    console.log(
-      `Tab foregrounded after ${Math.round((Date.now() - backgroundedAt) / 1000)}s ` +
-      `background, monitoring for pipeline recovery`
-    );
-    backgroundedAt = null;
-  } else {
-    backgroundedAt = null; // Short background, no concern
   }
 
   const currentToken = tokenManager.getToken();
@@ -1777,7 +1204,6 @@ fileUploadInput.addEventListener("change", () => {
       });
     }
   }
-  // Reset input so the same file can be uploaded again
   fileUploadInput.value = "";
 });
 
@@ -1847,12 +1273,8 @@ document.addEventListener("click", (e) => {
 mobileKeyboardInput.addEventListener("input", () => {
   const text = mobileKeyboardInput.value;
   if (text && connection) {
-    // Send each character as a clipboard-paste event for reliability.
-    // Mobile keyboards produce composed text, not individual key codes,
-    // so we send the text directly via the clipboard input event.
     connection.sendInput({ t: "c", text });
   }
-  // Clear the input for the next character
   mobileKeyboardInput.value = "";
 });
 
@@ -1860,21 +1282,18 @@ mobileKeyboardInput.addEventListener("input", () => {
 mobileKeyboardInput.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "Enter") {
     e.preventDefault();
-    // Send Enter key (evdev code 28)
     if (connection) {
       connection.sendInput({ t: "k", c: 28, d: true });
       connection.sendInput({ t: "k", c: 28, d: false });
     }
   } else if (e.key === "Backspace") {
     e.preventDefault();
-    // Send Backspace key (evdev code 14)
     if (connection) {
       connection.sendInput({ t: "k", c: 14, d: true });
       connection.sendInput({ t: "k", c: 14, d: false });
     }
   } else if (e.key === "Escape") {
     e.preventDefault();
-    // Send Escape key (evdev code 1)
     if (connection) {
       connection.sendInput({ t: "k", c: 1, d: true });
       connection.sendInput({ t: "k", c: 1, d: false });
@@ -1882,7 +1301,6 @@ mobileKeyboardInput.addEventListener("keydown", (e: KeyboardEvent) => {
     mobileKeyboardInput.blur();
   } else if (e.key === "Tab") {
     e.preventDefault();
-    // Send Tab key (evdev code 15)
     if (connection) {
       connection.sendInput({ t: "k", c: 15, d: true });
       connection.sendInput({ t: "k", c: 15, d: false });
@@ -1933,7 +1351,6 @@ const savedSession = loadSession();
 if (savedSession) {
   (async () => {
     try {
-      // First verify the session exists on the server to avoid stuck "reconnecting" state
       const resp = await fetch("/api/sessions", {
         headers: { Authorization: `Bearer ${savedSession.token}` },
       });

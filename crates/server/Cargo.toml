@@ -31,6 +31,7 @@ hyper-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 pam = { workspace = true }
 nix = { workspace = true }
+bytes = "1"
 libc = "0.2"
 pem = "3"
 

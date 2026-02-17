@@ -165,35 +165,11 @@ async fn main() -> Result<()> {
         secret
     });
 
-    // Build ICE server JSON for agents
-    let ice_servers_json = {
-        let ice = &config.ice;
-        let mut servers = Vec::new();
-        if !ice.stun_urls.is_empty() {
-            servers.push(serde_json::json!({
-                "urls": ice.stun_urls,
-            }));
-        }
-        if !ice.turn_urls.is_empty() {
-            servers.push(serde_json::json!({
-                "urls": ice.turn_urls,
-                "username": ice.turn_username,
-                "credential": ice.turn_credential,
-            }));
-        }
-        if servers.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&servers).unwrap())
-        }
-    };
-
     // Session manager
     let session_manager = SessionManager::new(
         config.session.display_start,
         config.session.default_width,
         config.session.default_height,
-        ice_servers_json,
         Some(tls_cert_path),
         config.video.clone(),
     );

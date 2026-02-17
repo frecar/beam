@@ -24,7 +24,7 @@ Beam is a remote desktop server. Its security model reflects this:
 
 **Session isolation**: Each user gets an isolated virtual X display. Agent processes run as the authenticated user after privilege dropping (`initgroups` -> `setgid` -> `setuid`).
 
-**Transport**: All traffic is TLS-encrypted. WebRTC media and data channels use DTLS. A self-signed certificate is auto-generated if no cert is configured.
+**Transport**: All traffic flows over a single TLS WebSocket connection — video frames, audio frames, and input events. There is no peer-to-peer media path; all data is relayed through the server. A self-signed certificate is auto-generated if no cert is configured.
 
 **Tokens**: JWT (24h expiry, auto-refresh) for session management. Agent and release tokens use CSPRNG generation with constant-time comparison.
 

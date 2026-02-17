@@ -494,6 +494,14 @@
         cursor: default;
       }
 
+      #remote-canvas {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: #000;
+        cursor: default;
+      }
+
       /* Toast Notifications */
       #toast-container {
         position: fixed;
@@ -1688,7 +1696,8 @@
 
     <!-- Desktop View -->
     <div id="desktop-view" role="application" aria-label="Remote desktop" tabindex="-1">
-      <video id="remote-video" autoplay playsinline></video>
+      <video id="remote-video" autoplay playsinline style="display:none"></video>
+      <canvas id="remote-canvas"></canvas>
       <div id="local-cursor" aria-hidden="true"></div>
 
       <!-- File upload drop overlay -->
@@ -1739,20 +1748,13 @@
       </div>
       <div class="sip-section">
         <h3>Connection</h3>
-        <div class="sip-row"><span class="sip-label">ICE state</span><span class="sip-value" id="sip-ice-state">--</span></div>
-        <div class="sip-row"><span class="sip-label">Local candidate</span><span class="sip-value" id="sip-local-candidate">--</span></div>
-        <div class="sip-row"><span class="sip-label">Remote candidate</span><span class="sip-value" id="sip-remote-candidate">--</span></div>
-        <div class="sip-row"><span class="sip-label">Transport</span><span class="sip-value" id="sip-transport">--</span></div>
-        <div class="sip-row"><span class="sip-label">DTLS state</span><span class="sip-value" id="sip-dtls-state">--</span></div>
+        <div class="sip-row"><span class="sip-label">Transport</span><span class="sip-value" id="sip-transport">WebSocket</span></div>
       </div>
       <div class="sip-section">
         <h3>Video</h3>
         <div class="sip-row"><span class="sip-label">Resolution</span><span class="sip-value" id="sip-resolution">--</span></div>
         <div class="sip-row"><span class="sip-label">Framerate</span><span class="sip-value" id="sip-framerate">--</span></div>
-        <div class="sip-row"><span class="sip-label">Codec</span><span class="sip-value" id="sip-video-codec">--</span></div>
-        <div class="sip-row"><span class="sip-label">Bitrate</span><span class="sip-value" id="sip-video-bitrate">--</span></div>
-        <div class="sip-row"><span class="sip-label">Packets lost</span><span class="sip-value" id="sip-packets-lost">--</span></div>
-        <div class="sip-row"><span class="sip-label">Jitter</span><span class="sip-value" id="sip-jitter">--</span></div>
+        <div class="sip-row"><span class="sip-label">Codec</span><span class="sip-value" id="sip-video-codec">H.264 (WebCodecs)</span></div>
       </div>
       <div class="sip-section">
         <h3>Audio</h3>

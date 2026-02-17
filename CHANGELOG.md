@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-02-17
+
+**BREAKING**: Complete migration from WebRTC to WebCodecs + WebSocket transport.
+
+This is a clean break — there is no backwards compatibility with previous versions. All clients and servers must be updated together.
+
+### Changed
+- **Transport**: Replaced WebRTC (SDP, ICE, DTLS, SRTP, RTP, RTCP, DataChannel) with a single TLS WebSocket connection. Video and audio frames are sent as binary WebSocket messages with a 24-byte header. Input events are sent as JSON text messages.
+- **Browser decode**: Replaced `<video srcObject>` (WebRTC MediaStream) with WebCodecs `VideoDecoder` + `AudioDecoder` for hardware-accelerated decode and canvas rendering
+- **Default framerate**: Bumped from 60 to 120fps
+- **Configuration**: Removed `[ice]` section from `beam.toml` (stun_urls, turn_urls, turn_username, turn_credential). No STUN/TURN servers needed.
+- **Network**: Only a single HTTPS/WSS port required (default 8444). No ephemeral UDP ports, no ICE negotiation.
+
+### Removed
+- All WebRTC dependencies (webrtc-rs, SDP, ICE, DTLS, SRTP, RTP, RTCP)
+- DataChannel-based input transport (replaced by WebSocket text messages)
+- STUN/TURN configuration and ICE candidate exchange
+- Soft reconnect (ICE restart) — replaced by WebSocket reconnection
+
+### Browser Requirements
+- Chrome 94+ or Firefox 130+ (WebCodecs API support required)
+
 ## [0.1.27] - 2026-02-17
 
 Encoder reliability and application launch fixes.

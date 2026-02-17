@@ -28,14 +28,15 @@
 - Default port: `8444` (avoids conflict with other services on 8443)
 - SPA Fallback: Enabled (unknown paths serve `index.html`)
 - Performance:
-  - Input: Unordered DataChannels, coalesced mouse moves (RAF)
+  - Input: JSON over WebSocket text messages, coalesced mouse moves (RAF)
   - Visual: Local cursor rendering for zero-latency feel
-  - Video: Ultra-low latency encoder tuning (`cbr-low-delay-hq`)
+  - Video: Ultra-low latency encoder tuning (`cbr-low-delay-hq`), WebCodecs hardware decode in browser
+  - Transport: Binary WebSocket frames with 24-byte header (video/audio), no SDP/ICE/DTLS/SRTP overhead
 
 ## Project Structure
-- `crates/agent`: Remote desktop agent (Rust)
-- `crates/server`: Signaling and authentication server (Rust)
-- `crates/protocol`: Shared message definitions (Rust)
+- `crates/agent`: Remote desktop agent — capture, encode, WebSocket streaming (Rust)
+- `crates/server`: HTTPS server, auth, session management, binary frame relay (Rust)
+- `crates/protocol`: Shared message types, binary frame header, config (Rust)
 - `web/`: Frontend client (TypeScript/Vite)
 - `config/`: Configuration files
 - `scripts/`: Setup and installation scripts

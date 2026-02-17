@@ -1,6 +1,6 @@
 # Beam
 
-GPU-accelerated remote desktop for Linux, streaming to any browser via WebRTC.
+GPU-accelerated remote desktop for Linux, streaming to any browser via WebCodecs.
 
 Fully open source, GPU-accelerated, sub-30ms latency. Built for developers who want to access their Linux workstation from any browser.
 
@@ -10,8 +10,8 @@ Fully open source, GPU-accelerated, sub-30ms latency. Built for developers who w
 ## Features
 
 - **GPU-accelerated encoding** — NVIDIA NVENC, AMD/Intel VA-API, or x264 software fallback
-- **Low-latency WebRTC** — sub-30ms on LAN, hardware-decoded in the browser
-- **Zero-install client** — works in Chrome, Firefox, Safari. No plugins, no app
+- **Low-latency streaming** — sub-30ms on LAN, WebCodecs hardware decode in the browser
+- **Zero-install client** — works in Chrome 94+, Firefox 130+. No plugins, no app
 - **Multi-user** — isolated virtual desktop sessions with PAM authentication
 - **Audio streaming** — PulseAudio capture with Opus encoding
 - **Clipboard sync** — copy/paste between local and remote desktops
@@ -22,7 +22,8 @@ Fully open source, GPU-accelerated, sub-30ms latency. Built for developers who w
 - **Mac keyboard support** — Cmd-to-Ctrl remapping, smooth trackpad scrolling
 - **Auto keyboard layout** — detects your keyboard layout and syncs to the remote desktop
 - **Adaptive bitrate** — adjusts video quality based on network conditions (VA-API/software encoders)
-- **Performance overlay** — press F9 to see RTT, FPS, bitrate, packet loss, and resolution
+- **Performance overlay** — press F9 to see RTT, FPS, bitrate, and resolution
+- **120fps default** — smooth desktop experience at high frame rates
 
 ## Install (Ubuntu 24.04+ / Debian 13+)
 
@@ -80,7 +81,7 @@ port = 8444
 
 [video]
 bitrate = 5000      # kbps (initial target)
-framerate = 60
+framerate = 120
 # encoder = "nvh264enc"  # auto-detected: nvh264enc > vah264enc > x264enc
 # max_width = 3840       # clamp resolution (default: 3840, 0 = unlimited)
 # max_height = 2160      # clamp resolution (default: 2160, 0 = unlimited)
@@ -92,12 +93,6 @@ bitrate = 128       # kbps (Opus)
 [session]
 max_sessions = 8
 # idle_timeout = 3600  # seconds (0 = disabled, default: 3600)
-
-[ice]
-stun_urls = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
-# turn_urls = ["turn:turn.example.com:3478"]
-# turn_username = "beam"
-# turn_credential = "secret"
 ```
 
 ### TLS Certificate
@@ -134,19 +129,23 @@ sudo systemctl restart beam
 | Key | Action |
 |-----|--------|
 | F11 | Toggle fullscreen |
-| F9 | Toggle performance overlay (RTT, FPS, bitrate, loss, resolution) |
+| F9 | Toggle performance overlay (RTT, FPS, bitrate, resolution) |
 | Esc | Exit fullscreen |
 
 ## Production Deployment
 
 ### Network
 
-Beam needs **port 8444/tcp** open (HTTPS + WebSocket signaling). WebRTC media uses ephemeral UDP ports negotiated via ICE.
+Beam needs only **port 8444/tcp** open (HTTPS + WebSocket). All video, audio, and input traffic flows over a single TLS WebSocket connection — no additional ports or UDP required.
 
-If deploying behind a firewall or NAT:
-- Open port 8444/tcp inbound
-- For clients behind symmetric NAT, configure a TURN server in `beam.toml` under `[ice]`
 - Beam binds to `0.0.0.0` by default — restrict with `bind = "10.0.0.1"` in `beam.toml` if needed
+
+### Browser Requirements
+
+- **Chrome / Edge**: 94+
+- **Firefox**: 130+
+
+Beam uses the WebCodecs API for hardware-accelerated video decoding in the browser.
 
 ### Reverse Proxy
 
@@ -171,12 +170,9 @@ beam-doctor
 
 ### High latency or choppy video
 - Press F9 to open the performance overlay and check RTT, FPS, and encoder
-- High RTT (>50ms on LAN) may indicate network congestion or TURN relay
+- High RTT (>50ms on LAN) may indicate network congestion
 - Low FPS with high CPU may mean software encoding — install GPU drivers for hardware acceleration
 - Try reducing resolution or bitrate in `/etc/beam/beam.toml`
-
-### Connection fails behind corporate firewall
-- WebRTC requires UDP connectivity. Configure a TURN server in `/etc/beam/beam.toml` under `[ice]`
 
 ### Non-US keyboard layout
 - Beam auto-detects your keyboard layout in Chrome/Edge using the Keyboard Layout Map API
@@ -238,29 +234,29 @@ sudo make deploy    Build release, deploy, restart service
 ```
 Browser (TypeScript)         Server (Rust/Axum)           Agent (Rust, per-user)
 +-----------------+          +------------------+         +------------------+
-| WebRTC receive  |<--SRTP-->| HTTPS + WS       |<-spawn->| XCB/SHM capture  |
-| Input capture   |          | PAM auth + JWT   |         | GStreamer encode  |
-| Cursor shape    |          | Session persist  |         | WebRTC peer      |
-| Clipboard sync  |          | Signaling relay  |         | uinput injection |
-| Mac Cmd remap   |          | Token refresh    |         | Clipboard bridge |
-| Reconnect UI   |          | Rate limiting    |         | Cursor monitor   |
-| Perf overlay   |          +------------------+         +------------------+
-+-----------------+                                              |
-                                                           Virtual Display
+| WebCodecs decode|<--WSS--->| HTTPS + WS       |<-spawn->| XCB/SHM capture  |
+| Canvas render   |          | PAM auth + JWT   |         | GStreamer encode  |
+| Input capture   |          | Session persist  |         | XTEST injection  |
+| Cursor shape    |          | Binary frame     |         | Clipboard bridge |
+| Clipboard sync  |          |   relay          |         | Cursor monitor   |
+| Mac Cmd remap   |          | Rate limiting    |         | Audio capture    |
+| Reconnect UI    |          +------------------+         +------------------+
+| Perf overlay    |                                              |
++-----------------+                                        Virtual Display
                                                            (Xorg + dummy driver)
                                                            + XFCE4 desktop
                                                            + PulseAudio
 ```
 
-The server handles authentication and signaling. When a user logs in, it spawns a per-user agent process that creates an isolated virtual display, captures the screen via XCB shared memory, encodes with GStreamer (NVENC/VA-API/x264), and streams to the browser over WebRTC.
+The server handles authentication and signaling. When a user logs in, it spawns a per-user agent process that creates an isolated virtual display, captures the screen via XCB shared memory, encodes with GStreamer (NVENC/VA-API/x264), and streams to the browser over a WebSocket connection. The browser decodes frames using the WebCodecs API with hardware acceleration.
 
 ### Project Structure
 
 ```
 beam/
   crates/
-    server/     # HTTPS server, auth, session management, signaling
-    agent/      # Screen capture, encoding, WebRTC, input injection
+    server/     # HTTPS server, auth, session management, binary frame relay
+    agent/      # Screen capture, encoding, WebSocket streaming, input injection
     protocol/   # Shared message types and config
   web/          # TypeScript browser client (Vite)
   config/       # Default configuration

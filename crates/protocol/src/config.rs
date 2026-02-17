@@ -11,8 +11,6 @@ pub struct BeamConfig {
     pub audio: AudioConfig,
     #[serde(default)]
     pub session: SessionConfig,
-    #[serde(default)]
-    pub ice: IceConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,23 +72,6 @@ pub struct AudioConfig {
     pub bitrate: u32,
 }
 
-/// ICE/TURN server configuration for WebRTC NAT traversal.
-///
-/// Without TURN, WebRTC fails behind symmetric NATs (~20% of enterprise networks).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IceConfig {
-    /// STUN server URLs (default: Google's public STUN servers)
-    #[serde(default = "default_stun_urls")]
-    pub stun_urls: Vec<String>,
-    /// TURN server URLs (e.g., "turn:turn.example.com:3478")
-    #[serde(default)]
-    pub turn_urls: Vec<String>,
-    /// TURN username (for long-term credential mechanism)
-    pub turn_username: Option<String>,
-    /// TURN credential/password
-    pub turn_credential: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
     /// Default width
@@ -144,17 +125,6 @@ impl Default for AudioConfig {
         Self {
             enabled: true,
             bitrate: default_audio_bitrate(),
-        }
-    }
-}
-
-impl Default for IceConfig {
-    fn default() -> Self {
-        Self {
-            stun_urls: default_stun_urls(),
-            turn_urls: Vec::new(),
-            turn_username: None,
-            turn_credential: None,
         }
     }
 }
@@ -303,28 +273,6 @@ impl BeamConfig {
             }
         }
 
-        // --- STUN URLs ---
-        for url in &self.ice.stun_urls {
-            if !url.starts_with("stun:") && !url.starts_with("stuns:") {
-                issues.push(format!(
-                    "ERROR: STUN URL '{}' must start with 'stun:' or 'stuns:'. \
-                     Example: stun:stun.l.google.com:19302",
-                    url
-                ));
-            }
-        }
-
-        // --- TURN URLs ---
-        for url in &self.ice.turn_urls {
-            if !url.starts_with("turn:") && !url.starts_with("turns:") {
-                issues.push(format!(
-                    "ERROR: TURN URL '{}' must start with 'turn:' or 'turns:'. \
-                     Example: turn:turn.example.com:3478",
-                    url
-                ));
-            }
-        }
-
         if issues.is_empty() {
             Ok(())
         } else {
@@ -381,12 +329,6 @@ fn default_max_sessions() -> u32 {
 fn default_idle_timeout() -> u64 {
     3600 // 1 hour
 }
-fn default_stun_urls() -> Vec<String> {
-    vec![
-        "stun:stun.l.google.com:19302".to_string(),
-        "stun:stun1.l.google.com:19302".to_string(),
-    ]
-}
 
 #[cfg(test)]
 mod tests {
@@ -425,18 +367,6 @@ mod tests {
         assert_eq!(config.session.display_start, 10);
         assert_eq!(config.session.max_sessions, 8);
         assert_eq!(config.session.idle_timeout, 3600);
-
-        // ICE defaults
-        assert_eq!(
-            config.ice.stun_urls,
-            vec![
-                "stun:stun.l.google.com:19302",
-                "stun:stun1.l.google.com:19302",
-            ]
-        );
-        assert!(config.ice.turn_urls.is_empty());
-        assert!(config.ice.turn_username.is_none());
-        assert!(config.ice.turn_credential.is_none());
     }
 
     #[test]
@@ -467,7 +397,6 @@ framerate = 30
         assert_eq!(config.audio.bitrate, 128);
         assert_eq!(config.session.default_width, 1920);
         assert_eq!(config.session.idle_timeout, 3600);
-        assert_eq!(config.ice.stun_urls.len(), 2);
     }
 
     #[test]
@@ -533,12 +462,6 @@ default_height = 1440
 display_start = 20
 max_sessions = 16
 idle_timeout = 7200
-
-[ice]
-stun_urls = ["stun:custom.stun.example.com:3478"]
-turn_urls = ["turn:turn.example.com:3478"]
-turn_username = "user"
-turn_credential = "pass"
 "#;
         let config: BeamConfig =
             toml::from_str(toml_str).expect("full custom config should deserialize");
@@ -574,22 +497,10 @@ turn_credential = "pass"
         assert_eq!(config.session.display_start, 20);
         assert_eq!(config.session.max_sessions, 16);
         assert_eq!(config.session.idle_timeout, 7200);
-
-        // ICE
-        assert_eq!(
-            config.ice.stun_urls,
-            vec!["stun:custom.stun.example.com:3478"]
-        );
-        assert_eq!(config.ice.turn_urls, vec!["turn:turn.example.com:3478"]);
-        assert_eq!(config.ice.turn_username.as_deref(), Some("user"));
-        assert_eq!(config.ice.turn_credential.as_deref(), Some("pass"));
     }
 
     #[test]
     fn default_trait_produces_valid_configs() {
-        // Verify that Default::default() produces the same values as TOML deserialization
-        // from an empty string, ensuring consistency between the two paths.
-
         let from_toml: BeamConfig =
             toml::from_str("").expect("empty string should deserialize to default config");
 
@@ -624,12 +535,6 @@ turn_credential = "pass"
         assert_eq!(session.display_start, from_toml.session.display_start);
         assert_eq!(session.max_sessions, from_toml.session.max_sessions);
         assert_eq!(session.idle_timeout, from_toml.session.idle_timeout);
-
-        let ice = IceConfig::default();
-        assert_eq!(ice.stun_urls, from_toml.ice.stun_urls);
-        assert_eq!(ice.turn_urls, from_toml.ice.turn_urls);
-        assert_eq!(ice.turn_username, from_toml.ice.turn_username);
-        assert_eq!(ice.turn_credential, from_toml.ice.turn_credential);
     }
 
     // --- Validation tests ---
@@ -731,7 +636,6 @@ turn_credential = "pass"
             has_warning(&issues, "bitrate"),
             "bitrate > 100000 should warn"
         );
-        // Should be a warning, not an error
         assert!(
             !has_error(&issues, "bitrate"),
             "bitrate warning should not be an error"
@@ -893,42 +797,6 @@ turn_credential = "pass"
     }
 
     #[test]
-    fn validate_stun_url_bad_prefix_is_error() {
-        let mut config = valid_config();
-        config.ice.stun_urls = vec!["http://stun.example.com:3478".to_string()];
-        let issues = validate_issues(&config);
-        assert!(
-            has_error(&issues, "STUN URL"),
-            "STUN URL without stun: prefix should produce error"
-        );
-    }
-
-    #[test]
-    fn validate_stun_url_stuns_prefix_is_ok() {
-        let mut config = valid_config();
-        config.ice.stun_urls = vec!["stuns:stun.example.com:5349".to_string()];
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn validate_turn_url_bad_prefix_is_error() {
-        let mut config = valid_config();
-        config.ice.turn_urls = vec!["http://turn.example.com:3478".to_string()];
-        let issues = validate_issues(&config);
-        assert!(
-            has_error(&issues, "TURN URL"),
-            "TURN URL without turn: prefix should produce error"
-        );
-    }
-
-    #[test]
-    fn validate_turn_url_turns_prefix_is_ok() {
-        let mut config = valid_config();
-        config.ice.turn_urls = vec!["turns:turn.example.com:5349".to_string()];
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
     fn validate_multiple_errors_collected() {
         let mut config = valid_config();
         config.server.port = 0;
@@ -1002,4 +870,5 @@ turn_credential = "pass"
             "empty admin username should produce warning"
         );
     }
+
 }

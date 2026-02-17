@@ -3,7 +3,7 @@ export function roundToEven(n: number): number {
   return Math.floor(n / 2) * 2;
 }
 
-/** Check if a resize is significant enough to warrant a WebRTC reconnect.
+/** Check if a resize is significant enough to send to the agent.
  *  Returns false for the first resize (old dimensions are 0) and for
  *  changes smaller than 10% in both dimensions. */
 export function isSignificantResize(

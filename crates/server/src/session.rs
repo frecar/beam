@@ -80,8 +80,6 @@ pub struct SessionManager {
     default_height: u32,
     /// Pool of available display numbers for recycling
     display_pool: RwLock<DisplayPool>,
-    /// ICE server config JSON to pass to agents
-    ice_servers_json: Option<String>,
     /// Path to TLS cert PEM for agent cert pinning
     tls_cert_path: Option<String>,
     /// Video/audio config to pass to agents
@@ -145,7 +143,6 @@ impl SessionManager {
         display_start: u32,
         default_width: u32,
         default_height: u32,
-        ice_servers_json: Option<String>,
         tls_cert_path: Option<String>,
         video_config: beam_protocol::VideoConfig,
     ) -> Self {
@@ -154,7 +151,6 @@ impl SessionManager {
             default_width,
             default_height,
             display_pool: RwLock::new(DisplayPool::new(display_start)),
-            ice_servers_json,
             tls_cert_path,
             video_config,
         }
@@ -566,10 +562,6 @@ impl SessionManager {
             .arg(self.video_config.framerate.to_string())
             .arg("--bitrate")
             .arg(self.video_config.bitrate.to_string())
-            .arg("--min-bitrate")
-            .arg(self.video_config.min_bitrate.to_string())
-            .arg("--max-bitrate")
-            .arg(self.video_config.max_bitrate.to_string())
             .arg("--max-width")
             .arg(self.video_config.max_width.to_string())
             .arg("--max-height")
@@ -587,11 +579,6 @@ impl SessionManager {
         // Pass TLS cert path for certificate pinning
         if let Some(ref cert_path) = self.tls_cert_path {
             cmd.arg("--tls-cert").arg(cert_path);
-        }
-
-        // Pass ICE/TURN server config if available
-        if let Some(ref ice_json) = self.ice_servers_json {
-            cmd.arg("--ice-servers").arg(ice_json);
         }
 
         // Set agent log level to info (avoid inheriting server's debug level)
@@ -927,7 +914,6 @@ mod tests {
             1920,
             1080,
             None,
-            None,
             beam_protocol::VideoConfig::default(),
         );
         let id = Uuid::new_v4();
@@ -964,7 +950,6 @@ mod tests {
             100,
             1920,
             1080,
-            None,
             None,
             beam_protocol::VideoConfig::default(),
         );
@@ -1051,7 +1036,6 @@ mod tests {
             1920,
             1080,
             None,
-            None,
             beam_protocol::VideoConfig::default(),
         );
         let id = Uuid::new_v4();
@@ -1099,7 +1083,6 @@ mod tests {
             1920,
             1080,
             None,
-            None,
             beam_protocol::VideoConfig::default(),
         );
         let id = Uuid::new_v4();
@@ -1113,7 +1096,6 @@ mod tests {
             1920,
             1080,
             None,
-            None,
             beam_protocol::VideoConfig::default(),
         );
         let id = Uuid::new_v4();
@@ -1126,7 +1108,6 @@ mod tests {
             100,
             1920,
             1080,
-            None,
             None,
             beam_protocol::VideoConfig::default(),
         );
@@ -1167,7 +1148,6 @@ mod tests {
             100,
             1920,
             1080,
-            None,
             None,
             beam_protocol::VideoConfig::default(),
         );
@@ -1219,7 +1199,6 @@ mod tests {
             100,
             1920,
             1080,
-            None,
             None,
             beam_protocol::VideoConfig::default(),
         );
@@ -1328,7 +1307,6 @@ mod tests {
             1920,
             1080,
             None,
-            None,
             beam_protocol::VideoConfig::default(),
         );
         let id = Uuid::new_v4();
@@ -1368,7 +1346,6 @@ mod tests {
             1920,
             1080,
             None,
-            None,
             beam_protocol::VideoConfig::default(),
         );
         let id = Uuid::new_v4();
@@ -1407,7 +1384,6 @@ mod tests {
             100,
             1920,
             1080,
-            None,
             None,
             beam_protocol::VideoConfig::default(),
         );

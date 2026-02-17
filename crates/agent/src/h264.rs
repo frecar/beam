@@ -1,7 +1,7 @@
 /// H.264 Annex B bitstream utilities.
 ///
 /// Provides NAL unit extraction, IDR detection, and SPS parsing for
-/// verifying encoder output compatibility with Chrome's WebRTC decoder.
+/// verifying encoder output compatibility with Chrome's VideoDecoder.
 /// Check if an Annex B H.264 access unit contains an IDR slice (NAL type 5).
 /// Scans for start codes (00 00 00 01 or 00 00 01) and checks the NAL unit type
 /// in the byte following each start code. Returns true if any NAL is type 5 (IDR).
@@ -86,7 +86,7 @@ pub fn extract_nals(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
     nals
 }
 
-/// Minimal SPS (Sequence Parameter Set) info for Chrome WebRTC compatibility checks.
+/// Minimal SPS (Sequence Parameter Set) info for browser compatibility checks.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct SpsInfo {

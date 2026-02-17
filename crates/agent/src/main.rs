@@ -1,4 +1,3 @@
-mod abr;
 mod audio;
 mod capture;
 mod cli;
@@ -11,31 +10,29 @@ mod file_transfer_task;
 mod filetransfer;
 mod h264;
 mod input;
-mod peer;
 mod signaling;
 mod video;
 
 use anyhow::Context;
 use audio::AudioCapture;
-use beam_protocol::{InputEvent, SignalingMessage};
+use beam_protocol::InputEvent;
 use capture::ScreenCapture;
 use cli::{DEFAULT_FRAMERATE, LOW_BITRATE, LOW_FRAMERATE};
 use clipboard::ClipboardBridge;
 use encoder::Encoder;
 use input::InputInjector;
-use peer::{PeerConfig, SharedPeer};
 use signaling::SignalingCtx;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
 /// Commands sent from async tasks to the capture thread.
 /// Using a command channel lets the capture thread exclusively own (and recreate)
 /// the Encoder and ScreenCapture during dynamic resolution changes.
 pub(crate) enum CaptureCommand {
-    SetBitrate(u32),
     Resize {
         width: u32,
         height: u32,
@@ -43,8 +40,6 @@ pub(crate) enum CaptureCommand {
     /// Switch quality mode: true = high (LAN), false = low (WAN)
     SetQualityHigh(bool),
     /// Recreate the encoder pipeline to guarantee a fresh IDR frame.
-    /// Used on WebRTC reconnection -- ForceKeyUnit events are unreliable
-    /// on nvh264enc after long P-frame runs with gop-size=MAX.
     ResetEncoder,
 }
 
@@ -102,10 +97,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
             cvar.notify_one();
         }
 
-        // Clear backgrounded flag on user-interactive input events.
-        // If the user is typing/clicking/scrolling, the tab is clearly not
-        // backgrounded. This defends against lost DataChannel visibility
-        // messages (browsers can degrade DataChannel in background tabs).
+        // Clear backgrounded flag on user-interactive input events
         match &event {
             InputEvent::Key { .. }
             | InputEvent::MouseMove { .. }
@@ -354,15 +346,12 @@ async fn main() -> anyhow::Result<()> {
                 Ok(mut vd) => {
                     info!(display = %args.display, "Virtual display started");
 
-                    // Start PulseAudio BEFORE desktop so apps inherit PULSE_SERVER.
-                    // Without this, desktop apps connect to the system PulseAudio
-                    // instead of the beam null-sink, and audio isn't captured.
+                    // Start PulseAudio BEFORE desktop so apps inherit PULSE_SERVER
                     if let Err(e) = vd.start_pulseaudio() {
                         warn!("Failed to start PulseAudio: {e:#}");
                     }
                     let pulse_path = format!("/tmp/beam-pulse-{display_num}/native");
                     pulse_server = Some(format!("unix:{pulse_path}"));
-                    // Wait for PulseAudio socket to appear (up to 2s)
                     for _ in 0..20 {
                         if std::path::Path::new(&pulse_path).exists() {
                             break;
@@ -370,14 +359,10 @@ async fn main() -> anyhow::Result<()> {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
 
-                    // Start desktop AFTER PulseAudio (PULSE_SERVER passed explicitly)
+                    // Start desktop AFTER PulseAudio
                     if let Err(e) = vd.start_desktop() {
                         warn!("Failed to start desktop: {e:#}");
                     }
-                    // Note: cursor is hidden by the cursor monitor thread
-                    // (XFixes HideCursor) which also tracks cursor shape changes.
-                    // Brief wait for desktop to initialize (Xorg is already running,
-                    // just need window manager to start drawing)
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     Some(vd)
                 }
@@ -394,7 +379,7 @@ async fn main() -> anyhow::Result<()> {
     let width = screen_capture.width();
     let height = screen_capture.height();
 
-    // Create encoder (use config values from server)
+    // Create encoder
     let initial_framerate = args.framerate;
     let initial_bitrate = args.bitrate;
     let encoder = Encoder::with_encoder_preference(
@@ -408,53 +393,21 @@ async fn main() -> anyhow::Result<()> {
     let encoder_type = encoder.encoder_type();
     let encoder_pref = args.encoder.clone();
 
-    // Parse ICE server config
-    let ice_servers = match &args.ice_servers_json {
-        Some(json) => {
-            #[derive(serde::Deserialize)]
-            struct IceServerEntry {
-                urls: Vec<String>,
-                username: Option<String>,
-                credential: Option<String>,
-            }
-            let entries: Vec<IceServerEntry> =
-                serde_json::from_str(json).context("Invalid --ice-servers JSON")?;
-            entries
-                .into_iter()
-                .map(|e| peer::IceServerConfig {
-                    urls: e.urls,
-                    username: e.username,
-                    credential: e.credential,
-                })
-                .collect()
-        }
-        None => Vec::new(),
-    };
-
-    // Bundle peer creation parameters for reuse on browser reconnect
-    let peer_config = PeerConfig {
-        ice_servers,
-        encoder_type,
-    };
-
     // Config-driven values for capture/encode
     let config_bitrate = args.bitrate;
     let config_framerate = args.framerate;
-    let config_min_bitrate = args.min_bitrate;
-    let config_max_bitrate = args.max_bitrate;
 
     // Channel for encoded video frames: capture thread -> async write loop
-    // Capacity of 2: reduces frame drops under burst while keeping latency low.
-    // Combined with max-buffers=1 on appsink, total pipeline depth is at most
-    // 3 frames (~25ms at 120fps). Frames are dropped rather than queued when
-    // the channel is full.
     let (encoded_tx, mut encoded_rx) = mpsc::channel::<Vec<u8>>(2);
 
     // Channel for encoded audio frames: audio thread -> async write loop
     let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(8);
 
-    // Channel for signaling messages to send back to server
-    let (signal_tx, mut signal_rx) = mpsc::channel::<SignalingMessage>(32);
+    // Shared WebSocket outbox: video, audio, clipboard, cursor, file download all send here.
+    // The signaling loop drains this and writes to the actual WS connection.
+    // Capacity 32: enough for signaling + data messages. Video binary frames use try_send
+    // with drop-on-full semantics to avoid backpressure from slow WS.
+    let (ws_outbox_tx, mut ws_outbox_rx) = mpsc::channel::<Message>(32);
 
     let session_id = args.session_id;
 
@@ -475,12 +428,8 @@ async fn main() -> anyhow::Result<()> {
         ClipboardBridge::new(&args.display).context("Failed to create clipboard bridge")?,
     ));
 
-    // The capture thread exclusively owns the Encoder so it can recreate it
-    // during dynamic resolution changes. Other tasks communicate via channels.
-
-    // Force-keyframe flag: set from RTCP reader and signaling handler,
-    // cleared by capture thread each frame. AtomicBool avoids the Sync
-    // requirement that would prevent std::sync::mpsc::Sender in callbacks.
+    // Force-keyframe flag: set from signaling handler (on reconnect),
+    // cleared by capture thread each frame.
     let force_keyframe = Arc::new(AtomicBool::new(false));
 
     // Command channel for non-latency-critical capture thread operations
@@ -489,24 +438,21 @@ async fn main() -> anyhow::Result<()> {
     // Resize request channel
     let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(4);
 
-    // Idle detection: track last input time for framerate reduction
-    // Uses epoch millis stored as AtomicU64 for lock-free access from capture thread
+    // Idle detection
     let last_input_time = Arc::new(AtomicU64::new(0));
     let last_input_for_capture = Arc::clone(&last_input_time);
 
-    // Wake signal: input callback signals capture thread to wake immediately
-    // when input arrives during idle mode (avoids up to 100ms delay at 10fps)
+    // Wake signal for capture thread
     let capture_wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let capture_wake_for_input = Arc::clone(&capture_wake);
 
-    // Channel for clipboard read requests (Ctrl+C/X detection -> read X11 clipboard)
+    // Clipboard read requests
     let (clipboard_read_tx, mut clipboard_read_rx) = mpsc::channel::<()>(4);
 
-    // Channel for file download requests (browser -> agent -> browser via DataChannel)
+    // File download requests
     let (download_request_tx, mut download_request_rx) = mpsc::channel::<String>(4);
 
-    // Cursor shape monitor: tracks X11 cursor changes via XFixes and sends
-    // CSS cursor names. Also hides the X11 cursor via XFixes HideCursor.
+    // Cursor shape monitor
     let mut cursor_rx = cursor::spawn_cursor_monitor(&args.display);
     if cursor_rx.is_none() {
         warn!("Cursor monitor failed to start, falling back to unclutter");
@@ -515,21 +461,18 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Tab backgrounded flag: set by visibility state events from browser,
-    // checked by capture thread to reduce framerate when tab is hidden.
+    // Tab backgrounded flag
     let tab_backgrounded = Arc::new(AtomicBool::new(false));
     let tab_backgrounded_for_capture = Arc::clone(&tab_backgrounded);
 
-    // File transfer manager -- writes uploads to ~/Downloads
+    // File transfer manager
     let home_dir = std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
     let file_transfer = Arc::new(Mutex::new(filetransfer::FileTransferManager::new(home_dir)));
-
-    // Build the reusable input callback (Arc<dyn Fn>) so it survives peer recreation
-    // Keep a reference to file_transfer for the download handler
     let file_transfer_for_download = Arc::clone(&file_transfer);
 
+    // Build input callback
     let input_callback = build_input_callback(InputCallbackCtx {
         injector: Arc::clone(&injector),
         clipboard: Arc::clone(&clipboard),
@@ -546,27 +489,16 @@ async fn main() -> anyhow::Result<()> {
         max_height: args.max_height,
     });
 
-    // Create initial WebRTC peer with all callbacks
-    let initial_peer = peer::create_peer(
-        &peer_config,
-        &signal_tx,
-        session_id,
-        &force_keyframe,
-        Arc::clone(&input_callback),
-    )
-    .await?;
-    let shared_peer: SharedPeer = Arc::new(tokio::sync::RwLock::new(initial_peer));
-
     // Shutdown flag for capture/audio threads
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_for_capture = Arc::clone(&shutdown);
     let shutdown_for_audio = Arc::clone(&shutdown);
 
     // Capture + encode thread
-    const IDLE_TIMEOUT_MS: u64 = 300_000; // 5 minutes of no input -> idle mode
-    const IDLE_FRAMERATE: u32 = 5; // Low framerate when no input -- saves GPU/CPU
-    const BACKGROUND_FRAMERATE: u32 = 1; // Minimal framerate when browser tab is hidden
-    const ENCODER_RESET_COOLDOWN: Duration = Duration::from_secs(5); // Throttle encoder recreation to protect NVENC
+    const IDLE_TIMEOUT_MS: u64 = 300_000;
+    const IDLE_FRAMERATE: u32 = 5;
+    const BACKGROUND_FRAMERATE: u32 = 1;
+    const ENCODER_RESET_COOLDOWN: Duration = Duration::from_secs(5);
 
     let display_for_capture = args.display.clone();
     let kf_flag_for_capture = Arc::clone(&force_keyframe);
@@ -590,8 +522,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // The capture thread exclusively owns screen_capture and encoder
-            // so it can recreate them during dynamic resolution changes.
             let mut encoder = encoder;
             let mut current_bitrate = config_bitrate;
             let mut current_framerate = config_framerate;
@@ -605,7 +535,7 @@ async fn main() -> anyhow::Result<()> {
             let mut was_backgrounded = false;
             let mut first_capture_logged = false;
             let mut first_encode_logged = false;
-            let mut last_encoder_reset = Instant::now() - ENCODER_RESET_COOLDOWN; // Allow first reset immediately
+            let mut last_encoder_reset = Instant::now() - ENCODER_RESET_COOLDOWN;
             let mut consecutive_capture_errors: u64 = 0;
             let mut last_capture_heartbeat = Instant::now();
 
@@ -615,30 +545,18 @@ async fn main() -> anyhow::Result<()> {
                     break;
                 }
 
-                // Process commands from async tasks (non-blocking).
-                // Commands that need encoder recreation set this flag and break
-                // out of the inner loop so we can drop(encoder) before creating
-                // a new one (NVENC holds its session until element refs are freed).
-                let abr_enabled = !matches!(encoder_type, encoder::EncoderType::Nvidia);
+                // Process commands from async tasks
                 enum EncoderRecreate { None, Reset, Resize }
                 let mut recreate = EncoderRecreate::None;
                 while let Ok(cmd) = capture_cmd_rx.try_recv() {
                     match cmd {
-                        CaptureCommand::SetBitrate(br) => {
-                            if abr_enabled {
-                                encoder.set_bitrate(br);
-                                current_bitrate = br;
-                            }
-                        }
                         CaptureCommand::Resize { width, height } => {
-                            // Skip no-op resizes (e.g. spurious ResizeObserver events)
                             if width == screen_capture.width() && height == screen_capture.height() {
                                 debug!(width, height, "Resize skipped (same dimensions)");
                                 continue;
                             }
                             info!(width, height, "Processing resize request");
 
-                            // 1. Change X display resolution via xrandr
                             if let Err(e) = display::set_display_resolution(
                                 &display_for_capture, width, height,
                             ) {
@@ -646,8 +564,6 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }
 
-                            // 2. Wait for X server to apply the mode change.
-                            // Check shutdown flag to avoid blocking during teardown.
                             for _ in 0..20 {
                                 std::thread::sleep(Duration::from_millis(10));
                                 if shutdown_for_capture.load(Ordering::Relaxed) {
@@ -655,7 +571,6 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
-                            // 3. Recreate screen capture at new resolution
                             let new_capture = match ScreenCapture::new(&display_for_capture) {
                                 Ok(cap) => cap,
                                 Err(e) => {
@@ -664,14 +579,13 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             };
                             screen_capture = new_capture;
-
-                            // 4. Encoder recreation deferred to after inner loop
                             recreate = EncoderRecreate::Resize;
                             break;
                         }
                         CaptureCommand::SetQualityHigh(is_high) => {
                             let new_framerate = if is_high { config_framerate } else { LOW_FRAMERATE };
-                            if abr_enabled {
+                            let dynamic_bitrate = !matches!(encoder_type, encoder::EncoderType::Nvidia);
+                            if dynamic_bitrate {
                                 let new_bitrate = if is_high { config_bitrate } else { LOW_BITRATE };
                                 encoder.set_bitrate(new_bitrate);
                                 current_bitrate = new_bitrate;
@@ -699,8 +613,6 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                // Handle deferred encoder recreation outside the command loop
-                // so we can drop(encoder) to fully free NVENC sessions.
                 match recreate {
                     EncoderRecreate::None => {}
                     EncoderRecreate::Reset => {
@@ -755,23 +667,19 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                // Check force-keyframe flag (set by RTCP PLI/FIR or signaling)
+                // Check force-keyframe flag
                 if kf_flag_for_capture.swap(false, Ordering::Relaxed) {
                     encoder.force_keyframe();
-                    // PLI = browser is active and wants frames. Clear backgrounded
-                    // flag in case the DataChannel visibility message was lost.
                     if tab_backgrounded_for_capture.swap(false, Ordering::Relaxed) {
-                        warn!("PLI received while backgrounded — clearing flag (DataChannel likely dropped visibility message)");
+                        warn!("Keyframe forced while backgrounded — clearing flag");
                     }
                 }
 
                 let frame_start = Instant::now();
                 let pts = start.elapsed().as_nanos() as u64;
 
-                // Check background state: browser tab hidden -> minimal framerate
                 let is_backgrounded = tab_backgrounded_for_capture.load(Ordering::Relaxed);
 
-                // Check idle state: if no input for IDLE_TIMEOUT_MS, reduce framerate
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -779,7 +687,6 @@ async fn main() -> anyhow::Result<()> {
                 let last_input_ms = last_input_for_capture.load(Ordering::Relaxed);
                 let is_idle = last_input_ms > 0 && (now_ms - last_input_ms) > IDLE_TIMEOUT_MS;
 
-                // Background mode takes priority over idle mode (even lower framerate)
                 let frame_duration_ns = if is_backgrounded {
                     background_frame_duration_ns
                 } else if is_idle {
@@ -806,11 +713,10 @@ async fn main() -> anyhow::Result<()> {
                     was_idle = is_idle;
                 }
 
-                // Auto-recover from GStreamer pipeline errors (GPU fault, driver issue, etc.)
+                // Auto-recover from GStreamer pipeline errors
                 if encoder.has_error() {
-                    warn!("GStreamer pipeline error detected, dropping encoder to free NVENC session");
+                    warn!("GStreamer pipeline error detected, dropping encoder");
                     drop(encoder);
-                    info!("Old encoder dropped after pipeline error, creating new pipeline");
                     match Encoder::with_encoder_preference(
                         screen_capture.width(), screen_capture.height(),
                         current_framerate, current_bitrate,
@@ -861,16 +767,12 @@ async fn main() -> anyhow::Result<()> {
                             );
                             break;
                         }
-                        // Brief sleep to prevent CPU spin on persistent failures
                         std::thread::sleep(Duration::from_millis(1));
                         continue;
                     }
                 }
 
-                // Drain encoded frames. NVENC is async -- the frame we just
-                // pushed may not be ready yet. Spin-poll for up to 2ms to catch
-                // it in this iteration rather than waiting for the next capture
-                // cycle (which adds up to 8.3ms of unnecessary latency at 120fps).
+                // Drain encoded frames
                 let drain_deadline = Instant::now() + Duration::from_millis(2);
                 let mut drained_any = false;
                 loop {
@@ -897,7 +799,6 @@ async fn main() -> anyhow::Result<()> {
                             if drained_any || Instant::now() >= drain_deadline {
                                 break;
                             }
-                            // Brief yield while waiting for encoder
                             std::hint::spin_loop();
                         }
                         Err(e) => {
@@ -909,7 +810,6 @@ async fn main() -> anyhow::Result<()> {
 
                 frame_count += 1;
 
-                // Periodic capture thread heartbeat (every 5 seconds)
                 if last_capture_heartbeat.elapsed() >= Duration::from_secs(5) {
                     let elapsed = start.elapsed().as_secs_f64();
                     info!(
@@ -922,26 +822,21 @@ async fn main() -> anyhow::Result<()> {
                     last_capture_heartbeat = Instant::now();
                 }
 
-                // Frame pacing: use condvar wait so input can wake us immediately.
-                // During active mode (60fps), use sleep+spin-wait for precise timing.
-                // During idle/background mode, use condvar wait that can be interrupted.
+                // Frame pacing
                 let target = Duration::from_nanos(frame_duration_ns);
                 let elapsed = frame_start.elapsed();
                 if elapsed < target {
                     let remaining = target - elapsed;
                     if is_idle || is_backgrounded {
-                        // Idle/background mode: interruptible wait -- visibility change
-                        // or input wakes us immediately
                         let (lock, cvar) = &*capture_wake_for_thread;
                         let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        *woken = false; // clear any stale wake signal
+                        *woken = false;
                         let result = cvar.wait_timeout(woken, remaining)
                             .unwrap_or_else(|e| e.into_inner());
                         if *result.0 {
                             debug!("Capture thread woken by input/visibility change");
                         }
                     } else {
-                        // Active mode: precise sleep+spin-wait for frame timing
                         if remaining > Duration::from_millis(2) {
                             std::thread::sleep(remaining - Duration::from_millis(1));
                         }
@@ -989,36 +884,24 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Connect to signaling server
-    let server_url = args.server_url.clone();
-    let kf_flag_for_signal = Arc::clone(&force_keyframe);
-
-    // Adaptive bitrate controller
-    let cmd_tx_for_abr = capture_cmd_tx.clone();
-
-    // Signaling handler needs to reset encoder on reconnection
-    let cmd_tx_for_signal = capture_cmd_tx.clone();
-
-    // Video send loop needs to reset encoder when IDR wait exhausts
-    let cmd_tx_for_video = capture_cmd_tx.clone();
-
-    // Resize forwarder (from tokio channel to capture thread)
-    let cmd_tx_for_resize = capture_cmd_tx;
-
-    // Clipboard sync (remote -> browser)
-    let clipboard_for_sync = Arc::clone(&clipboard);
-
     // Set up SIGTERM handler
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    let server_url = args.server_url.clone();
+    let kf_flag_for_signal = Arc::clone(&force_keyframe);
+    let cmd_tx_for_signal = capture_cmd_tx.clone();
+    let cmd_tx_for_video = capture_cmd_tx.clone();
+    let cmd_tx_for_resize = capture_cmd_tx;
+    let clipboard_for_sync = Arc::clone(&clipboard);
+
+    // WS sender clones for tasks that need to send messages
+    let ws_tx_for_cursor = ws_outbox_tx.clone();
 
     let signaling_ctx = SignalingCtx {
         server_url: &server_url,
         session_id,
         agent_token: args.agent_token.as_deref(),
         tls_cert_path: args.tls_cert_path.as_deref(),
-        shared_peer: &shared_peer,
-        peer_config: &peer_config,
-        signal_tx: &signal_tx,
         force_keyframe: kf_flag_for_signal,
         input_callback: Arc::clone(&input_callback),
         capture_cmd_tx: &cmd_tx_for_signal,
@@ -1026,28 +909,29 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tokio::select! {
-        // Write encoded video frames to WebRTC (only when connected)
+        // Write encoded video frames as WebSocket binary
         _ = video::run_video_send_loop(
             &mut encoded_rx,
-            &shared_peer,
+            &ws_outbox_tx,
             &force_keyframe,
             &cmd_tx_for_video,
-            config_framerate,
+            &input_width,
+            &input_height,
         ) => {}
 
-        // Write encoded audio frames to WebRTC
+        // Write encoded audio frames as WebSocket binary
         _ = video::run_audio_send_loop(
             &mut audio_rx,
-            &shared_peer,
+            &ws_outbox_tx,
         ) => {}
 
-        // Handle signaling WebSocket
+        // Handle signaling WebSocket (also drains ws_outbox_rx)
         _ = signaling::run_signaling(
             &signaling_ctx,
-            &mut signal_rx,
+            &mut ws_outbox_rx,
         ) => {}
 
-        // Forward resize requests from input handler to capture thread
+        // Forward resize requests to capture thread
         _ = async {
             while let Some((w, h)) = resize_rx.recv().await {
                 info!(w, h, "Resize requested, forwarding to capture thread");
@@ -1059,41 +943,29 @@ async fn main() -> anyhow::Result<()> {
         _ = clipboard_sync::run_clipboard_sync(
             &mut clipboard_read_rx,
             &clipboard_for_sync,
-            &shared_peer,
+            &ws_outbox_tx,
         ) => {}
 
-        // File download: read file on blocking thread, stream chunks via DataChannel
+        // File download: stream chunks via WebSocket text
         _ = file_transfer_task::run_file_download_loop(
             &mut download_request_rx,
             &file_transfer_for_download,
-            &shared_peer,
+            &ws_outbox_tx,
         ) => {}
 
-        // Cursor shape passthrough: forward X11 cursor changes to browser as CSS cursor values
+        // Cursor shape passthrough via WebSocket text
         _ = async {
             if let Some(ref mut rx) = cursor_rx {
                 while let Some(css) = rx.recv().await {
                     let msg = serde_json::json!({ "t": "cur", "css": css }).to_string();
-                    let current_peer = peer::snapshot(&shared_peer).await;
-                    if let Err(e) = current_peer.send_data_channel_message(&msg).await {
-                        debug!("Failed to send cursor shape to browser: {e:#}");
+                    if let Err(e) = ws_tx_for_cursor.send(Message::Text(msg.into())).await {
+                        debug!("Failed to send cursor shape to browser: {e}");
                     }
                 }
             } else {
-                // No cursor monitor, sleep forever
                 std::future::pending::<()>().await;
             }
         } => {}
-
-        // Adaptive bitrate control loop
-        _ = abr::run_abr_loop(
-            &shared_peer,
-            encoder_type,
-            config_bitrate,
-            config_min_bitrate,
-            config_max_bitrate,
-            &cmd_tx_for_abr,
-        ) => {}
 
         // Handle shutdown signals
         _ = tokio::signal::ctrl_c() => {
@@ -1106,10 +978,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Signal capture threads to stop before dropping VirtualDisplay
     shutdown.store(true, Ordering::Relaxed);
-    // Drop receivers to unblock any blocking_send in capture threads
     drop(encoded_rx);
     drop(audio_rx);
-    // Wait for threads to finish (prevents crash from accessing dead X display)
     if let Err(e) = capture_handle.join() {
         warn!("Capture thread panicked: {e:?}");
     }
@@ -1119,7 +989,6 @@ async fn main() -> anyhow::Result<()> {
         warn!("Audio thread panicked: {e:?}");
     }
 
-    peer::snapshot(&shared_peer).await.close().await?;
     info!("Agent shutdown complete");
     Ok(())
 }

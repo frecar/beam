@@ -1,16 +1,17 @@
 use crate::clipboard::ClipboardBridge;
-use crate::peer::{self, SharedPeer};
+use crate::signaling::WsSender;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
-/// Clipboard sync: after Ctrl+C/X, read X11 clipboard and send to browser.
+/// Clipboard sync: after Ctrl+C/X, read X11 clipboard and send to browser via WS text.
 pub(crate) async fn run_clipboard_sync(
     clipboard_read_rx: &mut mpsc::Receiver<()>,
     clipboard: &Arc<Mutex<ClipboardBridge>>,
-    shared_peer: &SharedPeer,
+    ws_tx: &WsSender,
 ) {
     while let Some(()) = clipboard_read_rx.recv().await {
         // Brief delay so the X11 app has time to write to the clipboard
@@ -24,9 +25,8 @@ pub(crate) async fn run_clipboard_sync(
                 const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
                 if text.len() <= MAX_CLIPBOARD_BYTES {
                     let msg = serde_json::json!({ "t": "c", "text": text }).to_string();
-                    let current_peer = peer::snapshot(shared_peer).await;
-                    if let Err(e) = current_peer.send_data_channel_message(&msg).await {
-                        warn!("Failed to send clipboard to browser: {e:#}");
+                    if let Err(e) = ws_tx.send(Message::Text(msg.into())).await {
+                        warn!("Failed to send clipboard to browser: {e}");
                     } else {
                         info!(len = text.len(), "Clipboard text sent to browser");
                     }

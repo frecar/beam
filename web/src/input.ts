@@ -99,6 +99,7 @@ async function detectKeyboardLayout(): Promise<string> {
 export class InputHandler {
   private target: HTMLElement;
   private videoElement: HTMLVideoElement | null;
+  private canvasElement: HTMLCanvasElement | null;
   private localCursor: HTMLElement | null;
   private sendInput: (event: InputEvent) => void;
   private active = false;
@@ -108,9 +109,8 @@ export class InputHandler {
   /** When true, intercept browser shortcuts (Ctrl+W, Ctrl+T, etc.) and forward them to remote */
   forwardBrowserShortcuts = false;
 
-  // Resize gating: Chrome's WebRTC H.264 decoder can't handle mid-stream
-  // resolution changes. We suppress resize events until the first video
-  // frame is decoded, and trigger a WebRTC reconnect for large resizes.
+  // Resize gating: suppress resize events until the first video frame
+  // is decoded. WebCodecs handles resolution changes inline.
   private firstFrameReceived = false;
   private lastSentW = 0;
   private lastSentH = 0;
@@ -149,17 +149,15 @@ export class InputHandler {
   constructor(target: HTMLElement, sendInput: (event: InputEvent) => void) {
     this.target = target;
     this.videoElement = target.querySelector("video");
+    this.canvasElement = target.querySelector("canvas");
     this.localCursor = document.getElementById("local-cursor");
     this.sendInput = sendInput;
   }
 
   /**
    * Send the current container dimensions as a resize immediately.
-   * Called on every DataChannel open (including soft reconnects) to ensure
-   * the agent has the correct resolution from the start. This breaks the
-   * chicken-and-egg deadlock where the browser can't decode frames at the
-   * wrong resolution, so requestVideoFrameCallback never fires, so no
-   * resize is ever sent.
+   * Called on WebSocket connect to ensure the agent has the correct
+   * resolution from the start.
    */
   sendCurrentDimensions(): void {
     const rect = this.target.getBoundingClientRect();
@@ -180,7 +178,7 @@ export class InputHandler {
     this.firstFrameReceived = true;
   }
 
-  /** Register callback invoked when a significant resize requires WebRTC reconnect */
+  /** Register callback invoked when a significant resize occurs */
   onResizeNeeded(callback: () => void): void {
     this.resizeNeededCallback = callback;
   }
@@ -395,9 +393,22 @@ export class InputHandler {
    * Calculate normalized (0-1) coordinates within the actual video content area,
    * accounting for object-fit:contain letterboxing/pillarboxing.
    */
+  /** Get the content element (canvas or video) and its intrinsic dimensions */
+  private getContentElement(): { el: HTMLElement; contentWidth: number; contentHeight: number } | null {
+    // Prefer canvas (WebCodecs path)
+    if (this.canvasElement && this.canvasElement.width > 0 && this.canvasElement.height > 0) {
+      return { el: this.canvasElement, contentWidth: this.canvasElement.width, contentHeight: this.canvasElement.height };
+    }
+    // Fallback to video element
+    if (this.videoElement && this.videoElement.videoWidth > 0 && this.videoElement.videoHeight > 0) {
+      return { el: this.videoElement, contentWidth: this.videoElement.videoWidth, contentHeight: this.videoElement.videoHeight };
+    }
+    return null;
+  }
+
   private getVideoCoords(e: MouseEvent): { x: number; y: number } | null {
-    const video = this.videoElement;
-    if (!video || !video.videoWidth || !video.videoHeight) {
+    const content = this.getContentElement();
+    if (!content) {
       const rect = this.target.getBoundingClientRect();
       return {
         x: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
@@ -405,9 +416,9 @@ export class InputHandler {
       };
     }
 
-    const rect = video.getBoundingClientRect();
+    const rect = content.el.getBoundingClientRect();
     const containerAspect = rect.width / rect.height;
-    const videoAspect = video.videoWidth / video.videoHeight;
+    const videoAspect = content.contentWidth / content.contentHeight;
 
     let renderWidth: number, renderHeight: number, offsetX: number, offsetY: number;
     if (containerAspect > videoAspect) {
@@ -473,11 +484,13 @@ export class InputHandler {
 
   /** Update local cursor visual position (0-1 normalized coordinates) */
   private updateLocalCursor(x: number, y: number): void {
-    if (!this.localCursor || !this.videoElement || this.pointerLocked) return;
+    if (!this.localCursor || this.pointerLocked) return;
 
-    const video = this.videoElement;
-    const rect = video.getBoundingClientRect();
-    const videoAspect = video.videoWidth / video.videoHeight || rect.width / rect.height;
+    const content = this.getContentElement();
+    if (!content) return;
+
+    const rect = content.el.getBoundingClientRect();
+    const videoAspect = content.contentWidth / content.contentHeight || rect.width / rect.height;
     const containerAspect = rect.width / rect.height;
 
     let renderWidth: number, renderHeight: number, offsetX: number, offsetY: number;
@@ -614,8 +627,9 @@ export class InputHandler {
       // Chrome's user-agent fullscreen styles can hide the cursor.
       if (document.fullscreenElement) {
         this.target.style.cursor = "default";
-        if (this.videoElement) {
-          this.videoElement.style.cursor = "default";
+        const contentEl = this.canvasElement || this.videoElement;
+        if (contentEl) {
+          contentEl.style.cursor = "default";
         }
       }
 
@@ -661,8 +675,8 @@ export class InputHandler {
    * from touch coordinates, accounting for object-fit:contain letterboxing.
    */
   private getTouchVideoCoords(touch: Touch): { x: number; y: number } | null {
-    const video = this.videoElement;
-    if (!video || !video.videoWidth || !video.videoHeight) {
+    const content = this.getContentElement();
+    if (!content) {
       const rect = this.target.getBoundingClientRect();
       return {
         x: Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width)),
@@ -670,9 +684,9 @@ export class InputHandler {
       };
     }
 
-    const rect = video.getBoundingClientRect();
+    const rect = content.el.getBoundingClientRect();
     const containerAspect = rect.width / rect.height;
-    const videoAspect = video.videoWidth / video.videoHeight;
+    const videoAspect = content.contentWidth / content.contentHeight;
 
     let renderWidth: number, renderHeight: number, offsetX: number, offsetY: number;
     if (containerAspect > videoAspect) {

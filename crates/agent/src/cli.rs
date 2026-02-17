@@ -3,22 +3,19 @@ use uuid::Uuid;
 
 pub(crate) const DEFAULT_BITRATE: u32 = 100_000; // 100 Mbps -- for VA-API/software encoders
 pub(crate) const LOW_BITRATE: u32 = 5_000; // 5 Mbps -- for constrained WAN connections
-pub(crate) const DEFAULT_FRAMERATE: u32 = 60; // 60fps -- higher rates cause WebRTC bufferbloat (RTT spikes to seconds)
+pub(crate) const DEFAULT_FRAMERATE: u32 = 120; // 120fps -- WebCodecs removes WebRTC jitter buffer bottleneck
 pub(crate) const LOW_FRAMERATE: u32 = 30; // 30fps for low quality mode
 
 pub(crate) struct Args {
     pub display: String,
     pub server_url: String,
     pub session_id: Uuid,
-    pub ice_servers_json: Option<String>,
     pub agent_token: Option<String>,
     pub tls_cert_path: Option<String>,
     pub width: u32,
     pub height: u32,
     pub framerate: u32,
     pub bitrate: u32,
-    pub min_bitrate: u32,
-    pub max_bitrate: u32,
     pub encoder: Option<String>,
     pub max_width: u32,
     pub max_height: u32,
@@ -28,15 +25,12 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
     let mut display = ":0".to_string();
     let mut server_url = String::new();
     let mut session_id = None;
-    let mut ice_servers_json = None;
     let mut agent_token = None;
     let mut tls_cert_path = None;
     let mut width: u32 = 1920;
     let mut height: u32 = 1080;
     let mut framerate: u32 = DEFAULT_FRAMERATE;
     let mut bitrate: u32 = DEFAULT_BITRATE;
-    let mut min_bitrate: u32 = 5_000;
-    let mut max_bitrate: u32 = 80_000;
     let mut encoder: Option<String> = None;
     let mut max_width: u32 = 3840;
     let mut max_height: u32 = 2160;
@@ -59,7 +53,6 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
                 println!("    --display <DISPLAY>          X11 display [default: :0]");
                 println!("    --server-url <URL>           Signaling server WebSocket URL");
                 println!("    --session-id <UUID>          Session identifier (required)");
-                println!("    --ice-servers <JSON>         ICE server configuration (JSON)");
                 println!(
                     "    --agent-token <TOKEN>        Agent authentication token (prefer BEAM_AGENT_TOKEN env)"
                 );
@@ -68,15 +61,9 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
                 );
                 println!("    --width <PIXELS>             Initial display width [default: 1920]");
                 println!("    --height <PIXELS>            Initial display height [default: 1080]");
-                println!("    --framerate <FPS>            Target framerate [default: 60]");
+                println!("    --framerate <FPS>            Target framerate [default: 120]");
                 println!(
                     "    --bitrate <KBPS>             Initial video bitrate [default: 100000]"
-                );
-                println!(
-                    "    --min-bitrate <KBPS>         Adaptive bitrate lower bound [default: 5000]"
-                );
-                println!(
-                    "    --max-bitrate <KBPS>         Adaptive bitrate upper bound [default: 80000]"
                 );
                 println!(
                     "    --encoder <NAME>             Force encoder (nvh264enc, vah264enc, x264enc)"
@@ -103,11 +90,6 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
                         .parse::<Uuid>()
                         .context("Invalid session-id UUID")?,
                 );
-            }
-            "--ice-servers" => {
-                i += 1;
-                ice_servers_json =
-                    Some(args.get(i).context("Missing --ice-servers value")?.clone());
             }
             "--agent-token" => {
                 // Legacy CLI support (prefer BEAM_AGENT_TOKEN env var)
@@ -150,22 +132,6 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
                     .parse()
                     .context("Invalid --bitrate value")?;
             }
-            "--min-bitrate" => {
-                i += 1;
-                min_bitrate = args
-                    .get(i)
-                    .context("Missing --min-bitrate value")?
-                    .parse()
-                    .context("Invalid --min-bitrate value")?;
-            }
-            "--max-bitrate" => {
-                i += 1;
-                max_bitrate = args
-                    .get(i)
-                    .context("Missing --max-bitrate value")?
-                    .parse()
-                    .context("Invalid --max-bitrate value")?;
-            }
             "--encoder" => {
                 i += 1;
                 encoder = Some(args.get(i).context("Missing --encoder value")?.clone());
@@ -200,15 +166,12 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
         display,
         server_url,
         session_id: session_id.context("--session-id is required")?,
-        ice_servers_json,
         agent_token,
         tls_cert_path,
         width,
         height,
         framerate,
         bitrate,
-        min_bitrate,
-        max_bitrate,
         encoder,
         max_width,
         max_height,

@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use beam_protocol::{AuthRequest, AuthResponse, BeamConfig, IceServerInfo, SignalingMessage};
+use beam_protocol::{AuthRequest, AuthResponse, BeamConfig, SignalingMessage};
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -209,7 +209,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/health", get(health_check))
         .route("/api/health/detailed", get(health_check_detailed))
         .route("/metrics", get(metrics))
-        .route("/api/ice-config", get(ice_config))
         .route("/ws/agent/{id}", get(agent_ws_upgrade))
         .layer(RequestBodyLimitLayer::new(65_536)) // 64KB max request body
         .with_state(Arc::clone(&state));
@@ -457,8 +456,7 @@ async fn login(
     };
 
     // Reuse existing session if the user already has one running.
-    // The agent handles new WebRTC connections (SDP renegotiation), so the
-    // desktop state (windows, files, etc.) is preserved across reconnects.
+    // The desktop state (windows, files, etc.) is preserved across reconnects.
     if let Some(existing) = state.session_manager.find_by_username(&req.username).await {
         tracing::info!(
             session_id = %existing.id,
@@ -762,9 +760,12 @@ async fn spawn_agent_monitor(state: Arc<AppState>, session_id: Uuid) {
             {
                 let channels = state.channels.read().await;
                 if let Some(channel) = channels.get(&session_id) {
-                    let _ = channel.to_browser.send(SignalingMessage::Error {
+                    let msg = SignalingMessage::Error {
                         message: "agent_exited".to_string(),
-                    });
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = channel.to_browser.send(json);
+                    }
                 }
             }
 
@@ -882,9 +883,12 @@ pub async fn spawn_orphan_agent_monitor(state: Arc<AppState>, session_id: Uuid, 
         {
             let channels = state.channels.read().await;
             if let Some(channel) = channels.get(&session_id) {
-                let _ = channel.to_browser.send(SignalingMessage::Error {
+                let msg = SignalingMessage::Error {
                     message: "agent_exited".to_string(),
-                });
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = channel.to_browser.send(json);
+                }
             }
         }
 
@@ -950,7 +954,7 @@ async fn browser_ws_upgrade(
 
     tracing::info!(%id, "Browser WebSocket upgrade");
     let channels = state.channels.clone();
-    ws.max_message_size(65_536) // 64KB max for signaling messages
+    ws.max_message_size(2 * 1024 * 1024) // 2MB max (binary video frames + text input)
         .on_upgrade(move |socket| signaling::handle_browser_ws(socket, id, channels))
         .into_response()
 }
@@ -1271,40 +1275,6 @@ async fn metrics(
         .into_response()
 }
 
-/// GET /api/ice-config - return ICE/TURN server configuration (requires JWT)
-async fn ice_config(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(query): Query<WsQuery>,
-) -> impl IntoResponse {
-    if let Err((status, msg)) = extract_claims_from_headers(&headers, &query, &state.jwt_secret) {
-        return (status, Json(json!({ "error": msg }))).into_response();
-    }
-
-    let ice = &state.config.ice;
-    let mut servers = Vec::new();
-
-    // Add STUN servers
-    if !ice.stun_urls.is_empty() {
-        servers.push(IceServerInfo {
-            urls: ice.stun_urls.clone(),
-            username: None,
-            credential: None,
-        });
-    }
-
-    // Add TURN servers
-    if !ice.turn_urls.is_empty() {
-        servers.push(IceServerInfo {
-            urls: ice.turn_urls.clone(),
-            username: ice.turn_username.clone(),
-            credential: ice.turn_credential.clone(),
-        });
-    }
-
-    Json(json!({ "ice_servers": servers })).into_response()
-}
-
 /// GET /ws/agent/:id - WebSocket upgrade for agent signaling (requires agent token)
 async fn agent_ws_upgrade(
     State(state): State<Arc<AppState>>,
@@ -1327,7 +1297,7 @@ async fn agent_ws_upgrade(
 
     tracing::info!(%id, "Agent WebSocket upgrade (authenticated)");
     let channels = state.channels.clone();
-    ws.max_message_size(65_536) // 64KB max for signaling messages
+    ws.max_message_size(2 * 1024 * 1024) // 2MB max (binary video frames + text signaling)
         .on_upgrade(move |socket| signaling::handle_agent_ws(socket, id, channels))
         .into_response()
 }
@@ -1671,7 +1641,6 @@ mod tests {
             100, // display_start (high to avoid conflicts)
             1920,
             1080,
-            None,
             None,
             beam_protocol::VideoConfig::default(),
         );
@@ -2074,7 +2043,6 @@ mod tests {
             100,
             1920,
             1080,
-            None,
             None,
             beam_protocol::VideoConfig::default(),
         );

@@ -3,7 +3,7 @@ members = ["crates/server", "crates/agent", "crates/protocol"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.32"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 authors = ["Beam Contributors"]
@@ -42,9 +42,6 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 # Auth
 jsonwebtoken = "9"
 pam = "0.8"
-
-# WebRTC
-webrtc = "0.17"
 
 # GStreamer
 gstreamer = "0.24"

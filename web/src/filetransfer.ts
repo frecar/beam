@@ -5,7 +5,7 @@ const CHUNK_SIZE = 16 * 1024; // 16 KB per chunk
 type ProgressCallback = (filename: string, percent: number) => void;
 
 /**
- * Uploads files to the remote desktop via WebRTC DataChannel.
+ * Uploads files to the remote desktop via WebSocket.
  * Files are chunked, base64-encoded, and sent as FileStart/FileChunk/FileDone events.
  */
 export class FileUploader {
@@ -116,7 +116,7 @@ interface ActiveDownload {
 }
 
 /**
- * Receives file downloads from the remote desktop via WebRTC DataChannel.
+ * Receives file downloads from the remote desktop via WebSocket.
  * Accumulates base64-encoded chunks and triggers a browser download on completion.
  */
 export class FileDownloader {

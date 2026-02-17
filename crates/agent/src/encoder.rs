@@ -84,7 +84,7 @@ impl Encoder {
         // encoder element
         let encoder = build_encoder_element(encoder_type, &encoder_name, bitrate)?;
 
-        // capsfilter: force constrained-baseline profile to match webrtc-rs SDP
+        // capsfilter: force constrained-baseline profile for browser compatibility
         let profile_caps = gst::Caps::builder("video/x-h264")
             .field("profile", "constrained-baseline")
             .build();
@@ -100,7 +100,7 @@ impl Encoder {
             .context("Failed to create h264parse")?;
 
         // Force h264parse to output Annex B byte-stream with complete access units.
-        // webrtc-rs TrackLocalStaticSample expects Annex B format (start codes).
+        // Browser's VideoDecoder expects Annex B format (start codes).
         let parse_caps = gst::Caps::builder("video/x-h264")
             .field("stream-format", "byte-stream")
             .field("alignment", "au")
@@ -284,7 +284,7 @@ impl Encoder {
     }
 
     /// The encoder type detected at construction (NVIDIA, VA-API, or software).
-    /// Used to register matching H.264 profiles in WebRTC SDP.
+    /// Used for diagnostics and quality mode decisions.
     pub fn encoder_type(&self) -> EncoderType {
         self.encoder_type
     }
@@ -327,7 +327,7 @@ impl Encoder {
     }
 
     /// Force the encoder to emit an IDR keyframe on the next frame.
-    /// Call this after WebRTC SDP negotiation so the browser's decoder
+    /// Call this on connection so the browser's VideoDecoder
     /// can start decoding immediately.
     pub fn force_keyframe(&self) {
         let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
@@ -454,7 +454,7 @@ mod tests {
 
     /// Verify appsrc caps do NOT contain colorimetry.
     /// Adding colorimetry (e.g., bt709) injects VUI colour parameters into the
-    /// H.264 SPS, which Chrome's WebRTC decoder rejects (0 FPS, PLI flood).
+    /// H.264 SPS, which Chrome's VideoDecoder rejects.
     #[test]
     fn appsrc_caps_must_not_contain_colorimetry() {
         gst::init().unwrap();
@@ -468,7 +468,7 @@ mod tests {
             let caps_str = caps.to_string();
             assert!(
                 !caps_str.contains("colorimetry"),
-                "appsrc caps must NOT specify colorimetry (causes Chrome WebRTC decode failure). \
+                "appsrc caps must NOT specify colorimetry (causes Chrome decode failure). \
                  Format={format}, caps={caps_str}"
             );
         }

@@ -3,7 +3,7 @@ arch: "${ARCH}"
 platform: linux
 version: v${VERSION}
 maintainer: "Beam Contributors"
-description: "GPU-accelerated remote desktop streaming to any browser via WebRTC"
+description: "GPU-accelerated remote desktop streaming to any browser via WebCodecs"
 vendor: "Beam"
 homepage: "https://github.com/frecar/beam"
 license: "MIT"

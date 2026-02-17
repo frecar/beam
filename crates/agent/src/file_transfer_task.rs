@@ -1,33 +1,31 @@
 use crate::filetransfer;
-use crate::peer::{self, SharedPeer};
+use crate::signaling::WsSender;
 
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
-/// File download: read file on blocking thread, stream chunks via DataChannel.
+/// File download: read file on blocking thread, stream chunks via WebSocket text.
 pub(crate) async fn run_file_download_loop(
     download_request_rx: &mut mpsc::Receiver<String>,
     file_transfer: &Arc<Mutex<filetransfer::FileTransferManager>>,
-    shared_peer: &SharedPeer,
+    ws_tx: &WsSender,
 ) {
     while let Some(path) = download_request_rx.recv().await {
         info!(path, "File download request received");
         let ft = Arc::clone(file_transfer);
-        let peer = peer::snapshot(shared_peer).await;
+        let ws = ws_tx.clone();
 
         // Bounded channel provides backpressure: the blocking reader
         // pauses when 16 messages are buffered, avoiding unbounded
-        // memory growth for large files (a 100MB file would otherwise
-        // collect ~135MB of base64 JSON strings in memory).
+        // memory growth for large files.
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(16);
 
         // File I/O is blocking -- run on a blocking thread, streaming
         // chunks through the bounded channel instead of collecting all.
         tokio::task::spawn_blocking(move || {
             let send_fn = |msg: String| {
-                // blocking_send respects the channel capacity limit,
-                // pausing the reader when the async sender falls behind.
                 let _ = chunk_tx.blocking_send(msg);
             };
             let mgr = ft.lock().unwrap_or_else(|e| e.into_inner());
@@ -37,8 +35,8 @@ pub(crate) async fn run_file_download_loop(
 
         // Stream messages to browser as they arrive from the reader
         while let Some(msg) = chunk_rx.recv().await {
-            if let Err(e) = peer.send_data_channel_message(&msg).await {
-                warn!("Failed to send download message to browser: {e:#}");
+            if let Err(e) = ws.send(Message::Text(msg.into())).await {
+                warn!("Failed to send download message to browser: {e}");
                 break;
             }
         }

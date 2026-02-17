@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use beam_protocol::BeamConfig;
 
-pub use beam_protocol::{AudioConfig, IceConfig, ServerConfig, SessionConfig, VideoConfig};
+pub use beam_protocol::{AudioConfig, ServerConfig, SessionConfig, VideoConfig};
 
 /// Load configuration from a TOML file at the given path.
 /// If the file doesn't exist, returns default configuration.
@@ -18,7 +18,6 @@ pub fn load_config(path: &Path) -> Result<BeamConfig> {
             video: VideoConfig::default(),
             audio: AudioConfig::default(),
             session: SessionConfig::default(),
-            ice: IceConfig::default(),
         });
     }
 
