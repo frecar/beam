@@ -588,7 +588,7 @@ async fn main() -> anyhow::Result<()> {
             let mut was_backgrounded = false;
             let mut first_capture_logged = false;
             let mut first_encode_logged = false;
-            let mut last_encoder_reset = Instant::now(); // Track last encoder recreation for throttling
+            let mut last_encoder_reset = Instant::now() - ENCODER_RESET_COOLDOWN; // Allow first reset immediately
 
             loop {
                 if shutdown_for_capture.load(Ordering::Relaxed) {
