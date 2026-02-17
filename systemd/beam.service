@@ -23,16 +23,17 @@ ProtectHome=no
 NoNewPrivileges=no
 # PrivateTmp must be off: agents use /tmp for X11 sockets and PulseAudio.
 PrivateTmp=no
-CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_AUDIT_WRITE
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_AUDIT_WRITE CAP_SYS_NICE
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-# RestrictRealtime is NOT set: beam-agent uses cap_sys_nice for real-time
-# frame pacing, and seccomp filters propagate to child processes.
-# RestrictRealtime=yes would silently block sched_setscheduler() in agents.
+# CAP_SYS_NICE is in the bounding set (not effective) so that beam-agent's
+# file capabilities (cap_sys_nice=ep) are preserved across execve().
+# RestrictRealtime is NOT set for the same reason: seccomp filters propagate
+# to child processes, and beam-agent uses SCHED_FIFO for frame pacing.
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes

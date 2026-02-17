@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.23] - 2026-02-17
+
+Critical bugfix: agent spawn failure on systems installed via APT package.
+
+### Fixed
+- **Agent spawn failure (EPERM)**: `CAP_SYS_NICE` added to systemd `CapabilityBoundingSet`. The kernel refuses to exec binaries with file capabilities (`cap_sys_nice=ep` on beam-agent) when those capabilities are outside the calling process's bounding set. This caused 500 Internal Server Error on every login attempt for APT-installed systems.
+- Error logging now shows full error chain (`{e:#}` instead of `{e}`) for session creation, destruction, and agent monitoring errors
+
 ## [0.1.22] - 2026-02-17
 
 Code quality, performance, and documentation release: major refactoring of both Rust and TypeScript codebases, capture pipeline optimizations, robustness improvements, and documentation accuracy fixes.

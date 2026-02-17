@@ -434,7 +434,7 @@ async fn login(
         }
         Ok(Err(e)) => {
             // PAM task panic — server-side error, don't record as a login failure
-            tracing::error!("PAM task panicked: {e}");
+            tracing::error!("PAM task panicked: {e:#}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "Internal server error" })),
@@ -516,7 +516,7 @@ async fn login(
                 )
                     .into_response();
             }
-            tracing::error!("Failed to create session: {e}");
+            tracing::error!("Failed to create session: {e:#}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "Failed to create session" })),
@@ -651,7 +651,7 @@ async fn spawn_agent_monitor(state: Arc<AppState>, session_id: Uuid) {
                         true
                     }
                     Err(e) => {
-                        tracing::error!(%session_id, "Failed to wait for agent: {e}");
+                        tracing::error!(%session_id, "Failed to wait for agent: {e:#}");
                         true
                     }
                 };
@@ -769,7 +769,7 @@ async fn spawn_agent_monitor(state: Arc<AppState>, session_id: Uuid) {
             }
 
             if let Err(e) = state.session_manager.destroy_session(session_id).await {
-                tracing::error!(%session_id, "Failed to clean up after agent exit: {e}");
+                tracing::error!(%session_id, "Failed to clean up after agent exit: {e:#}");
             }
             signaling::remove_channel(&state.channels, session_id).await;
             tracing::info!(%session_id, "Session cleaned up after agent exit");
@@ -889,7 +889,7 @@ pub async fn spawn_orphan_agent_monitor(state: Arc<AppState>, session_id: Uuid, 
         }
 
         if let Err(e) = state.session_manager.destroy_session(session_id).await {
-            tracing::error!(%session_id, "Failed to clean up restored agent: {e}");
+            tracing::error!(%session_id, "Failed to clean up restored agent: {e:#}");
         }
         signaling::remove_channel(&state.channels, session_id).await;
         tracing::info!(%session_id, "Restored session cleaned up after agent exit");
@@ -1008,7 +1008,7 @@ async fn delete_session(
 
     // Destroy session (kills agent, recycles display)
     if let Err(e) = state.session_manager.destroy_session(id).await {
-        tracing::error!(%id, "Failed to destroy session: {e}");
+        tracing::error!(%id, "Failed to destroy session: {e:#}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to destroy session",
@@ -1099,7 +1099,7 @@ async fn admin_delete_session(
     }
 
     if let Err(e) = state.session_manager.destroy_session(id).await {
-        tracing::error!(%id, "Failed to destroy session: {e}");
+        tracing::error!(%id, "Failed to destroy session: {e:#}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to destroy session",
@@ -1175,7 +1175,7 @@ async fn release_session(
 
         tracing::info!(%id, "Grace period expired — destroying session");
         if let Err(e) = state_clone.session_manager.destroy_session(id).await {
-            tracing::error!(%id, "Failed to destroy session after grace period: {e}");
+            tracing::error!(%id, "Failed to destroy session after grace period: {e:#}");
         } else {
             tracing::info!(target: "audit", event = "session_destroyed", session_id = %id, "Session destroyed");
         }
