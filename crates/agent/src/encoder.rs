@@ -419,7 +419,6 @@ fn build_encoder_element(
             .context("Failed to create nvh264enc")?,
         EncoderType::VaApi => ElementFactory::make(name)
             .property_from_str("rate-control", "cbr")
-            .property_from_str("bitrate-control", "cbr")
             .property("bitrate", bitrate)
             .property("target-usage", 7u32)
             .property("key-int-max", 60u32)
