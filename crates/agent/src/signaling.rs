@@ -23,6 +23,7 @@ pub(crate) struct SignalingCtx<'a> {
     pub force_keyframe: Arc<AtomicBool>,
     pub input_callback: Arc<dyn Fn(InputEvent) + Send + Sync>,
     pub capture_cmd_tx: &'a std::sync::mpsc::Sender<CaptureCommand>,
+    pub tab_backgrounded: Arc<AtomicBool>,
 }
 
 pub(crate) async fn run_signaling(
@@ -181,6 +182,8 @@ async fn connect_and_handle(
                                                     Ok(answer_sdp) => {
                                                         // Swap the peer atomically
                                                         *ctx.shared_peer.write().await = new_peer;
+                                                        // Reset backgrounded flag -- new peer = fresh state
+                                                        ctx.tab_backgrounded.store(false, Ordering::Relaxed);
                                                         info!("New peer installed, sending SDP answer");
                                                         let reply = SignalingMessage::Answer {
                                                             sdp: answer_sdp,

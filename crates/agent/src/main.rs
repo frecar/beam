@@ -102,6 +102,23 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
             cvar.notify_one();
         }
 
+        // Clear backgrounded flag on user-interactive input events.
+        // If the user is typing/clicking/scrolling, the tab is clearly not
+        // backgrounded. This defends against lost DataChannel visibility
+        // messages (browsers can degrade DataChannel in background tabs).
+        match &event {
+            InputEvent::Key { .. }
+            | InputEvent::MouseMove { .. }
+            | InputEvent::RelativeMouseMove { .. }
+            | InputEvent::Button { .. }
+            | InputEvent::Scroll { .. } => {
+                if tab_backgrounded.swap(false, Ordering::Relaxed) {
+                    debug!("Input received while backgrounded, clearing flag");
+                }
+            }
+            _ => {}
+        }
+
         match event {
             InputEvent::Key { c, d } => {
                 if c == 29 || c == 97 {
@@ -738,9 +755,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                // Check force-keyframe flag (set by RTCP reader or signaling)
+                // Check force-keyframe flag (set by RTCP PLI/FIR or signaling)
                 if kf_flag_for_capture.swap(false, Ordering::Relaxed) {
                     encoder.force_keyframe();
+                    // PLI = browser is active and wants frames. Clear backgrounded
+                    // flag in case the DataChannel visibility message was lost.
+                    if tab_backgrounded_for_capture.swap(false, Ordering::Relaxed) {
+                        warn!("PLI received while backgrounded — clearing flag (DataChannel likely dropped visibility message)");
+                    }
                 }
 
                 let frame_start = Instant::now();
@@ -1000,6 +1022,7 @@ async fn main() -> anyhow::Result<()> {
         force_keyframe: kf_flag_for_signal,
         input_callback: Arc::clone(&input_callback),
         capture_cmd_tx: &cmd_tx_for_signal,
+        tab_backgrounded: Arc::clone(&tab_backgrounded),
     };
 
     tokio::select! {

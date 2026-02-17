@@ -77,6 +77,15 @@ let prevStatsTimestamp = 0;
 let prevPacketsReceived = 0;
 let prevPacketsLost = 0;
 
+// Post-background recovery: detect broken RTP pipeline after extended background.
+// Chrome's jitter buffer / H.264 decoder can corrupt after 30+ seconds backgrounded.
+// Packets arrive (packetsReceived increments) but 0 frames decode. Soft reconnect
+// creates a fresh peer connection — the only reliable fix.
+let backgroundedAt: number | null = null;
+let postBackgroundRecoveryChecks = 0;
+const BACKGROUND_CORRUPTION_THRESHOLD_MS = 30_000;
+const POST_BACKGROUND_RECOVERY_POLLS = 3;
+
 // Cumulative bytes received during this session (for bandwidth indicator)
 let sessionBytesReceived = 0;
 
@@ -213,6 +222,7 @@ async function pollWebRTCStats(): Promise<void> {
   let totalDecodeTime = 0;
   let jitterSec = 0;
   let videoCodecId = "";
+  let inboundVideoFps = 0;
 
   stats.forEach((report) => {
     if (report.type === "candidate-pair" && report.state === "succeeded") {
@@ -232,6 +242,9 @@ async function pollWebRTCStats(): Promise<void> {
       totalDecodeTime = report.totalDecodeTime || 0;
       if (typeof report.jitter === "number") {
         jitterSec = report.jitter;
+      }
+      if (typeof report.framesPerSecond === "number") {
+        inboundVideoFps = report.framesPerSecond;
       }
       videoCodecId = report.codecId || "";
     }
@@ -319,6 +332,25 @@ async function pollWebRTCStats(): Promise<void> {
   // Warn if video element has no frames decoded yet (debugging aid)
   if (remoteVideo.srcObject && remoteVideo.videoWidth === 0 && remoteVideo.videoHeight === 0) {
     console.warn("Video element has srcObject but 0x0 dimensions - no frames decoded yet");
+  }
+
+  // Post-background recovery: if tab was backgrounded 30+ seconds and FPS stays
+  // at 0 while packets are arriving, the RTP pipeline is corrupted. Trigger a
+  // soft reconnect to get a fresh peer connection (the only reliable fix).
+  if (postBackgroundRecoveryChecks > 0) {
+    if (inboundVideoFps === 0 && deltaReceived > 10) {
+      postBackgroundRecoveryChecks--;
+      if (postBackgroundRecoveryChecks === 0) {
+        console.warn(
+          `Post-background recovery: 0 FPS but ${deltaReceived} packets/s received. ` +
+          `RTP pipeline corrupted — triggering soft reconnect.`
+        );
+        connection?.softReconnect();
+      }
+    } else if (inboundVideoFps > 0) {
+      console.log("Post-background pipeline recovered naturally");
+      postBackgroundRecoveryChecks = 0;
+    }
   }
 
   // Update session info panel if visible (reuses the same 2s polling interval)
@@ -1020,6 +1052,8 @@ function handleDisconnect(): void {
   lastVideoResolution = "";
   totalPacketsReceived = 0;
   totalPacketsLost = 0;
+  backgroundedAt = null;
+  postBackgroundRecoveryChecks = 0;
   connectedSinceTime = null;
   sessionUsername = null;
   hideSessionInfoPanel();
@@ -1653,6 +1687,23 @@ document.addEventListener("visibilitychange", () => {
   if (connection) {
     console.debug(`Tab visibility changed: ${visible ? "visible" : "hidden"}`);
     connection.sendInput({ t: "vs", visible });
+  }
+
+  // Track background duration for post-background RTP pipeline recovery.
+  if (!visible) {
+    backgroundedAt = Date.now();
+    postBackgroundRecoveryChecks = 0;
+  } else if (backgroundedAt && (Date.now() - backgroundedAt) >= BACKGROUND_CORRUPTION_THRESHOLD_MS) {
+    // Tab was backgrounded long enough to potentially corrupt the RTP pipeline.
+    // Start monitoring FPS in the stats polling loop for recovery failure.
+    postBackgroundRecoveryChecks = POST_BACKGROUND_RECOVERY_POLLS;
+    console.log(
+      `Tab foregrounded after ${Math.round((Date.now() - backgroundedAt) / 1000)}s ` +
+      `background, monitoring for pipeline recovery`
+    );
+    backgroundedAt = null;
+  } else {
+    backgroundedAt = null; // Short background, no concern
   }
 
   const currentToken = tokenManager.getToken();
