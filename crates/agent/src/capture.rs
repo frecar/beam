@@ -92,9 +92,6 @@ impl ScreenCapture {
             bail!("shmat failed: {}", std::io::Error::last_os_error());
         }
 
-        // Mark segment for removal once all processes detach
-        unsafe { libc::shmctl(shm_id, libc::IPC_RMID, std::ptr::null_mut()) };
-
         let shm_seg = conn
             .generate_id()
             .context("Failed to generate SHM seg id")?;
@@ -102,6 +99,11 @@ impl ScreenCapture {
             .context("SHM attach request failed")?
             .check()
             .context("SHM attach failed")?;
+
+        // Mark segment for removal AFTER the X server attaches.
+        // IPC_RMID prevents new shmat() calls from other processes,
+        // so it must come after both client and server have attached.
+        unsafe { libc::shmctl(shm_id, libc::IPC_RMID, std::ptr::null_mut()) };
 
         debug!(shm_seg, shm_size, "SHM segment attached");
 

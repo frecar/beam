@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.24] - 2026-02-17
+
+Critical bugfix: screen capture initialization failure on x86_64 systems.
+
+### Fixed
+- **MIT-SHM attach failure**: Moved `IPC_RMID` (mark shared memory segment for removal) to after the X server attaches. Previously called before the server's `shmat()`, which Linux blocks on x86_64 kernels. The standard MIT-SHM pattern requires both client and server to be attached before marking for removal.
+
 ## [0.1.23] - 2026-02-17
 
 Critical bugfix: agent spawn failure on systems installed via APT package.
