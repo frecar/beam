@@ -93,6 +93,7 @@ pub fn build_tls_config(
                     let pem_data = pem::encode(&pem::Pem::new("CERTIFICATE", certs[0].to_vec()));
                     {
                         use std::os::unix::fs::OpenOptionsExt;
+                        use std::os::unix::fs::PermissionsExt;
                         let cert_file = std::fs::OpenOptions::new()
                             .write(true)
                             .create(true)
@@ -107,6 +108,12 @@ pub fn build_tls_config(
                             .context("Failed to write self-signed cert PEM")?;
                         writer.flush()?;
                         cert_file.sync_all().context("Failed to fsync cert PEM")?;
+                        // Override UMask=0077 from systemd: the cert is public and
+                        // agents need to read it after dropping root privileges.
+                        // OpenOptions::mode() is masked by umask, so set explicitly.
+                        cert_file
+                            .set_permissions(std::fs::Permissions::from_mode(0o644))
+                            .context("Failed to set cert permissions")?;
                     }
 
                     // Persist key PEM so cert survives restarts

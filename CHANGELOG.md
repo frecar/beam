@@ -7,10 +7,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.25] - 2026-02-17
 
-Critical bugfix: screen capture still failing on x86_64 under systemd hardening.
+Critical bugfixes: screen capture and agent signaling failures on x86_64 under systemd hardening.
 
 ### Fixed
 - **MIT-SHM permission denied**: Changed SHM segment permissions from `0o600` to `0o666`. The X server (Xorg) runs as euid=0 via the setuid wrapper, but under systemd's `CapabilityBoundingSet` it lacks `CAP_IPC_OWNER` and cannot bypass IPC permission checks. Without world-accessible permissions, Xorg's `shmat()` fails with `EACCES`. This is safe because `IPC_PRIVATE` segments cannot be discovered by key, and `IPC_RMID` prevents new attachments after both sides connect. This is the standard pattern for X11 MIT-SHM clients.
+- **Agent signaling connection failure**: Self-signed TLS cert written with `0600` permissions due to systemd `UMask=0077` overriding the `OpenOptions::mode(0o644)`. Agent (running as non-root user) could not read the cert, fell back to system CA roots, and rejected the self-signed cert as `UnknownIssuer`. Fixed by explicitly calling `set_permissions(0o644)` after file creation, which is not affected by umask.
 
 ## [0.1.24] - 2026-02-17
 
