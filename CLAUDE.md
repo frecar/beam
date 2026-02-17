@@ -87,3 +87,43 @@ Follow strict semver:
 - `/etc/systemd/system/beam.service` — systemd unit
 - `/etc/X11/beam-xorg.conf` — static Xorg config for dummy driver
 - `/var/lib/beam/sessions/` — runtime session data
+
+## Security Decisions
+
+Recorded: 2026-02-17. These are settled decisions — do not re-debate without a clear reason.
+
+### Rate Limiter Architecture
+- Split into read-only `is_allowed()` + write `record_failure()` — only failures increment counters
+- Dual limiters: username (5 failures / 60s) + IP (20 failures / 60s)
+- On success: clear username counter only, NOT the IP counter
+- Rationale: one success from IP shouldn't reset brute-force protection against other usernames from the same IP
+- Rejected: single combined limiter (too coarse), clearing both on success (creates bypass)
+
+### Admin Authorization
+- Config-based `admin_users` list in `beam.toml`; empty list = admin panel disabled (returns 403)
+- No JWT role claims — adds complexity without benefit at current scale
+- No Linux group checks — blocking syscalls, breaks in containers
+- Rationale: simple, auditable, no syscall risk
+
+### File Paths
+- Self-signed TLS cert: `/var/lib/beam/server-cert.pem`
+- Agent logs: `/var/log/beam/agent-{id}.log`
+- Agent runtime files (PulseAudio socket, Xorg lock, keyring): stay in `/tmp`
+- Rationale: agent runs as non-root user; runtime files are ephemeral per-session; `/tmp` is appropriate
+
+### `constant_time_eq` Bug Fix
+- Original code: `(a.len() ^ b.len()) as u8` — XOR values >255 apart would truncate to 0 (i.e., compare as equal), breaking timing-safe comparison
+- Fixed to: `if a.len() != b.len() { 1u8 } else { 0u8 }` — explicit length mismatch, no truncation
+- This was a security bug: attacker could supply a token of sufficiently wrong length and bypass length check
+
+### systemd Hardening
+- Added: `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `RestrictRealtime`, `LockPersonality`, `TimeoutStopSec=30`
+- Note: some broader hardening flags (e.g., `PrivateTmp`, `ProtectSystem=strict`) were relaxed in v0.1.14 due to Xorg/display access requirements — do not blindly re-add them
+
+### udev Rules
+- Input device permissions: `MODE="0660" GROUP="input"` (was `0666` world-writable)
+- Rationale: input devices should not be readable by arbitrary processes
+
+### Config File Permissions
+- `beam.toml` installed as `0640` (was `0644`)
+- Rationale: config contains `jwt_secret`; world-readable config is a credential leak

@@ -1,5 +1,18 @@
+# RELEASE PROCESS:
+# 1. make bump-version VERSION=x.y.z
+# 2. Update CHANGELOG.md (add section for new version)
+# 3. make check              (full CI run locally)
+# 4. git add -A && git commit -m "release: vx.y.z"
+# 5. git tag vx.y.z
+# 6. git push && git push --tags
+# CI will version-check, build, package, and publish automatically.
+#
+# PRE-1.0 VERSIONING:
+# - Patch (0.1.x): bug fixes, new features, security fixes, improvements
+# - Minor (0.x.0): breaking config/protocol changes requiring simultaneous update
+
 .PHONY: build build-release build-web build-rust \
-        dev run test lint fmt check ci version-check \
+        dev run test lint fmt check ci version-check bump-version \
         install uninstall deploy clean setup doctor help
 
 CARGO := cargo
@@ -115,6 +128,22 @@ version-check:
 		esac; \
 	fi; \
 	echo "Version check passed: $$CARGO_VER"
+
+# Usage: make bump-version VERSION=0.2.0
+bump-version:
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make bump-version VERSION=x.y.z"; exit 1; fi
+	@echo "Bumping version to $(VERSION)..."
+	@sed -i '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
+	@node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync('web/package.json','utf8')); p.version='$(VERSION)'; fs.writeFileSync('web/package.json',JSON.stringify(p,null,2)+'\n')"
+	@$(MAKE) version-check
+	@echo ""
+	@echo "Version bumped to $(VERSION). Next steps:"
+	@echo "  1. Update CHANGELOG.md"
+	@echo "  2. make check"
+	@echo "  3. git add Cargo.toml Cargo.lock web/package.json CHANGELOG.md"
+	@echo "  4. git commit -m 'release: v$(VERSION)'"
+	@echo "  5. git tag v$(VERSION)"
+	@echo "  6. git push && git push --tags"
 
 # === Installation ===
 

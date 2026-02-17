@@ -63,7 +63,7 @@ Edit `/etc/beam/beam.toml` (installed) or `config/beam.toml` (development):
 ```toml
 [server]
 bind = "0.0.0.0"
-port = 8443
+port = 8444
 # web_root = "/usr/share/beam/web/dist"  # set automatically on install
 # tls_cert = "/etc/beam/cert.pem"        # auto-generated if absent
 # tls_key = "/etc/beam/key.pem"
@@ -140,7 +140,7 @@ beam-doctor
 - Run `make doctor` to check encoder availability
 
 ### Black screen after login
-- Check agent logs: `journalctl -u beam -f` and `/tmp/beam-agent-*.log`
+- Check agent logs: `journalctl -u beam -f` and `/var/log/beam/agent-*.log`
 - Press F9 to open the performance overlay and check if frames are arriving
 - This usually means H.264 frames aren't reaching the browser — force a reconnect (refresh the page)
 
