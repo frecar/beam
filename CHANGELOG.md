@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.26] - 2026-02-17
+
+Clean virtual desktop session startup on Ubuntu 24.04.
+
+### Fixed
+- **Error dialog on login**: Removed `:GNOME` from `XDG_CURRENT_DESKTOP` which was activating ~20 GNOME services that crash in a virtual session. Electron/libsecret credential storage works via the D-Bus service name, not `XDG_CURRENT_DESKTOP`
+- **gnome-keyring format error**: Stopped pre-creating an empty `login.keyring` file. gnome-keyring uses a binary format; the `--unlock` flag creates it correctly
+- **GVFS FUSE mount failure**: Set `GVFS_DISABLE_FUSE=1` to prevent `fusermount3: Permission denied` under systemd restrictions. Thunar file manager still works via GIO API
+
+### Added
+- `XDG_RUNTIME_DIR` created per-session for proper D-Bus/GVFS/PulseAudio socket paths
+- XDG autostart masking for 12 services that fail in virtual sessions (update-notifier, polkit, tracker-miner, snap-userd, spice-vdagent, etc.)
+
 ## [0.1.25] - 2026-02-17
 
 Critical bugfixes: screen capture and agent signaling failures on x86_64 under systemd hardening.
