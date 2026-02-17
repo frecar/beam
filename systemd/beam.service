@@ -34,7 +34,9 @@ ProtectHostname=yes
 # file capabilities (cap_sys_nice=ep) are preserved across execve().
 # RestrictRealtime is NOT set for the same reason: seccomp filters propagate
 # to child processes, and beam-agent uses SCHED_FIFO for frame pacing.
-RestrictNamespaces=yes
+# RestrictNamespaces is NOT set: seccomp filters propagate to child processes.
+# User applications (Chrome, Firefox, Epiphany, Snap apps) require user
+# namespaces for sandboxing and will fail to launch without them.
 RestrictSUIDSGID=yes
 LockPersonality=yes
 UMask=0077

@@ -124,8 +124,9 @@ Recorded: 2026-02-17. These are settled decisions — do not re-debate without a
 - This was a security bug: attacker could supply a token of sufficiently wrong length and bypass length check
 
 ### systemd Hardening
-- Full directive set (v0.1.21): `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `RestrictNamespaces`, `RestrictSUIDSGID`, `LockPersonality`, `UMask=0077`, `TimeoutStopSec=30`
+- Full directive set (v0.1.21): `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `RestrictSUIDSGID`, `LockPersonality`, `UMask=0077`, `TimeoutStopSec=30`
 - `RestrictRealtime` is NOT set — beam-agent uses `cap_sys_nice` for real-time frame pacing; seccomp propagates to children, blocking `sched_setscheduler()`
+- `RestrictNamespaces` is NOT set (removed v0.1.27) — seccomp propagates to children; ALL modern browsers (Chrome, Firefox, Epiphany) require user namespaces for sandboxing and fail with "input/output error" when blocked
 - `CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_AUDIT_WRITE CAP_SYS_NICE` -- minimal set for spawning agent processes as real users. `CAP_SYS_NICE` is required in the bounding set (not effective) because beam-agent has `cap_sys_nice=ep` file capabilities; the kernel refuses to exec binaries with file caps outside the bounding set (EPERM). Fixed in v0.1.23 after production breakage on dev-laptop.
 - Note: `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=yes` were relaxed in v0.1.14 due to Xorg/display access requirements -- do not blindly re-add them
 - `RestrictAddressFamilies` is NOT set -- beam-server needs AF_INET, AF_INET6, and AF_UNIX. Adding this is safe but was deferred; add `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` when convenient
