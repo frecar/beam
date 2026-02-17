@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.27] - 2026-02-17
+
+Encoder reliability and application launch fixes.
+
+### Fixed
+- **Encoder recreation ignoring config preference**: On resize, reconnection, or pipeline error recovery, the encoder was recreated via auto-detection instead of respecting the configured `encoder` setting. On machines where `nvh264enc` is registered in the GStreamer plugin registry but the GPU is inaccessible, auto-detection would select it, fail to instantiate, and crash the session. Now all encoder recreation paths honor the config preference.
+- **Encoder detection false positives**: `detect_encoder()` now uses `ElementFactory::make().build()` (actual instantiation) instead of `ElementFactory::find()` (registry lookup only). This catches cases where a plugin `.so` is installed but the hardware is unavailable (e.g., `nvh264enc` without GPU access).
+- **Snap apps failing with I/O error**: On Ubuntu 24.04 where Firefox/Chromium are snap packages, app launches from the virtual desktop failed with "input/output error" because systemd's `RestrictNamespaces` blocks the namespace creation that snap confinement requires. XFCE preferred applications (`helpers.rc`) now auto-configured to use non-snap browser alternatives when available, with a startup warning if none are found.
+
+### Removed
+- Dead `Encoder::new()` method (all callers now use `with_encoder_preference()`)
+
 ## [0.1.26] - 2026-02-17
 
 Clean virtual desktop session startup on Ubuntu 24.04.

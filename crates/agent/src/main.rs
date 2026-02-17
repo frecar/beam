@@ -389,6 +389,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("Failed to initialize encoder")?;
     let encoder_type = encoder.encoder_type();
+    let encoder_pref = args.encoder.clone();
 
     // Parse ICE server config
     let ice_servers = match &args.ice_servers_json {
@@ -641,8 +642,9 @@ async fn main() -> anyhow::Result<()> {
                             // 4. Recreate encoder pipeline at new dimensions
                             let new_w = screen_capture.width();
                             let new_h = screen_capture.height();
-                            let new_encoder = match Encoder::new(
+                            let new_encoder = match Encoder::with_encoder_preference(
                                 new_w, new_h, DEFAULT_FRAMERATE, current_bitrate,
+                                encoder_pref.as_deref(),
                             ) {
                                 Ok(enc) => enc,
                                 Err(e) => {
@@ -682,11 +684,12 @@ async fn main() -> anyhow::Result<()> {
                         }
                         CaptureCommand::ResetEncoder => {
                             info!("Recreating encoder pipeline for fresh IDR (reconnection)");
-                            let new_encoder = match Encoder::new(
+                            let new_encoder = match Encoder::with_encoder_preference(
                                 screen_capture.width(),
                                 screen_capture.height(),
                                 current_framerate,
                                 current_bitrate,
+                                encoder_pref.as_deref(),
                             ) {
                                 Ok(enc) => enc,
                                 Err(e) => {
@@ -750,9 +753,10 @@ async fn main() -> anyhow::Result<()> {
                 // Auto-recover from GStreamer pipeline errors (GPU fault, driver issue, etc.)
                 if encoder.has_error() {
                     warn!("GStreamer pipeline error detected, recreating encoder");
-                    match Encoder::new(
+                    match Encoder::with_encoder_preference(
                         screen_capture.width(), screen_capture.height(),
                         current_framerate, current_bitrate,
+                        encoder_pref.as_deref(),
                     ) {
                         Ok(enc) => {
                             encoder = enc;

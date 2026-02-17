@@ -272,6 +272,33 @@ impl VirtualDisplay {
                 );
             }
 
+            // Configure XFCE preferred applications. On Ubuntu 24.04, many default
+            // apps (Firefox, Chromium) are snap packages which fail under systemd's
+            // RestrictNamespaces (snap confinement needs mount/user/pid namespaces).
+            // Point XFCE to non-snap alternatives if available.
+            let helpers_dir = format!("{xfce_config_dir}/xfce4");
+            let _ = fs::create_dir_all(&helpers_dir);
+            let browser_line = match find_non_snap_browser() {
+                Some(browser) => {
+                    info!(browser, "Configured XFCE preferred browser (non-snap)");
+                    format!("WebBrowser={browser}")
+                }
+                None => {
+                    warn!(
+                        "No non-snap browser found. Snap browsers fail in Beam sessions \
+                         (systemd RestrictNamespaces blocks snap confinement). \
+                         Install a .deb browser: sudo apt install firefox-esr"
+                    );
+                    String::new()
+                }
+            };
+            let mut helpers_rc = String::from("[Default]\nTerminalEmulator=xfce4-terminal\n");
+            if !browser_line.is_empty() {
+                helpers_rc.push_str(&browser_line);
+                helpers_rc.push('\n');
+            }
+            let _ = fs::write(format!("{helpers_dir}/helpers.rc"), &helpers_rc);
+
             // Create XDG_RUNTIME_DIR for this session. Without it, D-Bus services,
             // GVFS, and PulseAudio can't find proper socket paths. Normally created
             // by logind for interactive sessions, but beam-agent is spawned by the
@@ -899,6 +926,36 @@ fn which_exists(program: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Check if a binary is a snap package (lives under /snap/bin/).
+/// Snap apps fail in Beam sessions because systemd's RestrictNamespaces
+/// blocks the namespace creation that snap confinement requires.
+fn is_snap_binary(program: &str) -> bool {
+    Command::new("which")
+        .arg(program)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|path| path.trim().starts_with("/snap/"))
+        .unwrap_or(false)
+}
+
+/// Find a non-snap browser binary. Snap browsers fail under systemd's
+/// RestrictNamespaces (snap confinement needs mount/user/pid namespaces).
+fn find_non_snap_browser() -> Option<&'static str> {
+    // Order: common .deb browsers, then fallbacks
+    [
+        "firefox-esr",
+        "google-chrome-stable",
+        "google-chrome",
+        "chromium-browser",
+        "firefox",
+        "chromium",
+    ]
+    .iter()
+    .copied()
+    .find(|name| which_exists(name) && !is_snap_binary(name))
 }
 
 /// Discover DBUS_SESSION_BUS_ADDRESS from a running xfce4-panel process on

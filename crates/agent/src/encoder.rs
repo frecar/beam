@@ -27,10 +27,6 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    pub fn new(width: u32, height: u32, framerate: u32, bitrate: u32) -> anyhow::Result<Self> {
-        Self::with_encoder_preference(width, height, framerate, bitrate, None)
-    }
-
     pub fn with_encoder_preference(
         width: u32,
         height: u32,
@@ -351,6 +347,20 @@ impl Drop for Encoder {
     }
 }
 
+/// Try to instantiate a GStreamer element to verify the hardware is actually
+/// available. `ElementFactory::find()` only checks the plugin registry (the
+/// `.so` is present), but the element may fail to create if the hardware
+/// driver is missing or inaccessible (e.g. nvh264enc registered but no GPU).
+fn can_instantiate(name: &str) -> bool {
+    match ElementFactory::make(name).build() {
+        Ok(elem) => {
+            let _ = elem.set_state(gst::State::Null);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 fn detect_encoder(preferred: Option<&str>) -> anyhow::Result<(EncoderType, String)> {
     // If user specified a preferred encoder, try it first
     if let Some(pref) = preferred {
@@ -360,7 +370,7 @@ fn detect_encoder(preferred: Option<&str>) -> anyhow::Result<(EncoderType, Strin
             "x264enc" => EncoderType::Software,
             _ => bail!("Unknown encoder: {pref}. Use nvh264enc, vah264enc, or x264enc."),
         };
-        if ElementFactory::find(pref).is_some() {
+        if can_instantiate(pref) {
             info!(encoder = pref, "Using preferred encoder from config");
             return Ok((enc_type, pref.to_string()));
         }
@@ -377,8 +387,8 @@ fn detect_encoder(preferred: Option<&str>) -> anyhow::Result<(EncoderType, Strin
     ];
 
     for (enc_type, name) in &candidates {
-        if ElementFactory::find(name).is_some() {
-            info!(encoder = name, "Found encoder");
+        if can_instantiate(name) {
+            info!(encoder = name, "Found working encoder");
             return Ok((*enc_type, name.to_string()));
         }
         debug!(encoder = name, "Encoder not available, trying next");
