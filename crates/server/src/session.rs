@@ -32,7 +32,7 @@ struct PersistedSession {
 /// Always iterates over the full max(a.len(), b.len()) range so that
 /// differing lengths cannot be detected via timing.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = (a.len() ^ b.len()) as u8;
+    let mut diff = if a.len() != b.len() { 1u8 } else { 0u8 };
     for i in 0..a.len().max(b.len()) {
         let x = a.get(i).copied().unwrap_or(0);
         let y = b.get(i).copied().unwrap_or(0);
@@ -334,18 +334,6 @@ impl SessionManager {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-
-            // Preserve agent log for post-mortem debugging
-            let log_path = format!("/tmp/beam-agent-{session_id}.log");
-            let archive_dir = "/var/log/beam";
-            let _ = std::fs::create_dir_all(archive_dir);
-            let archive_path = format!("{archive_dir}/agent-{session_id}.log");
-            if std::fs::rename(&log_path, &archive_path).is_err() {
-                // rename fails across filesystems; fall back to copy + delete
-                if std::fs::copy(&log_path, &archive_path).is_ok() {
-                    let _ = std::fs::remove_file(&log_path);
-                }
             }
 
             // Now that the agent has exited, recycle the display number
@@ -673,7 +661,9 @@ impl SessionManager {
         // Write agent logs to a dedicated file per session.
         // IMPORTANT: Never use Stdio::piped() without reading the pipe -
         // the 64KB pipe buffer fills up and blocks the agent.
-        let log_path = format!("/tmp/beam-agent-{}.log", info.id);
+        let log_dir = "/var/log/beam";
+        let _ = std::fs::create_dir_all(log_dir);
+        let log_path = format!("{log_dir}/agent-{}.log", info.id);
         let log_file = std::fs::File::create(&log_path)
             .with_context(|| format!("Failed to create agent log at {log_path}"))?;
         let log_file_clone = log_file

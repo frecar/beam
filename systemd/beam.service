@@ -20,6 +20,15 @@ ProtectSystem=full
 ProtectHome=no
 NoNewPrivileges=no
 PrivateTmp=no
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_AUDIT_WRITE
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+LockPersonality=yes
+TimeoutStopSec=30
 
 # Logging
 StandardOutput=journal

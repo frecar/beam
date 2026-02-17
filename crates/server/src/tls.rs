@@ -26,16 +26,67 @@ pub fn build_tls_config(
             (certs, priv_key, cert.to_string())
         }
         _ => {
-            let (certs, priv_key) = generate_self_signed()?;
+            let cert_pem_path = "/var/lib/beam/server-cert.pem";
+            let key_pem_path = "/var/lib/beam/server-key.pem";
 
-            // Write the self-signed cert PEM to a well-known path so agents can pin it
-            let cert_pem_path = "/tmp/beam-server-cert.pem".to_string();
-            let pem_data = pem::encode(&pem::Pem::new("CERTIFICATE", certs[0].to_vec()));
-            std::fs::write(&cert_pem_path, pem_data.as_bytes())
-                .context("Failed to write self-signed cert PEM")?;
-            tracing::info!("Self-signed cert written to {cert_pem_path}");
+            std::fs::create_dir_all("/var/lib/beam").context("Failed to create /var/lib/beam")?;
 
-            (certs, priv_key, cert_pem_path)
+            // Reuse existing self-signed cert+key if both files exist and are valid
+            let loaded = if std::path::Path::new(cert_pem_path).exists()
+                && std::path::Path::new(key_pem_path).exists()
+            {
+                match load_certs_from_files(cert_pem_path, key_pem_path) {
+                    Ok((certs, key)) => {
+                        tracing::info!("Loaded existing self-signed cert from {cert_pem_path}");
+                        Some((certs, key))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Existing self-signed cert invalid, regenerating: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let (certs, priv_key) = match loaded {
+                Some(pair) => pair,
+                None => {
+                    let (certs, priv_key) = generate_self_signed()?;
+
+                    // Persist cert PEM for agent pinning
+                    let pem_data = pem::encode(&pem::Pem::new("CERTIFICATE", certs[0].to_vec()));
+                    std::fs::write(cert_pem_path, pem_data.as_bytes())
+                        .context("Failed to write self-signed cert PEM")?;
+
+                    // Persist key PEM so cert survives restarts
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        let key_bytes = match &priv_key {
+                            PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der(),
+                            _ => unreachable!("we always generate PKCS8"),
+                        };
+                        let key_pem_data =
+                            pem::encode(&pem::Pem::new("PRIVATE KEY", key_bytes.to_vec()));
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .mode(0o600)
+                            .open(key_pem_path)
+                            .and_then(|mut f| {
+                                use std::io::Write;
+                                f.write_all(key_pem_data.as_bytes())
+                            })
+                            .context("Failed to write self-signed key PEM")?;
+                    }
+
+                    tracing::info!("Generated self-signed cert: {cert_pem_path} + {key_pem_path}");
+                    (certs, priv_key)
+                }
+            };
+
+            (certs, priv_key, cert_pem_path.to_string())
         }
     };
 

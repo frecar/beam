@@ -24,6 +24,7 @@ pub struct AppState {
     pub channels: ChannelRegistry,
     pub jwt_secret: String,
     pub login_limiter: LoginRateLimiter,
+    pub ip_limiter: LoginRateLimiter,
     pub started_at: std::time::Instant,
     /// Metrics counters (atomic for lock-free thread safety)
     pub metrics_logins_attempted: std::sync::atomic::AtomicU64,
@@ -59,9 +60,9 @@ impl LoginRateLimiter {
         }
     }
 
-    /// Check if a login attempt from this key (IP or username) is allowed.
-    /// Returns true if allowed, false if rate-limited.
-    pub fn check(&self, key: &str) -> bool {
+    /// Check if a key is currently rate-limited (read-only, does not record).
+    /// Returns true if the key has NOT exceeded the limit (allowed).
+    pub fn is_allowed(&self, key: &str) -> bool {
         let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
 
@@ -83,17 +84,25 @@ impl LoginRateLimiter {
             return false;
         }
 
-        let entry = attempts.entry(key.to_string()).or_default();
-
-        // Remove expired attempts for this key
-        entry.retain(|t| now.duration_since(*t) < self.window);
-
-        if entry.len() >= self.max_attempts {
-            return false;
+        // Read-only check — don't insert empty entries for unknown keys
+        match attempts.get_mut(key) {
+            Some(entry) => {
+                entry.retain(|t| now.duration_since(*t) < self.window);
+                entry.len() < self.max_attempts
+            }
+            None => true, // No failures recorded — allowed
         }
+    }
 
+    /// Record a failed login attempt for the given key.
+    /// Call this only after authentication actually fails.
+    pub fn record_failure(&self, key: &str) {
+        let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+
+        let entry = attempts.entry(key.to_string()).or_default();
+        entry.retain(|t| now.duration_since(*t) < self.window);
         entry.push(now);
-        true
     }
 
     /// Clear rate limit entries for a key (e.g., after successful login).
@@ -260,9 +269,16 @@ fn is_valid_username(username: &str) -> bool {
 /// Authenticate via PAM and return a JWT + session.
 async fn login(
     State(state): State<Arc<AppState>>,
+    peer: Option<axum::extract::Extension<std::net::SocketAddr>>,
     Json(req): Json<AuthRequest>,
 ) -> impl IntoResponse {
-    tracing::info!(username = %req.username, "Login request");
+    let peer_ip = peer
+        .map(|axum::extract::Extension(addr)| addr.ip().to_string())
+        .unwrap_or_else(|| {
+            tracing::warn!("Could not extract peer address from connection");
+            "unknown".to_string()
+        });
+    tracing::info!(username = %req.username, peer_ip = %peer_ip, "Login request");
 
     // Validate username before anything else (before rate limiter to avoid
     // polluting the limiter with garbage keys from fuzzing/scanning).
@@ -291,18 +307,21 @@ async fn login(
         .metrics_logins_attempted
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    // Rate limit: check BEFORE auth to avoid wasting PAM calls, but only
-    // count failed attempts (so attackers can't lock out legitimate users
-    // by sending bad requests with their username).
-    if !state.login_limiter.check(&req.username) {
-        tracing::warn!(username = %req.username, "Login rate limited");
-        tracing::warn!(target: "audit", event = "rate_limited", "Rate limit exceeded");
+    // Rate limit: check BEFORE auth to avoid wasting PAM calls.
+    // Only failures are recorded (after auth), so legitimate users can't be
+    // locked out by an attacker sending requests with their username.
+    let username_allowed = state.login_limiter.is_allowed(&req.username);
+    let ip_allowed = state.ip_limiter.is_allowed(&peer_ip);
+    if !username_allowed || !ip_allowed {
+        let reason = if !username_allowed { "username" } else { "ip" };
+        tracing::warn!(username = %req.username, peer_ip = %peer_ip, limiter = reason, "Login rate limited");
+        tracing::warn!(target: "audit", event = "rate_limited", limiter = reason, "Rate limit exceeded");
         state
             .metrics_logins_failed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({ "error": "Too many login attempts. Please try again later." })),
+            Json(json!({ "error": "Too many login attempts. Please wait 60 seconds and try again." })),
         )
             .into_response();
     }
@@ -319,7 +338,10 @@ async fn login(
 
     match pam_result {
         Err(_) => {
+            // PAM timeout counts as a failure (may indicate LDAP being hammered)
             tracing::warn!(username = %req.username, "PAM authentication timed out (10s)");
+            state.login_limiter.record_failure(&req.username);
+            state.ip_limiter.record_failure(&peer_ip);
             state
                 .metrics_logins_failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -330,14 +352,19 @@ async fn login(
                 .into_response();
         }
         Ok(Ok(Ok(()))) => {
-            // Successful auth — clear rate limit so legitimate users aren't affected
-            // by earlier failed attempts (e.g., typos or attacker lockout attempts)
+            // Successful auth — clear username rate limit so legitimate users
+            // aren't affected by earlier failed attempts (typos, attacker lockout).
+            // Don't clear IP limiter — one success shouldn't unlock the IP for
+            // other usernames being brute-forced from the same source.
             state.login_limiter.clear(&req.username);
             tracing::info!(target: "audit", event = "login_success", username = %req.username, "User logged in");
         }
         Ok(Ok(Err(e))) => {
+            // Bad credentials — record failure against both username and IP
             tracing::warn!(username = %req.username, "Authentication failed: {e}");
             tracing::info!(target: "audit", event = "login_failure", username = %req.username, "Login failed");
+            state.login_limiter.record_failure(&req.username);
+            state.ip_limiter.record_failure(&peer_ip);
             state
                 .metrics_logins_failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -348,6 +375,7 @@ async fn login(
                 .into_response();
         }
         Ok(Err(e)) => {
+            // PAM task panic — server-side error, don't record as a login failure
             tracing::error!("PAM task panicked: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -937,14 +965,30 @@ async fn delete_session(
     (StatusCode::OK, "Session destroyed").into_response()
 }
 
-/// GET /api/admin/sessions - list ALL active sessions with activity info (requires JWT)
+/// GET /api/admin/sessions - list ALL active sessions with activity info (requires JWT + admin)
 async fn admin_list_sessions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<WsQuery>,
 ) -> impl IntoResponse {
-    if let Err((status, msg)) = extract_claims_from_headers(&headers, &query, &state.jwt_secret) {
-        return (status, Json(json!({ "error": msg }))).into_response();
+    let claims = match extract_claims_from_headers(&headers, &query, &state.jwt_secret) {
+        Ok(c) => c,
+        Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
+    };
+
+    if !state
+        .config
+        .server
+        .admin_users
+        .iter()
+        .any(|u| u == &claims.sub)
+    {
+        tracing::warn!(target: "audit", user = %claims.sub, "Non-admin attempted admin session list");
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "You do not have permission to access this resource" })),
+        )
+            .into_response();
     }
 
     let sessions: Vec<_> = state
@@ -965,7 +1009,7 @@ async fn admin_list_sessions(
     Json(sessions).into_response()
 }
 
-/// DELETE /api/admin/sessions/:id - destroy any session (requires JWT, no ownership check)
+/// DELETE /api/admin/sessions/:id - destroy any session (requires JWT + admin)
 async fn admin_delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
@@ -974,8 +1018,23 @@ async fn admin_delete_session(
 ) -> impl IntoResponse {
     let claims = match extract_claims_from_headers(&headers, &query, &state.jwt_secret) {
         Ok(c) => c,
-        Err((status, msg)) => return (status, msg).into_response(),
+        Err((status, msg)) => return (status, Json(json!({ "error": msg }))).into_response(),
     };
+
+    if !state
+        .config
+        .server
+        .admin_users
+        .iter()
+        .any(|u| u == &claims.sub)
+    {
+        tracing::warn!(target: "audit", user = %claims.sub, "Non-admin attempted admin session delete");
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "You do not have permission to access this resource" })),
+        )
+            .into_response();
+    }
 
     if state.session_manager.get_session(id).await.is_none() {
         return (StatusCode::NOT_FOUND, "Session not found").into_response();
@@ -1006,9 +1065,19 @@ async fn admin_delete_session(
 /// closing a tab without clicking "End Session".
 async fn release_session(
     State(state): State<Arc<AppState>>,
+    peer: Option<axum::extract::Extension<std::net::SocketAddr>>,
     Path(id): Path<Uuid>,
     body: String,
 ) -> impl IntoResponse {
+    let peer_ip = peer
+        .map(|axum::extract::Extension(addr)| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Rate limit release attempts per IP to prevent brute-forcing release tokens
+    if !state.ip_limiter.is_allowed(&peer_ip) {
+        return (StatusCode::TOO_MANY_REQUESTS, "Rate limited").into_response();
+    }
+
     // sendBeacon sends as text/plain — the body IS the release token.
     // Trim whitespace/newlines that browsers or proxies might add.
     let token = body.trim();
@@ -1018,6 +1087,7 @@ async fn release_session(
     }
 
     if !state.session_manager.verify_release_token(id, token).await {
+        state.ip_limiter.record_failure(&peer_ip);
         // Don't reveal whether the session exists or the token is wrong
         return (StatusCode::UNAUTHORIZED, "Invalid release token").into_response();
     }
@@ -1211,64 +1281,85 @@ mod tests {
     #[test]
     fn rate_limiter_allows_under_limit() {
         let limiter = LoginRateLimiter::new(3, 60);
-        assert!(limiter.check("user1"));
-        assert!(limiter.check("user1"));
-        assert!(limiter.check("user1"));
+        limiter.record_failure("user1");
+        limiter.record_failure("user1");
+        // 2 failures recorded, limit is 3 — should still be allowed
+        assert!(limiter.is_allowed("user1"));
     }
 
     #[test]
     fn rate_limiter_blocks_over_limit() {
         let limiter = LoginRateLimiter::new(3, 60);
-        assert!(limiter.check("user1"));
-        assert!(limiter.check("user1"));
-        assert!(limiter.check("user1"));
-        // 4th attempt should be blocked
-        assert!(!limiter.check("user1"));
+        limiter.record_failure("user1");
+        limiter.record_failure("user1");
+        limiter.record_failure("user1");
+        // 3 failures recorded, limit is 3 — should be blocked
+        assert!(!limiter.is_allowed("user1"));
     }
 
     #[test]
     fn rate_limiter_independent_per_key() {
         let limiter = LoginRateLimiter::new(2, 60);
-        assert!(limiter.check("user1"));
-        assert!(limiter.check("user1"));
-        assert!(!limiter.check("user1")); // blocked
+        limiter.record_failure("user1");
+        limiter.record_failure("user1");
+        assert!(!limiter.is_allowed("user1")); // blocked
 
         // user2 should still be allowed
-        assert!(limiter.check("user2"));
-        assert!(limiter.check("user2"));
+        assert!(limiter.is_allowed("user2"));
+        limiter.record_failure("user2");
+        assert!(limiter.is_allowed("user2"));
     }
 
     #[test]
     fn rate_limiter_resets_after_window() {
         let limiter = LoginRateLimiter::new(2, 0); // 0-second window = immediately expires
-        assert!(limiter.check("user1"));
-        assert!(limiter.check("user1"));
+        limiter.record_failure("user1");
+        limiter.record_failure("user1");
         // With a 0-second window, previous attempts expire immediately
         std::thread::sleep(std::time::Duration::from_millis(10));
-        assert!(limiter.check("user1"));
+        assert!(limiter.is_allowed("user1"));
+    }
+
+    #[test]
+    fn rate_limiter_is_allowed_does_not_record() {
+        let limiter = LoginRateLimiter::new(2, 60);
+        // Calling is_allowed many times should never block — it's read-only
+        for _ in 0..100 {
+            assert!(limiter.is_allowed("user1"));
+        }
+    }
+
+    #[test]
+    fn rate_limiter_clear_resets_failures() {
+        let limiter = LoginRateLimiter::new(2, 60);
+        limiter.record_failure("user1");
+        limiter.record_failure("user1");
+        assert!(!limiter.is_allowed("user1")); // blocked
+        limiter.clear("user1");
+        assert!(limiter.is_allowed("user1")); // unblocked after clear
     }
 
     #[test]
     fn rate_limiter_ttl_cleanup_removes_expired_entries() {
         // window=0s means entries expire immediately; cleanup_interval=1
-        // means every call to check() triggers a full TTL sweep.
+        // means every call to is_allowed() triggers a full TTL sweep.
         let limiter = LoginRateLimiter::new(5, 0).with_cleanup_interval(1);
 
         // Simulate an enumeration attack: 50 unique keys
         for i in 0..50 {
-            limiter.check(&format!("attacker-{i}"));
+            limiter.record_failure(&format!("attacker-{i}"));
         }
 
         // Wait for all entries to expire (window=0s, so any delay suffices)
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        // Next check() triggers TTL cleanup, pruning all 50 expired keys
-        limiter.check("trigger-cleanup");
+        // Next is_allowed() triggers TTL cleanup, pruning all 50 expired keys.
+        // is_allowed is read-only and doesn't insert entries for unknown keys.
+        limiter.is_allowed("trigger-cleanup");
 
-        // Only the freshly-inserted key should remain
         assert_eq!(
             limiter.key_count(),
-            1,
+            0,
             "Expired entries should be pruned by TTL cleanup"
         );
     }
@@ -1278,12 +1369,12 @@ mod tests {
         // Use a 60-second window with cleanup on every call
         let limiter = LoginRateLimiter::new(5, 60).with_cleanup_interval(1);
 
-        limiter.check("active-user-1");
-        limiter.check("active-user-2");
-        limiter.check("active-user-3");
+        limiter.record_failure("active-user-1");
+        limiter.record_failure("active-user-2");
+        limiter.record_failure("active-user-3");
 
         // Trigger another cleanup — all entries are within window, none should be pruned
-        limiter.check("active-user-4");
+        limiter.record_failure("active-user-4");
 
         assert_eq!(
             limiter.key_count(),
@@ -1414,6 +1505,7 @@ mod tests {
             channels: crate::signaling::new_channel_registry(),
             jwt_secret: TEST_JWT_SECRET.to_string(),
             login_limiter: LoginRateLimiter::new(5, 60),
+            ip_limiter: LoginRateLimiter::new(20, 60),
             started_at: std::time::Instant::now(),
             metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
             metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
@@ -1815,6 +1907,7 @@ mod tests {
             channels: crate::signaling::new_channel_registry(),
             jwt_secret: TEST_JWT_SECRET.to_string(),
             login_limiter: LoginRateLimiter::new(5, 60),
+            ip_limiter: LoginRateLimiter::new(20, 60),
             started_at: std::time::Instant::now(),
             metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
             metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),

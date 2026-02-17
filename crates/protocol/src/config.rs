@@ -35,6 +35,9 @@ pub struct ServerConfig {
     /// Require JWT auth for the /metrics endpoint (default: true)
     #[serde(default = "default_true")]
     pub metrics_require_auth: bool,
+    /// Users allowed to access /api/admin/* endpoints (empty = admin panel disabled)
+    #[serde(default)]
+    pub admin_users: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +120,7 @@ impl Default for ServerConfig {
             jwt_secret: None,
             web_root: default_web_root(),
             metrics_require_auth: true,
+            admin_users: Vec::new(),
         }
     }
 }

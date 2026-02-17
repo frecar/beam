@@ -204,7 +204,8 @@ async fn main() -> Result<()> {
         session_manager,
         channels: signaling::new_channel_registry(),
         jwt_secret,
-        login_limiter: web::LoginRateLimiter::new(5, 60), // 5 attempts per 60 seconds
+        login_limiter: web::LoginRateLimiter::new(5, 60), // 5 attempts per username per 60s
+        ip_limiter: web::LoginRateLimiter::new(20, 60),   // 20 attempts per IP per 60s
         started_at: std::time::Instant::now(),
         metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
         metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
@@ -222,6 +223,10 @@ async fn main() -> Result<()> {
             "Restored {} sessions from previous shutdown",
             restored.len()
         );
+    }
+
+    if state.config.server.admin_users.is_empty() {
+        tracing::info!("Admin panel disabled (no admin_users configured in beam.toml)");
     }
 
     let app = web::build_router(Arc::clone(&state))
@@ -342,8 +347,11 @@ async fn main() -> Result<()> {
                         }
                     };
 
+                    // Inject peer address so handlers can extract client IP
+                    let app_with_peer = app.layer(axum::Extension(peer_addr));
+
                     let io = hyper_util::rt::TokioIo::new(tls_stream);
-                    let hyper_service = hyper_util::service::TowerToHyperService::new(app);
+                    let hyper_service = hyper_util::service::TowerToHyperService::new(app_with_peer);
                     let builder = hyper_util::server::conn::auto::Builder::new(
                         hyper_util::rt::TokioExecutor::new(),
                     );
