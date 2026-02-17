@@ -247,6 +247,44 @@ impl VirtualDisplay {
                 "* { transition-duration: 0s !important; animation-duration: 0s !important; }\n",
             );
 
+            // Mask autostart entries that fail or are useless in a virtual session.
+            // XDG spec: user-level .desktop files in $XDG_CONFIG_HOME/autostart/
+            // override system-level files in /etc/xdg/autostart/ by filename.
+            let autostart_dir = format!("{xfce_config_dir}/autostart");
+            let _ = fs::create_dir_all(&autostart_dir);
+            for entry in [
+                "update-notifier.desktop",                     // pkexec error dialogs
+                "polkit-gnome-authentication-agent-1.desktop", // pkexec auth prompts
+                "pulseaudio.desktop",                          // conflicts with our PulseAudio
+                "tracker-miner-fs-3.desktop",                  // file indexer wastes CPU
+                "snap-userd-autostart.desktop",                // snap UI daemon
+                "spice-vdagent.desktop",                       // SPICE agent, not used
+                "ubuntu-advantage-notification.desktop",       // Ubuntu Pro nag
+                "ubuntu-report-on-upgrade.desktop",            // upgrade reporter
+                "gnome-initial-setup-copy-worker.desktop",     // GNOME first-run
+                "gnome-initial-setup-first-login.desktop",     // GNOME first-run
+                "org.gnome.DejaDup.Monitor.desktop",           // backup monitor
+                "org.gnome.Evolution-alarm-notify.desktop",    // calendar alarms
+            ] {
+                let _ = fs::write(
+                    format!("{autostart_dir}/{entry}"),
+                    "[Desktop Entry]\nHidden=true\n",
+                );
+            }
+
+            // Create XDG_RUNTIME_DIR for this session. Without it, D-Bus services,
+            // GVFS, and PulseAudio can't find proper socket paths. Normally created
+            // by logind for interactive sessions, but beam-agent is spawned by the
+            // beam-server systemd service (not a PAM login session).
+            let runtime_dir = format!("/tmp/beam-run-{}", self.display_num);
+            let _ = fs::remove_dir_all(&runtime_dir);
+            fs::create_dir_all(&runtime_dir)
+                .with_context(|| format!("Failed to create runtime dir: {runtime_dir}"))?;
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700));
+            }
+
             let pulse_server = format!("unix:/tmp/beam-pulse-{}/native", self.display_num);
             let child = unsafe {
                 Command::new("/usr/bin/dbus-launch")
@@ -255,10 +293,17 @@ impl VirtualDisplay {
                     .env("DISPLAY", &display)
                     .env("PULSE_SERVER", &pulse_server)
                     .env("XDG_CONFIG_HOME", &xfce_config_dir)
-                    // Include GNOME in desktop list so Electron apps (VS Code)
-                    // auto-detect gnome-libsecret for credential storage.
-                    // Without this, XFCE falls through to "basic" (weaker encryption).
-                    .env("XDG_CURRENT_DESKTOP", "XFCE:GNOME")
+                    .env("XDG_RUNTIME_DIR", &runtime_dir)
+                    // Electron/libsecret credential storage uses the D-Bus service
+                    // name org.freedesktop.secrets (registered by our gnome-keyring-
+                    // daemon), NOT XDG_CURRENT_DESKTOP. The ":GNOME" suffix was
+                    // activating ~20 GNOME services that all crash in a virtual
+                    // session, causing error dialogs on login.
+                    .env("XDG_CURRENT_DESKTOP", "XFCE")
+                    .env("XDG_SESSION_DESKTOP", "xfce")
+                    // Suppress GVFS FUSE mount (fusermount3 fails under systemd
+                    // restrictions). Thunar still works via GIO API without FUSE.
+                    .env("GVFS_DISABLE_FUSE", "1")
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     // Create a new session (process group) so we can kill all
@@ -320,11 +365,11 @@ impl VirtualDisplay {
                     let _ = fs::remove_dir_all(&keyring_dir);
                     let _ = fs::create_dir_all(&keyrings_dir);
 
-                    // Pre-create the "login" keyring and default alias so Chrome
-                    // and other libsecret consumers don't prompt "Set password
-                    // for new keyring". The --unlock flag will adopt and unlock
-                    // this keyring with the empty password from stdin.
-                    let _ = fs::write(format!("{keyrings_dir}/login.keyring"), b"");
+                    // Set the default keyring name so Chrome/apps use "login".
+                    // Do NOT pre-create login.keyring: gnome-keyring uses a binary
+                    // format and an empty file causes "invalid or unrecognized
+                    // format" errors. The --unlock flag with empty stdin creates
+                    // the keyring file in the correct format automatically.
                     let _ = fs::write(format!("{keyrings_dir}/default"), "login");
 
                     // Use a shell pipe to reliably deliver the empty password
@@ -668,10 +713,11 @@ impl Drop for VirtualDisplay {
         if let Some(ref path) = self.cleanup_config {
             let _ = fs::remove_file(path);
         }
-        // Clean up PA and XFCE config files
+        // Clean up PA, XFCE config, and runtime directories
         let _ = fs::remove_dir_all(format!("/tmp/beam-pulse-{}", self.display_num));
         let _ = fs::remove_file(format!("/tmp/beam-pulse-{}.pa", self.display_num));
         let _ = fs::remove_dir_all(format!("/tmp/beam-xfce-{}", self.display_num));
+        let _ = fs::remove_dir_all(format!("/tmp/beam-run-{}", self.display_num));
     }
 }
 
