@@ -3,105 +3,51 @@ import { BeamConnection } from "./connection";
 import { FileDownloader, FileUploader } from "./filetransfer";
 import type { DownloadMessage } from "./filetransfer";
 import { InputHandler } from "./input";
+import { performLogin, clearRateLimitTimer } from "./login";
 import { Renderer } from "./renderer";
+import {
+  loadSession, clearSession, sendReleaseBeacon, TokenManager,
+} from "./session";
+import {
+  initTheme, toggleTheme, updateThemeButton,
+  THEME_KEY, AUDIO_MUTED_KEY, SCROLL_SPEED_KEY,
+  FORWARD_KEYS_KEY, QUALITY_MODE_KEY, SESSION_TIMEOUT_KEY,
+  IDLE_WARNING_BEFORE_SECS, IDLE_CHECK_INTERVAL_MS,
+  computeNetworkScore, updateNetworkQualityDot,
+  updateQualitySelectDisplay, switchAutoQuality,
+  updateBandwidthIndicator, updatePerfOverlay,
+  updateLatencyStats, updateLatencyStatsFps,
+  showIdleWarning, hideIdleWarning,
+  resetLatencyStats, resetNetworkIndicators,
+} from "./settings";
 import { BeamUI } from "./ui";
+import {
+  type ConnectionState,
+  loginForm, usernameInput, passwordInput, connectBtn,
+  passwordToggle, sessionTimeoutSelect,
+  loadingCancel, remoteVideo, desktopView,
+  helpOverlay, perfOverlay, sessionInfoPanel, sipCloseBtn,
+  reconnectBtn, reconnectDisconnectBtn, reconnectOverlay,
+  clipboardHistoryPanel, chpList, chpClearBtn, chpCloseBtn,
+  adminPanelOverlay, adminSessionsTbody, adminSessionCount, adminPanelClose,
+  fileDropOverlay, btnUpload, fileUploadInput, btnDownload,
+  mobileFab, mobileFabToggle, mobileFabMenu,
+  fabKeyboard, fabFullscreen, fabScreenshot, fabDisconnect,
+  mobileKeyboardInput, sipCopyStatsBtn,
+  btnMute, btnForwardKeys, btnTheme,
+  setStatus as setStatusUI, updateConnectionQuality,
+  showLoading, hideLoading, showLoadingError,
+  showDesktop as showDesktopUI, showLogin as showLoginUI,
+  showReconnectOverlay, updateReconnectCountdown, hideReconnectOverlay,
+  isAutoReconnectCountdown, reconnectDesc,
+} from "./ui-state";
 
-/** Shape of the login API response */
-interface LoginResponse {
-  session_id: string;
-  token: string;
-  release_token?: string;
-  idle_timeout?: number;
-}
-
-/** Stored session with expiry timestamp */
-interface StoredSession extends LoginResponse {
-  saved_at: number;
-}
-
-const SESSION_KEY = "beam_session";
-const SESSION_MAX_AGE_MS = 3600_000; // 1 hour — matches server reaper
-const AUDIO_MUTED_KEY = "beam_audio_muted";
-const SCROLL_SPEED_KEY = "beam_scroll_speed";
-const THEME_KEY = "beam_theme";
-const FORWARD_KEYS_KEY = "beam_forward_keys";
-const SESSION_TIMEOUT_KEY = "beam_session_timeout";
+// --- Token manager (singleton) ---
+const tokenManager = new TokenManager();
 
 // Idle timeout warning: updated from the login response idle_timeout field.
 // We warn 2 minutes before expiry.
 let effectiveIdleTimeoutSecs = 3600; // updated from login response
-const IDLE_WARNING_BEFORE_SECS = 120; // Show warning 2 min before expiry
-const IDLE_CHECK_INTERVAL_MS = 30_000; // Check every 30s
-
-function saveSession(data: LoginResponse): void {
-  const stored: StoredSession = { ...data, saved_at: Date.now() };
-  localStorage.setItem(SESSION_KEY, JSON.stringify(stored));
-}
-
-function loadSession(): LoginResponse | null {
-  const raw = localStorage.getItem(SESSION_KEY);
-  if (!raw) return null;
-  try {
-    const data = JSON.parse(raw) as StoredSession;
-    if (Date.now() - data.saved_at > SESSION_MAX_AGE_MS) {
-      localStorage.removeItem(SESSION_KEY);
-      return null;
-    }
-    return data;
-  } catch {
-    localStorage.removeItem(SESSION_KEY);
-    return null;
-  }
-}
-
-function clearSession(): void {
-  localStorage.removeItem(SESSION_KEY);
-}
-
-// DOM elements
-const loginView = document.getElementById("login-view") as HTMLDivElement;
-const desktopView = document.getElementById("desktop-view") as HTMLDivElement;
-const loginForm = document.getElementById("login-form") as HTMLFormElement;
-const usernameInput = document.getElementById("username") as HTMLInputElement;
-const passwordInput = document.getElementById("password") as HTMLInputElement;
-const connectBtn = document.getElementById("connect-btn") as HTMLButtonElement;
-const loginError = document.getElementById("login-error") as HTMLDivElement;
-const loginCard = document.querySelector(".login-card") as HTMLDivElement;
-const passwordToggle = document.getElementById("password-toggle") as HTMLButtonElement;
-const sessionTimeoutSelect = document.getElementById("session-timeout") as HTMLSelectElement;
-const loginFormContent = document.getElementById("login-form-content") as HTMLDivElement;
-const loginLoading = document.getElementById("login-loading") as HTMLDivElement;
-const loadingSpinner = document.getElementById("loading-spinner") as HTMLDivElement;
-const loadingStatus = document.getElementById("loading-status") as HTMLParagraphElement;
-const loadingCancel = document.getElementById("loading-cancel") as HTMLButtonElement;
-const remoteVideo = document.getElementById("remote-video") as HTMLVideoElement;
-const statusBar = document.getElementById("status-bar") as HTMLDivElement;
-const statusDot = document.getElementById("status-dot") as HTMLDivElement;
-const statusText = document.getElementById("status-text") as HTMLSpanElement;
-const statusVersion = document.getElementById("status-version") as HTMLSpanElement;
-
-const bandwidthIndicator = document.getElementById("bandwidth-indicator") as HTMLSpanElement;
-const lsRtt = document.getElementById("ls-rtt") as HTMLSpanElement;
-const lsFps = document.getElementById("ls-fps") as HTMLSpanElement;
-const lsDecode = document.getElementById("ls-decode") as HTMLSpanElement;
-const lsLoss = document.getElementById("ls-loss") as HTMLSpanElement;
-const lsTooltip = document.getElementById("ls-tooltip") as HTMLDivElement;
-const faviconLink = document.querySelector("link[rel='icon']") as HTMLLinkElement;
-
-const btnMute = document.getElementById("btn-mute") as HTMLButtonElement;
-const btnForwardKeys = document.getElementById("btn-forward-keys") as HTMLButtonElement;
-const btnTheme = document.getElementById("btn-theme") as HTMLButtonElement;
-const perfOverlay = document.getElementById("perf-overlay") as HTMLDivElement;
-const helpOverlay = document.getElementById("help-overlay") as HTMLDivElement;
-const sessionInfoPanel = document.getElementById("session-info-panel") as HTMLDivElement;
-const sipCloseBtn = document.getElementById("sip-close") as HTMLButtonElement;
-const reconnectOverlay = document.getElementById("reconnect-overlay") as HTMLDivElement;
-const reconnectTitle = document.getElementById("reconnect-title") as HTMLHeadingElement;
-const reconnectIcon = document.querySelector(".reconnect-icon") as HTMLDivElement;
-const reconnectBtn = document.getElementById("reconnect-btn") as HTMLButtonElement;
-const reconnectDisconnectBtn = document.getElementById("reconnect-disconnect-btn") as HTMLButtonElement;
-const reconnectDesc = document.getElementById("reconnect-desc") as HTMLParagraphElement;
-const idleWarning = document.getElementById("idle-warning") as HTMLDivElement;
 
 let connection: BeamConnection | null = null;
 let renderer: Renderer | null = null;
@@ -114,16 +60,9 @@ let statsInterval: ReturnType<typeof setInterval> | null = null;
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let connectionTimeout: ReturnType<typeof setTimeout> | null = null;
 
-// First-frame tracking: gate ResizeObserver/fullscreen resize events
-// until the decoder has stabilized (prevents mid-stream resolution changes).
-
 // Soft reconnect scheduling for resolution changes
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const RECONNECT_DELAY_MS = 1000; // Give agent time to process resize
-
-// Token management for JWT refresh
-let currentToken: string | null = null;
-let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Release token for graceful session cleanup on tab close
 let currentReleaseToken: string | null = null;
@@ -164,68 +103,17 @@ let totalPacketsReceived = 0;
 let totalPacketsLost = 0;
 
 // Track connection state so quality updates only apply when connected
-let currentConnectionState: "disconnected" | "connecting" | "connected" | "error" = "disconnected";
+let currentConnectionState: ConnectionState = "disconnected";
 
 // --- Auto quality mode ---
-const QUALITY_MODE_KEY = "beam_quality_mode";
 let qualityMode: "auto" | "high" | "low" = "auto";
 let autoQualityLevel: "high" | "low" = "high";
 let qualityScoreHistory: { score: number; time: number }[] = [];
-const nqDot = document.getElementById("nq-dot") as HTMLSpanElement;
 
 // Idle timeout warning state
 let lastActivity = Date.now();
 let idleCheckInterval: ReturnType<typeof setInterval> | null = null;
 let idleWarningVisible = false;
-
-// --- Theme (dark/light mode) ---
-
-/** Determine if the current effective theme is light */
-function isLightMode(): boolean {
-  const root = document.documentElement;
-  return root.classList.contains("light-mode") ||
-    (!root.classList.contains("dark-mode") &&
-     window.matchMedia("(prefers-color-scheme: light)").matches);
-}
-
-/** Update the theme toggle button label to reflect the current mode */
-function updateThemeButton(): void {
-  btnTheme.textContent = isLightMode() ? "Dark" : "Light";
-  btnTheme.setAttribute("aria-label", isLightMode() ? "Switch to dark theme" : "Switch to light theme");
-}
-
-/** Toggle between light and dark mode, persisting the choice */
-function toggleTheme(): void {
-  const root = document.documentElement;
-  if (isLightMode()) {
-    // Switch to dark
-    root.classList.remove("light-mode");
-    root.classList.add("dark-mode");
-    localStorage.setItem(THEME_KEY, "dark");
-  } else {
-    // Switch to light
-    root.classList.remove("dark-mode");
-    root.classList.add("light-mode");
-    localStorage.setItem(THEME_KEY, "light");
-  }
-  updateThemeButton();
-}
-
-/** Initialize theme from localStorage or system preference */
-function initTheme(): void {
-  const saved = localStorage.getItem(THEME_KEY);
-  const root = document.documentElement;
-  if (saved === "light") {
-    root.classList.add("light-mode");
-    root.classList.remove("dark-mode");
-  } else if (saved === "dark") {
-    root.classList.add("dark-mode");
-    root.classList.remove("light-mode");
-  }
-  // If no saved preference, neither class is set, so the
-  // @media (prefers-color-scheme: light) rule in CSS takes effect.
-  updateThemeButton();
-}
 
 // Initialize theme immediately (before any async work)
 initTheme();
@@ -240,18 +128,10 @@ window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", ()
 
 // Clipboard history panel state
 let clipboardHistoryVisible = false;
-const clipboardHistoryPanel = document.getElementById("clipboard-history-panel") as HTMLDivElement;
-const chpList = document.getElementById("chp-list") as HTMLDivElement;
-const chpClearBtn = document.getElementById("chp-clear") as HTMLButtonElement;
-const chpCloseBtn = document.getElementById("chp-close") as HTMLButtonElement;
 
 // Admin sessions panel state
 let adminPanelVisible = false;
 let adminRefreshInterval: ReturnType<typeof setInterval> | null = null;
-const adminPanelOverlay = document.getElementById("admin-panel-overlay") as HTMLDivElement;
-const adminSessionsTbody = document.getElementById("admin-sessions-tbody") as HTMLTableSectionElement;
-const adminSessionCount = document.getElementById("admin-session-count") as HTMLSpanElement;
-const adminPanelClose = document.getElementById("admin-panel-close") as HTMLButtonElement;
 
 // Session info panel state
 let sessionInfoVisible = false;
@@ -263,128 +143,12 @@ let sessionUsername: string | null = null;
 let prevAudioBytesReceived = 0;
 let prevAudioStatsTimestamp = 0;
 
-/** Generate an SVG data URL for a colored circle favicon */
-function faviconDataUrl(color: string): string {
-  return `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='${encodeURIComponent(color)}'/%3E%3C/svg%3E`;
-}
-
-function setFavicon(color: string): void {
-  if (faviconLink) {
-    faviconLink.href = faviconDataUrl(color);
-  }
-}
-
-function setStatus(state: "disconnected" | "connecting" | "connected" | "error", message: string): void {
-  currentConnectionState = state;
-  statusText.textContent = message;
-  statusDot.className = "status-dot";
-  statusDot.style.backgroundColor = "";
-
-  switch (state) {
-    case "connected":
-      statusDot.classList.add("connected");
-      document.title = "Beam - Connected";
-      setFavicon("#4ade80"); // green
-      break;
-    case "connecting":
-      statusDot.classList.add("connecting");
-      document.title = "Beam - Disconnected";
-      setFavicon("#facc15"); // yellow
-      break;
-    case "error":
-      statusDot.classList.add("error");
-      document.title = "Beam - Disconnected";
-      setFavicon("#ff6b6b"); // red
-      break;
-    case "disconnected":
-    default:
-      document.title = "Beam - Login";
-      setFavicon("#888"); // gray
-      break;
-  }
-}
-
-/** Update status bar dot color and text based on current RTT latency */
-function updateConnectionQuality(rttMs: number): void {
-  if (currentConnectionState !== "connected") return;
-
-  if (rttMs > 80) {
-    statusDot.style.backgroundColor = "#ff6b6b";
-    statusText.textContent = "Connected (slow)";
-  } else if (rttMs >= 30) {
-    statusDot.style.backgroundColor = "#facc15";
-    statusText.textContent = "Connected";
-  } else {
-    statusDot.style.backgroundColor = "#4ade80";
-    statusText.textContent = "Connected";
-  }
+// --- Wrapper for setStatus that tracks connection state ---
+function setStatus(state: ConnectionState, message: string): void {
+  setStatusUI(state, message, (s) => { currentConnectionState = s; });
 }
 
 // --- Network quality monitor ---
-
-/** Compute a 0-100 network quality score from RTT and packet loss */
-function computeNetworkScore(rttMs: number | null, lossPercent: number): number {
-  let rttScore = 100;
-  if (rttMs !== null) {
-    if (rttMs > 100) rttScore = 20;
-    else if (rttMs > 50) rttScore = 50;
-    else if (rttMs > 20) rttScore = 80;
-  }
-
-  let lossScore = 100;
-  if (lossPercent > 1) lossScore = 20;
-  else if (lossPercent > 0.1) lossScore = 60;
-
-  return Math.round((rttScore + lossScore) / 2);
-}
-
-/** Update the network quality dot color */
-function updateNetworkQualityDot(score: number): void {
-  if (currentConnectionState !== "connected") {
-    nqDot.classList.remove("visible");
-    return;
-  }
-  nqDot.classList.remove("nq-good", "nq-fair", "nq-poor");
-  if (score > 70) {
-    nqDot.classList.add("nq-good");
-  } else if (score > 40) {
-    nqDot.classList.add("nq-fair");
-  } else {
-    nqDot.classList.add("nq-poor");
-  }
-  nqDot.classList.add("visible");
-}
-
-/** Update the quality select option text to reflect auto level */
-function updateQualitySelectDisplay(): void {
-  const qualitySelect = document.getElementById("quality-select") as HTMLSelectElement | null;
-  if (!qualitySelect) return;
-  const autoOption = qualitySelect.querySelector('option[value="auto"]') as HTMLOptionElement | null;
-  if (autoOption) {
-    autoOption.textContent = qualityMode === "auto"
-      ? `Auto (${autoQualityLevel === "high" ? "High" : "Low"})`
-      : "Auto";
-  }
-}
-
-/** Switch auto quality level and notify the agent */
-function switchAutoQuality(level: "high" | "low"): void {
-  if (autoQualityLevel === level) return;
-  autoQualityLevel = level;
-
-  // Send quality command to agent
-  connection?.sendInput({ t: "q", mode: level });
-
-  // Update select display
-  updateQualitySelectDisplay();
-
-  // Toast notification
-  if (level === "low") {
-    ui?.showNotification("Quality reduced due to network conditions", "warning");
-  } else {
-    ui?.showNotification("Quality restored to high", "success");
-  }
-}
 
 /** Feed stats to the network quality monitor (called from pollWebRTCStats) */
 function updateNetworkQualityMonitor(rttMs: number | null, lossPercent: number): void {
@@ -392,7 +156,7 @@ function updateNetworkQualityMonitor(rttMs: number | null, lossPercent: number):
   const now = Date.now();
 
   // Always update the dot (visible regardless of auto mode)
-  updateNetworkQualityDot(score);
+  updateNetworkQualityDot(score, currentConnectionState);
 
   if (qualityMode !== "auto") return;
 
@@ -405,271 +169,31 @@ function updateNetworkQualityMonitor(rttMs: number | null, lossPercent: number):
     const fiveSecsAgo = now - 5_000;
     const recent = qualityScoreHistory.filter(s => s.time >= fiveSecsAgo);
     if (recent.length >= 3 && recent.every(s => s.score < 40)) {
-      switchAutoQuality("low");
+      const result = switchAutoQuality("low", autoQualityLevel, qualityMode, connection, ui);
+      autoQualityLevel = result.newLevel;
     }
   } else {
     // Restore to high: score > 70 sustained for 10 seconds
     const tenSecsAgo = now - 10_000;
     const recent = qualityScoreHistory.filter(s => s.time >= tenSecsAgo);
     if (recent.length >= 5 && recent.every(s => s.score > 70)) {
-      switchAutoQuality("high");
+      const result = switchAutoQuality("high", autoQualityLevel, qualityMode, connection, ui);
+      autoQualityLevel = result.newLevel;
     }
   }
-}
-
-/** Format a byte count as a human-readable string (KB, MB, GB) */
-function formatTransferred(bytes: number): string {
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(0)} KB`;
-  } else if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  } else {
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  }
-}
-
-/** Update the bandwidth indicator in the status bar */
-function updateBandwidthIndicator(bitrateKbps: number | null, totalBytes: number): void {
-  if (currentConnectionState !== "connected" || bitrateKbps === null) {
-    bandwidthIndicator.classList.remove("visible");
-    return;
-  }
-
-  // Format bitrate
-  let bitrateStr: string;
-  if (bitrateKbps >= 1000) {
-    bitrateStr = `${(bitrateKbps / 1000).toFixed(1)} Mbps`;
-  } else {
-    bitrateStr = `${bitrateKbps} kbps`;
-  }
-
-  // Format total transferred
-  const totalStr = formatTransferred(totalBytes);
-
-  bandwidthIndicator.textContent = `\u25BC ${bitrateStr} \u00B7 ${totalStr}`;
-
-  // Color based on bandwidth: green <5 Mbps, yellow 5-15 Mbps, red >15 Mbps
-  bandwidthIndicator.classList.remove("bw-green", "bw-yellow", "bw-red");
-  if (bitrateKbps < 5000) {
-    bandwidthIndicator.classList.add("bw-green");
-  } else if (bitrateKbps <= 15000) {
-    bandwidthIndicator.classList.add("bw-yellow");
-  } else {
-    bandwidthIndicator.classList.add("bw-red");
-  }
-
-  bandwidthIndicator.classList.add("visible");
-}
-
-function setToken(token: string): void {
-  currentToken = token;
-  const data = loadSession();
-  if (data) {
-    data.token = token;
-    saveSession(data);
-  }
-}
-
-/** Send release beacon to start server-side grace period cleanup.
- *  Uses navigator.sendBeacon() which reliably fires during tab close. */
-function sendReleaseBeacon(): void {
-  if (currentSessionId && currentReleaseToken) {
-    navigator.sendBeacon(
-      `/api/sessions/${currentSessionId}/release`,
-      currentReleaseToken,
-    );
-  }
-}
-
-/** Parse JWT exp claim without verification */
-function parseJwtExp(token: string): number | null {
-  try {
-    const payload = token.split(".")[1];
-    const decoded = JSON.parse(atob(payload)) as { exp?: number };
-    return decoded.exp ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** Schedule proactive token refresh 5 minutes before expiry */
-function scheduleTokenRefresh(): void {
-  if (refreshTimer) {
-    clearTimeout(refreshTimer);
-    refreshTimer = null;
-  }
-  if (!currentToken) return;
-
-  const exp = parseJwtExp(currentToken);
-  if (!exp) return;
-
-  const nowSec = Math.floor(Date.now() / 1000);
-  const refreshInMs = (exp - nowSec - 300) * 1000; // 5 min before expiry
-
-  if (refreshInMs <= 0) {
-    refreshToken();
-    return;
-  }
-
-  refreshTimer = setTimeout(() => {
-    refreshTimer = null;
-    refreshToken();
-  }, refreshInMs);
-}
-
-/** Attempt to refresh the JWT token */
-async function refreshToken(): Promise<boolean> {
-  if (!currentToken) return false;
-  try {
-    const resp = await fetch("/api/auth/refresh", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${currentToken}` },
-    });
-    if (!resp.ok) return false;
-    const data = (await resp.json()) as { token: string };
-    setToken(data.token);
-    connection?.updateToken(data.token);
-    scheduleTokenRefresh();
-    console.log("Token refreshed");
-    return true;
-  } catch {
-    console.warn("Token refresh failed");
-    return false;
-  }
-}
-
-function showLoginError(message: string): void {
-  loginError.textContent = message;
-  loginError.style.display = "block";
-}
-
-function hideLoginError(): void {
-  loginError.style.display = "none";
-}
-
-function showLoading(message: string): void {
-  hideLoginError();
-  loginFormContent.style.display = "none";
-  loginLoading.style.display = "flex";
-  loadingSpinner.className = "loading-spinner";
-  loadingStatus.className = "loading-status";
-  loadingStatus.textContent = message;
-  loadingCancel.textContent = "Cancel";
-  // Move focus to cancel button so keyboard users can act on the loading state
-  loadingCancel.focus();
-}
-
-function updateLoadingStatus(message: string): void {
-  loadingStatus.style.opacity = "0";
-  setTimeout(() => {
-    loadingStatus.textContent = message;
-    loadingStatus.style.opacity = "1";
-  }, 150);
-}
-
-function shakeLoginCard(): void {
-  loginCard.classList.remove("shake");
-  // Force reflow so re-adding the class restarts the animation
-  void loginCard.offsetWidth;
-  loginCard.classList.add("shake");
-  loginCard.addEventListener("animationend", () => loginCard.classList.remove("shake"), { once: true });
-}
-
-function showLoadingError(message: string): void {
-  loadingSpinner.classList.add("error");
-  loadingStatus.textContent = message;
-  loadingStatus.classList.add("error");
-  shakeLoginCard();
-  loadingCancel.textContent = "Back to login";
-  // Move focus to the action button so keyboard users know what to do next
-  loadingCancel.focus();
-}
-
-/** Live countdown for rate-limit lockout timer handle */
-let rateLimitTimer: ReturnType<typeof setInterval> | null = null;
-/** Client-side login failure counter for progressive warnings (no server oracle) */
-let loginFailureCount = 0;
-
-function hideLoading(): void {
-  // Clear any running rate-limit countdown
-  if (rateLimitTimer) {
-    clearInterval(rateLimitTimer);
-    rateLimitTimer = null;
-    loginError.setAttribute("aria-live", "assertive");
-  }
-  loginLoading.style.display = "none";
-  loginFormContent.style.display = "block";
-  loadingSpinner.className = "loading-spinner";
-  loadingStatus.className = "loading-status";
-  loadingCancel.textContent = "Cancel";
-  connectBtn.disabled = false;
-  connectBtn.textContent = "Sign in";
-  // Return focus to username input so keyboard users land back on the form
-  usernameInput.focus();
-}
-
-/** Live countdown for rate-limit lockout. Updates every second and
- *  disables the submit button until the timer expires. */
-
-function startRateLimitCountdown(seconds: number): void {
-  if (rateLimitTimer) {
-    clearInterval(rateLimitTimer);
-    rateLimitTimer = null;
-  }
-
-  let remaining = seconds;
-  connectBtn.disabled = true;
-
-  // First announcement is assertive (role="alert" on loginError)
-  showLoginError(`Too many attempts. Try again in ${remaining} second${remaining === 1 ? "" : "s"}.`);
-
-  // Subsequent updates: switch to polite so screen readers don't
-  // announce every single tick of the countdown
-  loginError.setAttribute("aria-live", "polite");
-
-  rateLimitTimer = setInterval(() => {
-    remaining--;
-    if (remaining <= 0) {
-      clearInterval(rateLimitTimer!);
-      rateLimitTimer = null;
-      loginError.style.display = "none";
-      // Restore assertive for future errors
-      loginError.setAttribute("aria-live", "assertive");
-      connectBtn.disabled = false;
-      usernameInput.focus();
-    } else {
-      loginError.textContent = `Too many attempts. Try again in ${remaining} second${remaining === 1 ? "" : "s"}.`;
-    }
-  }, 1000);
 }
 
 function showDesktop(): void {
-  loginView.style.display = "none";
-  desktopView.style.display = "block";
-  statusBar.classList.add("visible");
-  if (isTouchDevice) {
-    mobileFab.classList.add("visible");
-  }
-  if (connectionTimeout) {
-    clearTimeout(connectionTimeout);
-    connectionTimeout = null;
-  }
-  // Fetch and display server version (best-effort, non-blocking)
-  fetch("/api/health")
-    .then((r) => r.json())
-    .then((data: { version?: string }) => {
-      if (data.version) statusVersion.textContent = `v${data.version}`;
-    })
-    .catch(() => {});
+  showDesktopUI(isTouchDevice, connectionTimeout, () => {
+    if (connectionTimeout) {
+      clearTimeout(connectionTimeout);
+      connectionTimeout = null;
+    }
+  });
 }
 
 function showLogin(): void {
-  loginView.style.display = "flex";
-  desktopView.style.display = "none";
-  statusBar.classList.remove("visible");
-  mobileFab.classList.remove("visible");
-  closeFab();
-  hideLoading();
+  showLoginUI(closeFab);
 }
 
 /** Extract round-trip latency and quality metrics from WebRTC stats */
@@ -773,19 +297,21 @@ async function pollWebRTCStats(): Promise<void> {
     packetsReceived > 0 ? (packetsLost / packetsReceived) * 100 : 0;
 
   // Update latency stats display in status bar
-  updateLatencyStats(rttMs, currentDecodeTimeMs, cumulativeLossPercent);
+  updateLatencyStats(rttMs, currentDecodeTimeMs, cumulativeLossPercent,
+    rttSamples, perfFps, lastJitterMs, totalPacketsReceived, totalPacketsLost,
+    lastVideoResolution, lastVideoCodec);
 
   // Update performance overlay state
   if (rttMs !== null) perfLatency = rttMs;
   if (bitrateKbps !== null) perfBitrate = bitrateKbps;
   perfLoss = Math.round(cumulativeLossPercent * 10) / 10;
-  updatePerfOverlay();
+  updatePerfOverlay(perfLatency, perfFps, perfBitrate, perfLoss);
 
   // Update status bar connection quality indicator based on latency
-  if (rttMs !== null) updateConnectionQuality(rttMs);
+  if (rttMs !== null) updateConnectionQuality(rttMs, currentConnectionState);
 
   // Update bandwidth indicator in status bar
-  updateBandwidthIndicator(bitrateKbps, sessionBytesReceived);
+  updateBandwidthIndicator(bitrateKbps, sessionBytesReceived, currentConnectionState);
 
   // Feed the network quality monitor with interval loss
   updateNetworkQualityMonitor(rttMs, intervalLossPercent);
@@ -797,63 +323,6 @@ async function pollWebRTCStats(): Promise<void> {
 
   // Update session info panel if visible (reuses the same 2s polling interval)
   updateSessionInfoStats();
-}
-
-/** Update the performance overlay content with color-coded values */
-function updatePerfOverlay(): void {
-  const rttClass = perfLatency < 20 ? "val-good" : perfLatency < 50 ? "val-warn" : "val-bad";
-  const fpsClass = perfFps >= 50 ? "val-good" : perfFps >= 25 ? "val-warn" : "val-bad";
-  const lossClass = perfLoss < 0.5 ? "val-good" : perfLoss < 2 ? "val-warn" : "val-bad";
-
-  const res = `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`;
-  perfOverlay.innerHTML =
-    `RTT  <span class="${rttClass}">${Math.round(perfLatency)} ms</span>\n` +
-    `FPS  <span class="${fpsClass}">${Math.round(perfFps)}</span>\n` +
-    `Rate <span class="val-good">${perfBitrate > 0 ? perfBitrate + " kbps" : "--"}</span>\n` +
-    `Loss <span class="${lossClass}">${perfLoss}%</span>\n` +
-    `Res  ${res}`;
-}
-
-// --- Latency stats display (status bar) ---
-
-function tooltipRow(label: string, value: string): string {
-  return `<div class="ls-tooltip-row"><span class="ls-tooltip-label">${label}</span><span>${value}</span></div>`;
-}
-
-/** Update the compact latency stats display in the status bar */
-function updateLatencyStats(rttMs: number | null, decodeMs: number, lossPercent: number): void {
-  if (rttMs !== null) {
-    const rttRounded = Math.round(rttMs);
-    lsRtt.textContent = `RTT: ${rttRounded}ms`;
-    lsRtt.className = "ls-stat " + (rttMs < 20 ? "ls-good" : rttMs <= 50 ? "ls-warn" : "ls-bad");
-  }
-
-  if (decodeMs > 0) {
-    lsDecode.textContent = `Dec: ${decodeMs.toFixed(1)}ms`;
-  }
-
-  lsLoss.textContent = `Loss: ${lossPercent.toFixed(1)}%`;
-
-  // Update tooltip with detailed stats
-  const avgRtt = rttSamples.length > 0
-    ? Math.round(rttSamples.reduce((a, b) => a + b, 0) / rttSamples.length)
-    : null;
-
-  lsTooltip.innerHTML = [
-    tooltipRow("RTT", rttMs !== null ? `${Math.round(rttMs)} ms${avgRtt !== null ? ` (avg: ${avgRtt} ms)` : ""}` : "--"),
-    tooltipRow("Jitter", `${lastJitterMs.toFixed(1)} ms`),
-    tooltipRow("FPS", `${Math.round(perfFps)}`),
-    tooltipRow("Decode", decodeMs > 0 ? `${decodeMs.toFixed(1)} ms` : "--"),
-    tooltipRow("Received", `${totalPacketsReceived.toLocaleString()} pkts`),
-    tooltipRow("Lost", `${totalPacketsLost.toLocaleString()} (${lossPercent.toFixed(2)}%)`),
-    tooltipRow("Resolution", lastVideoResolution || "--"),
-    tooltipRow("Codec", lastVideoCodec || "--"),
-  ].join("");
-}
-
-/** Update just the FPS in the latency stats (called from renderer callback) */
-function updateLatencyStatsFps(fps: number): void {
-  lsFps.textContent = `FPS: ${Math.round(fps)}`;
 }
 
 // --- Session info panel ---
@@ -991,6 +460,7 @@ function hideAdminPanel(): void {
 }
 
 async function fetchAdminSessions(): Promise<void> {
+  const currentToken = tokenManager.getToken();
   if (!currentToken) {
     adminSessionsTbody.innerHTML = '<tr><td colspan="6" class="admin-empty">Not authenticated</td></tr>';
     return;
@@ -1059,6 +529,7 @@ async function terminateAdminSession(sessionId: string, btn: HTMLButtonElement):
   btn.disabled = true;
   btn.textContent = "...";
 
+  const currentToken = tokenManager.getToken();
   try {
     const resp = await fetch(`/api/admin/sessions/${sessionId}`, {
       method: "DELETE",
@@ -1405,6 +876,7 @@ function copyStatsToClipboard(): void {
 function startHeartbeat(sessionId: string): void {
   stopHeartbeat();
   heartbeatInterval = setInterval(async () => {
+    const currentToken = tokenManager.getToken();
     if (!currentToken || isReturningToLogin) return;
     try {
       const resp = await fetch(`/api/sessions/${sessionId}/heartbeat`, {
@@ -1412,7 +884,7 @@ function startHeartbeat(sessionId: string): void {
         headers: { Authorization: `Bearer ${currentToken}` },
       });
       if (resp.status === 401) {
-        const refreshed = await refreshToken();
+        const refreshed = await tokenManager.refreshToken();
         if (!refreshed) {
           isReturningToLogin = true;
           stopHeartbeat();
@@ -1432,7 +904,7 @@ function startHeartbeat(sessionId: string): void {
         isReturningToLogin = false;
       }
     } catch {
-      // Network failure — WebRTC reconnect handles connectivity
+      // Network failure -- WebRTC reconnect handles connectivity
     }
   }, 30_000);
 }
@@ -1464,7 +936,7 @@ function stopStatsPolling(): void {
 function recordActivity(): void {
   lastActivity = Date.now();
   if (idleWarningVisible) {
-    hideIdleWarning();
+    idleWarningVisible = hideIdleWarning(idleWarningVisible);
     // Send an immediate heartbeat to reset the server-side idle timer
     // now that the user has returned from being idle.
     sendActivityHeartbeat();
@@ -1476,6 +948,7 @@ function recordActivity(): void {
  *  rather than waiting for the next 30s heartbeat tick. */
 function sendActivityHeartbeat(): void {
   const session = loadSession();
+  const currentToken = tokenManager.getToken();
   if (session && currentToken) {
     fetch(`/api/sessions/${session.session_id}/heartbeat`, {
       method: "POST",
@@ -1484,33 +957,20 @@ function sendActivityHeartbeat(): void {
   }
 }
 
-function showIdleWarning(): void {
-  if (idleWarningVisible) return;
-  idleWarningVisible = true;
-  idleWarning.classList.add("visible");
-  console.warn("Idle timeout warning: session will expire soon due to inactivity");
-}
-
-function hideIdleWarning(): void {
-  if (!idleWarningVisible) return;
-  idleWarningVisible = false;
-  idleWarning.classList.remove("visible");
-}
-
 /** Start periodic idle check. Shows warning when user has been idle
  *  for (idle_timeout - warning_threshold) seconds. */
 function startIdleCheck(): void {
   stopIdleCheck();
   lastActivity = Date.now();
 
-  // idle_timeout=0 means disabled on the server — no warning needed
+  // idle_timeout=0 means disabled on the server -- no warning needed
   if (effectiveIdleTimeoutSecs <= 0) return;
 
   idleCheckInterval = setInterval(() => {
     const idleSecs = (Date.now() - lastActivity) / 1000;
     const warningThreshold = effectiveIdleTimeoutSecs - IDLE_WARNING_BEFORE_SECS;
     if (idleSecs >= warningThreshold) {
-      showIdleWarning();
+      idleWarningVisible = showIdleWarning(idleWarningVisible);
     }
   }, IDLE_CHECK_INTERVAL_MS);
 }
@@ -1520,7 +980,7 @@ function stopIdleCheck(): void {
     clearInterval(idleCheckInterval);
     idleCheckInterval = null;
   }
-  hideIdleWarning();
+  idleWarningVisible = hideIdleWarning(idleWarningVisible);
 }
 
 function handleDisconnect(): void {
@@ -1541,11 +1001,7 @@ function handleDisconnect(): void {
   stopStatsPolling();
   stopHeartbeat();
   stopIdleCheck();
-  if (refreshTimer) {
-    clearTimeout(refreshTimer);
-    refreshTimer = null;
-  }
-  currentToken = null;
+  tokenManager.clearToken();
   currentReleaseToken = null;
   currentSessionId = null;
   prevBytesReceived = 0;
@@ -1571,17 +1027,11 @@ function handleDisconnect(): void {
   hideAdminPanel();
 
   // Hide bandwidth indicator and network quality dot
-  bandwidthIndicator.classList.remove("visible");
-  nqDot.classList.remove("visible");
+  resetNetworkIndicators();
   qualityScoreHistory = [];
 
   // Reset latency stats display
-  lsRtt.textContent = "RTT: --";
-  lsRtt.className = "ls-stat";
-  lsFps.textContent = "FPS: --";
-  lsDecode.textContent = "Dec: --";
-  lsLoss.textContent = "Loss: --";
-  lsTooltip.innerHTML = "";
+  resetLatencyStats();
 
   // Clear saved session
   clearSession();
@@ -1595,75 +1045,12 @@ function handleDisconnect(): void {
   connectBtn.textContent = "Sign in";
 }
 
-const ICON_WIFI_OFF = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-  <line x1="1" y1="1" x2="23" y2="23"></line>
-  <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"></path>
-  <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"></path>
-  <path d="M10.71 5.05A16 16 0 0 1 22.56 9"></path>
-  <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"></path>
-  <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
-  <line x1="12" y1="20" x2="12.01" y2="20"></line>
-</svg>`;
-
-const ICON_TAB = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-  <rect x="3" y="3" width="9" height="9" rx="1" ry="1" fill="currentColor" opacity="0.2"></rect>
-  <line x1="9" y1="3" x2="9" y2="12"></line>
-  <line x1="3" y1="12" x2="21" y2="12"></line>
-</svg>`;
-
-// Track whether the reconnect overlay is showing an auto-reconnect countdown
-// so the reconnect button click can skip the countdown.
-let isAutoReconnectCountdown = false;
-
-function showReconnectOverlay(mode: "disconnected" | "replaced" | "auto-reconnecting" = "disconnected", countdownSeconds?: number): void {
-  if (mode === "replaced") {
-    reconnectIcon.innerHTML = ICON_TAB;
-    reconnectTitle.textContent = "Session in use";
-    reconnectDesc.textContent = "This session was opened in another tab.";
-    reconnectBtn.textContent = "Take back";
-    isAutoReconnectCountdown = false;
-  } else if (mode === "auto-reconnecting" && countdownSeconds !== undefined && countdownSeconds > 0) {
-    reconnectIcon.innerHTML = ICON_WIFI_OFF;
-    reconnectTitle.textContent = "Network change detected";
-    reconnectDesc.textContent = `Reconnecting in ${countdownSeconds}...`;
-    reconnectBtn.textContent = "Reconnect now";
-    isAutoReconnectCountdown = true;
-  } else {
-    reconnectIcon.innerHTML = ICON_WIFI_OFF;
-    reconnectTitle.textContent = "Connection lost";
-    reconnectDesc.textContent = "Your session is still running on the server.";
-    reconnectBtn.textContent = "Reconnect";
-    isAutoReconnectCountdown = false;
-  }
-  reconnectBtn.disabled = false;
-  reconnectOverlay.classList.add("visible");
-  reconnectBtn.focus();
-}
-
-/** Update the reconnect overlay countdown text without resetting focus/layout */
-function updateReconnectCountdown(seconds: number): void {
-  if (seconds > 0) {
-    reconnectDesc.textContent = `Reconnecting in ${seconds}...`;
-  } else {
-    reconnectTitle.textContent = "Reconnecting...";
-    reconnectDesc.textContent = "Re-establishing connection to your session.";
-    reconnectBtn.textContent = "Reconnecting...";
-    reconnectBtn.disabled = true;
-    isAutoReconnectCountdown = false;
-  }
-}
-
-function hideReconnectOverlay(): void {
-  reconnectOverlay.classList.remove("visible");
-  isAutoReconnectCountdown = false;
-}
-
 /** Attempt to reconnect using the existing session */
 async function handleReconnectClick(): Promise<void> {
   if (isReturningToLogin) return;
 
   const session = loadSession();
+  const currentToken = tokenManager.getToken();
   if (!session || !currentToken) {
     handleDisconnect();
     return;
@@ -1674,9 +1061,9 @@ async function handleReconnectClick(): Promise<void> {
   reconnectBtn.textContent = "Reconnecting...";
 
   // Try refreshing the token first (it may have expired during the disconnect)
-  const refreshed = await refreshToken();
+  const refreshed = await tokenManager.refreshToken();
   if (!refreshed) {
-    // Token refresh failed — session is likely gone
+    // Token refresh failed -- session is likely gone
     reconnectBtn.disabled = false;
     reconnectBtn.textContent = defaultLabel;
     reconnectDesc.textContent = "Session expired. Returning to login...";
@@ -1687,7 +1074,7 @@ async function handleReconnectClick(): Promise<void> {
   try {
     hideReconnectOverlay();
     setStatus("connecting", "Reconnecting...");
-    await startConnection(session.session_id, currentToken!);
+    await startConnection(session.session_id, tokenManager.getToken()!);
   } catch {
     reconnectBtn.disabled = false;
     reconnectBtn.textContent = defaultLabel;
@@ -1699,11 +1086,11 @@ async function handleReconnectClick(): Promise<void> {
 /** End the remote session entirely (kills the agent process on the server) */
 function handleEndSession(): void {
   const session = loadSession();
-  const token = currentToken;
+  const token = tokenManager.getToken();
 
   // Belt-and-suspenders: send release beacon before the DELETE call.
   // If the DELETE fails (e.g., network issues), the grace period still runs.
-  sendReleaseBeacon();
+  sendReleaseBeacon(currentSessionId, currentReleaseToken);
 
   // Fire DELETE request before handleDisconnect clears the token
   if (session && token) {
@@ -1783,125 +1170,28 @@ function toggleMute(): void {
 
 async function handleLogin(event: SubmitEvent): Promise<void> {
   event.preventDefault();
-  hideLoginError();
 
-  const username = usernameInput.value.trim();
-  const password = passwordInput.value;
+  const data = await performLogin(setStatus);
+  if (!data) return;
 
-  if (!username || !password) {
-    showLoginError("Username and password are required.");
-    shakeLoginCard();
-    return;
+  // Set up token and session state
+  tokenManager.setToken(data.token);
+  tokenManager.setConnection(connection);
+  currentSessionId = data.session_id;
+  currentReleaseToken = data.release_token ?? null;
+  sessionUsername = usernameInput.value.trim();
+  // Update idle timeout from server response
+  if (data.idle_timeout !== undefined) {
+    effectiveIdleTimeoutSecs = data.idle_timeout;
   }
+  tokenManager.scheduleTokenRefresh();
 
-  connectBtn.disabled = true;
-  connectBtn.textContent = "Signing in...";
-  showLoading("Authenticating...");
-  setStatus("connecting", "Authenticating...");
-
-  const MAX_RETRIES = 3;
-  const BASE_DELAY = 1000;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const response = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(Object.assign({
-          username,
-          password,
-          // Subtract the 28px status bar from viewport height so the remote
-          // desktop resolution matches the actual video area.
-          // Round down to even numbers (H.264 encoders require even dimensions).
-          viewport_width: Math.floor(window.innerWidth / 2) * 2,
-          viewport_height: Math.floor((window.innerHeight - 28) / 2) * 2,
-        }, sessionTimeoutSelect.value ? { idle_timeout: parseInt(sessionTimeoutSelect.value, 10) } : {})),
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        let message = "Authentication failed.";
-        try {
-          const body = JSON.parse(text) as { error?: string };
-          if (body.error) message = body.error;
-        } catch {
-          // Use default message
-        }
-
-        // 429: rate limited -- return to login form with assertive alert + countdown
-        if (response.status === 429) {
-          const retryHeader = response.headers.get("Retry-After");
-          const retryAfter = retryHeader ? parseInt(retryHeader, 10) : undefined;
-          hideLoading();
-          shakeLoginCard();
-          if (retryAfter && retryAfter > 0) {
-            startRateLimitCountdown(retryAfter);
-          } else {
-            showLoginError(message);
-          }
-          setStatus("error", "Rate limited");
-          loginFailureCount = 0; // Reset — server is now tracking
-          return;
-        }
-
-        // Client-side progressive warning (no server-side oracle)
-        if (response.status === 401) {
-          loginFailureCount++;
-          hideLoading();
-          shakeLoginCard();
-          if (loginFailureCount >= 3) {
-            showLoginError(`${message} Multiple failed attempts detected.`);
-          } else {
-            showLoginError(message);
-          }
-          setStatus("error", message);
-          return;
-        }
-
-        // Only retry on 5xx or network errors, not on 4xx (auth failures)
-        if (response.status >= 500 && attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY * Math.pow(2, attempt);
-          updateLoadingStatus(`Retrying (${attempt + 1}/${MAX_RETRIES}) in ${delay}ms...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-
-        throw new Error(message);
-      }
-
-      const data = (await response.json()) as LoginResponse;
-      loginFailureCount = 0; // Reset on success
-
-      // Persist session for reconnect on page refresh / browser crash
-      saveSession(data);
-      localStorage.setItem("beam_username", username);
-      // Save timeout selection for next login
-      localStorage.setItem(SESSION_TIMEOUT_KEY, sessionTimeoutSelect.value);
-      currentToken = data.token;
-      currentSessionId = data.session_id;
-      currentReleaseToken = data.release_token ?? null;
-      sessionUsername = username;
-      // Update idle timeout from server response
-      if (data.idle_timeout !== undefined) {
-        effectiveIdleTimeoutSecs = data.idle_timeout;
-      }
-      scheduleTokenRefresh();
-
-      updateLoadingStatus("Starting session...");
-      await startConnection(data.session_id, data.token);
-      return; // Success
-    } catch (err) {
-      if (attempt < MAX_RETRIES && (!(err instanceof Error) || !err.message.includes("Invalid credentials"))) {
-        const delay = BASE_DELAY * Math.pow(2, attempt);
-        updateLoadingStatus(`Retrying (${attempt + 1}/${MAX_RETRIES}) after error...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        continue;
-      }
-      const message = err instanceof Error ? err.message : "Connection failed.";
-      showLoadingError(message);
-      setStatus("error", message);
-      return;
-    }
+  try {
+    await startConnection(data.session_id, data.token);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Connection failed.";
+    showLoadingError(message);
+    setStatus("error", message);
   }
 }
 
@@ -1933,6 +1223,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   }, 20_000);
 
   connection = new BeamConnection(sessionId, token);
+  tokenManager.setConnection(connection);
   renderer = new Renderer(remoteVideo, desktopView);
 
   // Sync mute button when renderer's mute state changes (e.g. click-to-unmute)
@@ -1941,7 +1232,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   // Apply saved audio preference. If the user previously unmuted, the
   // click-to-unmute one-shot in Renderer will also fire on first click,
   // but we can pre-set the state here. Due to browser autoplay policy,
-  // unmuting only takes effect after user interaction — the one-shot click
+  // unmuting only takes effect after user interaction -- the one-shot click
   // handler in Renderer covers that case.
   const savedMuted = localStorage.getItem(AUDIO_MUTED_KEY);
   if (savedMuted === "false") {
@@ -2048,7 +1339,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
           } else {
             connection?.sendInput({ t: "q", mode });
           }
-          updateQualitySelectDisplay();
+          updateQualitySelectDisplay(qualityMode, autoQualityLevel);
         };
       }
 
@@ -2079,7 +1370,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     qualityMode = savedQuality as "auto" | "high" | "low";
     const effectiveQuality = qualityMode === "auto" ? autoQualityLevel : qualityMode;
     sendInput({ t: "q", mode: effectiveQuality });
-    updateQualitySelectDisplay();
+    updateQualitySelectDisplay(qualityMode, autoQualityLevel);
 
     if (!fileUploader) {
       fileUploader = new FileUploader(sendInput);
@@ -2149,7 +1440,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
     // Show reconnect overlay instead of going back to login.
     // Keep token and session intact so user can reconnect without re-login.
     showReconnectOverlay();
-    // Restart heartbeat — onDisconnect already stopped it, but we need it
+    // Restart heartbeat -- onDisconnect already stopped it, but we need it
     // to detect if the server-side session dies while the overlay is shown.
     const session = loadSession();
     if (session) {
@@ -2210,6 +1501,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   await connection.connect();
 }
 
+// --- Global keyboard shortcuts ---
 // F1 help overlay, F8 mute toggle, F9 performance overlay, F11 fullscreen, F12 screenshot
 document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "F1") {
@@ -2246,6 +1538,8 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
     toggleClipboardHistoryPanel();
   }
 });
+
+// --- Event listeners ---
 
 // Listen for login form submission
 loginForm.addEventListener("submit", (e: SubmitEvent) => {
@@ -2294,7 +1588,6 @@ adminPanelOverlay.addEventListener("click", (e) => {
 });
 
 // Session info panel copy stats button
-const sipCopyStatsBtn = document.getElementById("sip-copy-stats") as HTMLButtonElement;
 sipCopyStatsBtn.addEventListener("click", () => {
   copyStatsToClipboard();
 });
@@ -2322,6 +1615,8 @@ loadingCancel.addEventListener("click", () => {
   }
   connection?.disconnect();
   connection = null;
+  // Clear any running rate-limit countdown
+  clearRateLimitTimer();
   hideLoading();
   setStatus("disconnected", "Disconnected");
 });
@@ -2341,7 +1636,7 @@ document.addEventListener("keydown", recordActivity);
 // If the user returns (page refresh, back button), the session reconnects
 // and cancels the grace period.
 window.addEventListener("beforeunload", () => {
-  sendReleaseBeacon();
+  sendReleaseBeacon(currentSessionId, currentReleaseToken);
 });
 
 // When the tab becomes visible after being backgrounded, fire an immediate
@@ -2360,6 +1655,7 @@ document.addEventListener("visibilitychange", () => {
     connection.sendInput({ t: "vs", visible });
   }
 
+  const currentToken = tokenManager.getToken();
   if (visible && currentToken && heartbeatInterval) {
     const session = loadSession();
     if (session) {
@@ -2373,9 +1669,6 @@ document.addEventListener("visibilitychange", () => {
 
 // --- File upload: drag-and-drop + button ---
 
-const fileDropOverlay = document.getElementById("file-drop-overlay") as HTMLDivElement;
-const btnUpload = document.getElementById("btn-upload") as HTMLButtonElement;
-const fileUploadInput = document.getElementById("file-upload-input") as HTMLInputElement;
 let dragCounter = 0;
 
 desktopView.addEventListener("dragenter", (e: DragEvent) => {
@@ -2439,7 +1732,6 @@ fileUploadInput.addEventListener("change", () => {
 
 // --- File download button ---
 
-const btnDownload = document.getElementById("btn-download") as HTMLButtonElement;
 btnDownload.addEventListener("click", () => {
   const path = window.prompt("Enter file path on remote desktop (relative to home or absolute):");
   if (path && connection) {
@@ -2451,14 +1743,6 @@ btnDownload.addEventListener("click", () => {
 // --- Mobile FAB and virtual keyboard ---
 
 const isTouchDevice = "ontouchstart" in window || navigator.maxTouchPoints > 0;
-const mobileFab = document.getElementById("mobile-fab") as HTMLDivElement;
-const mobileFabToggle = document.getElementById("mobile-fab-toggle") as HTMLButtonElement;
-const mobileFabMenu = document.getElementById("mobile-fab-menu") as HTMLDivElement;
-const fabKeyboard = document.getElementById("fab-keyboard") as HTMLButtonElement;
-const fabFullscreen = document.getElementById("fab-fullscreen") as HTMLButtonElement;
-const fabScreenshot = document.getElementById("fab-screenshot") as HTMLButtonElement;
-const fabDisconnect = document.getElementById("fab-disconnect") as HTMLButtonElement;
-const mobileKeyboardInput = document.getElementById("mobile-keyboard-input") as HTMLInputElement;
 
 let fabOpen = false;
 
@@ -2561,6 +1845,8 @@ if (isTouchDevice) {
   desktopView.addEventListener("touchmove", recordActivity);
 }
 
+// --- Initialization ---
+
 // Pre-fill username from last successful login
 const savedUsername = localStorage.getItem("beam_username");
 if (savedUsername) {
@@ -2576,7 +1862,7 @@ if (savedQualityMode) {
   if (qualitySelect) {
     qualitySelect.value = savedQualityMode;
   }
-  updateQualitySelectDisplay();
+  updateQualitySelectDisplay(qualityMode, autoQualityLevel);
 }
 
 // Restore saved session timeout selection
@@ -2610,14 +1896,14 @@ if (savedSession) {
         throw new Error("Session not found on server");
       }
 
-      currentToken = savedSession.token;
+      tokenManager.setToken(savedSession.token);
       currentSessionId = savedSession.session_id;
       currentReleaseToken = savedSession.release_token ?? null;
       sessionUsername = localStorage.getItem("beam_username");
       if (savedSession.idle_timeout !== undefined) {
         effectiveIdleTimeoutSecs = savedSession.idle_timeout;
       }
-      scheduleTokenRefresh();
+      tokenManager.scheduleTokenRefresh();
       showLoading("Resuming session...");
       startConnection(savedSession.session_id, savedSession.token);
     } catch (err) {

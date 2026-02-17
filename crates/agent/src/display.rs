@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use tracing::{debug, info, warn};
 
@@ -247,20 +248,30 @@ impl VirtualDisplay {
             );
 
             let pulse_server = format!("unix:/tmp/beam-pulse-{}/native", self.display_num);
-            let child = Command::new("/usr/bin/dbus-launch")
-                .arg("--exit-with-session")
-                .arg("xfce4-session")
-                .env("DISPLAY", &display)
-                .env("PULSE_SERVER", &pulse_server)
-                .env("XDG_CONFIG_HOME", &xfce_config_dir)
-                // Include GNOME in desktop list so Electron apps (VS Code)
-                // auto-detect gnome-libsecret for credential storage.
-                // Without this, XFCE falls through to "basic" (weaker encryption).
-                .env("XDG_CURRENT_DESKTOP", "XFCE:GNOME")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .context("Failed to start XFCE4 desktop via dbus-launch")?;
+            let child = unsafe {
+                Command::new("/usr/bin/dbus-launch")
+                    .arg("--exit-with-session")
+                    .arg("xfce4-session")
+                    .env("DISPLAY", &display)
+                    .env("PULSE_SERVER", &pulse_server)
+                    .env("XDG_CONFIG_HOME", &xfce_config_dir)
+                    // Include GNOME in desktop list so Electron apps (VS Code)
+                    // auto-detect gnome-libsecret for credential storage.
+                    // Without this, XFCE falls through to "basic" (weaker encryption).
+                    .env("XDG_CURRENT_DESKTOP", "XFCE:GNOME")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    // Create a new session (process group) so we can kill all
+                    // grandchildren (xfwm4, xfce4-panel, etc.) on cleanup.
+                    .pre_exec(|| {
+                        if libc::setsid() == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    })
+                    .spawn()
+                    .context("Failed to start XFCE4 desktop via dbus-launch")?
+            };
 
             info!(
                 display = self.display_num,
@@ -602,6 +613,39 @@ impl Drop for VirtualDisplay {
             let _ = child.wait();
         }
 
+        /// Stop a desktop process group: sends SIGTERM to the entire process
+        /// group (negative PID) to reach grandchildren (xfwm4, xfce4-panel,
+        /// etc.) spawned by dbus-launch -> xfce4-session. Falls back to
+        /// SIGKILL after a brief wait if processes are still alive.
+        fn stop_desktop_group(child: &mut Child, display_num: u32) {
+            match child.try_wait() {
+                Ok(Some(_)) => return, // already exited
+                Ok(None) => {}         // still running
+                Err(_) => return,
+            }
+            let pid = child.id() as i32;
+            debug!(display = display_num, pid, "Stopping desktop process group");
+            // Send SIGTERM to the entire process group (negative PID)
+            unsafe {
+                libc::kill(-pid, libc::SIGTERM);
+            }
+            // Brief wait for graceful shutdown
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            // Check if the lead process exited
+            match child.try_wait() {
+                Ok(Some(_)) => (),
+                Ok(None) => {
+                    // Still alive — escalate to SIGKILL on the group
+                    debug!(display = display_num, pid, "Desktop group still alive, sending SIGKILL");
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                    let _ = child.wait();
+                }
+                Err(_) => {}
+            }
+        }
+
         // Stop cursor hider
         if let Some(ref mut child) = self.cursor_child {
             stop_child(child, "unclutter", self.display_num);
@@ -610,9 +654,9 @@ impl Drop for VirtualDisplay {
         if let Some(ref mut child) = self.pulse_child {
             stop_child(child, "pulseaudio", self.display_num);
         }
-        // Stop desktop environment
+        // Stop desktop environment (kill entire process group)
         if let Some(ref mut child) = self.desktop_child {
-            stop_child(child, "desktop", self.display_num);
+            stop_desktop_group(child, self.display_num);
         }
         // Stop Xorg
         if let Some(ref mut child) = self.xorg_child {

@@ -385,7 +385,7 @@ async fn login(
     let username = req.username.clone();
     let password = req.password.clone();
     let pam_result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(30),
         tokio::task::spawn_blocking(move || auth::authenticate_pam(&username, &password)),
     )
     .await;
@@ -393,7 +393,7 @@ async fn login(
     match pam_result {
         Err(_) => {
             // PAM timeout counts as a failure (may indicate LDAP being hammered)
-            tracing::warn!(username = %req.username, "PAM authentication timed out (10s)");
+            tracing::warn!(username = %req.username, "PAM authentication timed out (30s)");
             state.login_limiter.record_failure(&req.username);
             state.ip_limiter.record_failure(&peer_ip);
             state

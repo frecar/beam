@@ -644,7 +644,8 @@ impl SessionManager {
                 let _ = std::fs::create_dir_all(&runtime_dir);
                 // Set ownership to the target user
                 unsafe {
-                    let c_path = std::ffi::CString::new(runtime_dir.as_str()).unwrap();
+                    let c_path = std::ffi::CString::new(runtime_dir.as_str())
+                        .map_err(|e| anyhow::anyhow!("Invalid runtime dir path: {e}"))?;
                     libc::chown(c_path.as_ptr(), user_info.uid, user_info.gid);
                 }
                 cmd.env("XDG_RUNTIME_DIR", &runtime_dir);

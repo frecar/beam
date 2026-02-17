@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.22] - 2026-02-17
+
+Code quality, performance, and documentation release: major refactoring of both Rust and TypeScript codebases, capture pipeline optimizations, robustness improvements, and documentation accuracy fixes.
+
+### Changed
+- Agent `main.rs` decomposed from 1801 to 1040 lines -- extracted `cli.rs`, `signaling.rs`, `video.rs`, `clipboard_sync.rs`, `file_transfer_task.rs`, `abr.rs` modules
+- Web `main.ts` decomposed from 2629 to 1915 lines -- extracted `session.ts`, `ui-state.ts`, `settings.ts`, `login.ts` modules
+- Alpha fill loop optimized with u32 OR mask (SIMD-friendly, ~4x fewer iterations at 4K)
+- Encoder drain loop: replaced CPU-burning spin_loop() with 100us sleep polling
+- File downloads now stream chunks via bounded channel (~350KB peak) instead of collecting all in memory (~135MB peak for 100MB file)
+- Desktop process cleanup uses process group kill (setsid + kill -pgid) to properly terminate XFCE grandchild processes
+- PAM authentication timeout updated to 30 seconds
+- CString construction in session spawn uses proper error propagation instead of unwrap()
+
+### Fixed
+- README architecture diagram: corrected "uinput injection" to "XTEST injection" (uinput removed in v0.1.14)
+- README and landing page: ABR claims now accurately note NVIDIA uses fixed high-quality CBR
+- Capture backpressure: frames skipped when buffer pool exhausted instead of unbounded heap allocation
+
+### Added
+- `min_bitrate` and `max_bitrate` documented in README config example (VA-API/software encoders only)
+- Screenshot placeholder in README (TODO: add actual screenshot)
+
 ## [0.1.21] - 2026-02-17
 
 Security hardening release: rate limiting improvements, file permission tightening, systemd sandboxing, accessibility fixes, and first-boot reliability.

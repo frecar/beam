@@ -1,33 +1,53 @@
+mod abr;
 mod audio;
 mod capture;
+mod cli;
 mod clipboard;
+mod clipboard_sync;
 mod cursor;
 mod display;
 mod encoder;
+mod file_transfer_task;
 mod filetransfer;
 mod h264;
 mod input;
 mod peer;
+mod signaling;
+mod video;
 
 use anyhow::Context;
 use audio::AudioCapture;
-use beam_protocol::{AgentCommand, InputEvent, SignalingMessage};
+use beam_protocol::{InputEvent, SignalingMessage};
 use capture::ScreenCapture;
+use cli::{DEFAULT_FRAMERATE, LOW_BITRATE, LOW_FRAMERATE};
 use clipboard::ClipboardBridge;
 use encoder::Encoder;
 use input::InputInjector;
 use peer::{PeerConfig, SharedPeer};
+use signaling::SignalingCtx;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
-const DEFAULT_BITRATE: u32 = 100_000; // 100 Mbps — for VA-API/software encoders
-const LOW_BITRATE: u32 = 5_000; // 5 Mbps — for constrained WAN connections
-const DEFAULT_FRAMERATE: u32 = 60; // 60fps — higher rates cause WebRTC bufferbloat (RTT spikes to seconds)
-const LOW_FRAMERATE: u32 = 30; // 30fps for low quality mode
+/// Commands sent from async tasks to the capture thread.
+/// Using a command channel lets the capture thread exclusively own (and recreate)
+/// the Encoder and ScreenCapture during dynamic resolution changes.
+pub(crate) enum CaptureCommand {
+    SetBitrate(u32),
+    Resize {
+        width: u32,
+        height: u32,
+    },
+    /// Switch quality mode: true = high (LAN), false = low (WAN)
+    SetQualityHigh(bool),
+    /// Recreate the encoder pipeline to guarantee a fresh IDR frame.
+    /// Used on WebRTC reconnection -- ForceKeyUnit events are unreliable
+    /// on nvh264enc after long P-frame runs with gop-size=MAX.
+    ResetEncoder,
+}
+
 /// Shared context for building the input event callback.
 struct InputCallbackCtx {
     injector: Arc<Mutex<InputInjector>>,
@@ -277,232 +297,6 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
     })
 }
 
-/// Commands sent from async tasks to the capture thread.
-/// Using a command channel lets the capture thread exclusively own (and recreate)
-/// the Encoder and ScreenCapture during dynamic resolution changes.
-enum CaptureCommand {
-    SetBitrate(u32),
-    Resize {
-        width: u32,
-        height: u32,
-    },
-    /// Switch quality mode: true = high (LAN), false = low (WAN)
-    SetQualityHigh(bool),
-    /// Recreate the encoder pipeline to guarantee a fresh IDR frame.
-    /// Used on WebRTC reconnection — ForceKeyUnit events are unreliable
-    /// on nvh264enc after long P-frame runs with gop-size=MAX.
-    ResetEncoder,
-}
-
-struct Args {
-    display: String,
-    server_url: String,
-    session_id: Uuid,
-    ice_servers_json: Option<String>,
-    agent_token: Option<String>,
-    tls_cert_path: Option<String>,
-    width: u32,
-    height: u32,
-    framerate: u32,
-    bitrate: u32,
-    min_bitrate: u32,
-    max_bitrate: u32,
-    encoder: Option<String>,
-    max_width: u32,
-    max_height: u32,
-}
-
-fn parse_args() -> anyhow::Result<Args> {
-    let mut display = ":0".to_string();
-    let mut server_url = String::new();
-    let mut session_id = None;
-    let mut ice_servers_json = None;
-    let mut agent_token = None;
-    let mut tls_cert_path = None;
-    let mut width: u32 = 1920;
-    let mut height: u32 = 1080;
-    let mut framerate: u32 = DEFAULT_FRAMERATE;
-    let mut bitrate: u32 = DEFAULT_BITRATE;
-    let mut min_bitrate: u32 = 5_000;
-    let mut max_bitrate: u32 = 80_000;
-    let mut encoder: Option<String> = None;
-    let mut max_width: u32 = 3840;
-    let mut max_height: u32 = 2160;
-
-    let args: Vec<String> = std::env::args().collect();
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-V" | "--version" => {
-                println!("beam-agent {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
-            "-h" | "--help" => {
-                println!("beam-agent - Beam Remote Desktop capture agent");
-                println!();
-                println!("USAGE:");
-                println!("    beam-agent [OPTIONS]");
-                println!();
-                println!("OPTIONS:");
-                println!("    --display <DISPLAY>          X11 display [default: :0]");
-                println!("    --server-url <URL>           Signaling server WebSocket URL");
-                println!("    --session-id <UUID>          Session identifier (required)");
-                println!("    --ice-servers <JSON>         ICE server configuration (JSON)");
-                println!(
-                    "    --agent-token <TOKEN>        Agent authentication token (prefer BEAM_AGENT_TOKEN env)"
-                );
-                println!(
-                    "    --tls-cert <PATH>            TLS certificate to pin for server connection"
-                );
-                println!("    --width <PIXELS>             Initial display width [default: 1920]");
-                println!("    --height <PIXELS>            Initial display height [default: 1080]");
-                println!("    --framerate <FPS>            Target framerate [default: 60]");
-                println!(
-                    "    --bitrate <KBPS>             Initial video bitrate [default: 100000]"
-                );
-                println!(
-                    "    --min-bitrate <KBPS>         Adaptive bitrate lower bound [default: 5000]"
-                );
-                println!(
-                    "    --max-bitrate <KBPS>         Adaptive bitrate upper bound [default: 80000]"
-                );
-                println!(
-                    "    --encoder <NAME>             Force encoder (nvh264enc, vah264enc, x264enc)"
-                );
-                println!("    --max-width <PIXELS>         Maximum resize width [default: 3840]");
-                println!("    --max-height <PIXELS>        Maximum resize height [default: 2160]");
-                println!("    -V, --version                Print version and exit");
-                println!("    -h, --help                   Print this help and exit");
-                std::process::exit(0);
-            }
-            "--display" => {
-                i += 1;
-                display = args.get(i).context("Missing --display value")?.clone();
-            }
-            "--server-url" => {
-                i += 1;
-                server_url = args.get(i).context("Missing --server-url value")?.clone();
-            }
-            "--session-id" => {
-                i += 1;
-                session_id = Some(
-                    args.get(i)
-                        .context("Missing --session-id value")?
-                        .parse::<Uuid>()
-                        .context("Invalid session-id UUID")?,
-                );
-            }
-            "--ice-servers" => {
-                i += 1;
-                ice_servers_json =
-                    Some(args.get(i).context("Missing --ice-servers value")?.clone());
-            }
-            "--agent-token" => {
-                // Legacy CLI support (prefer BEAM_AGENT_TOKEN env var)
-                i += 1;
-                agent_token = Some(args.get(i).context("Missing --agent-token value")?.clone());
-            }
-            "--tls-cert" => {
-                i += 1;
-                tls_cert_path = Some(args.get(i).context("Missing --tls-cert value")?.clone());
-            }
-            "--width" => {
-                i += 1;
-                width = args
-                    .get(i)
-                    .context("Missing --width value")?
-                    .parse()
-                    .context("Invalid --width value")?;
-            }
-            "--height" => {
-                i += 1;
-                height = args
-                    .get(i)
-                    .context("Missing --height value")?
-                    .parse()
-                    .context("Invalid --height value")?;
-            }
-            "--framerate" => {
-                i += 1;
-                framerate = args
-                    .get(i)
-                    .context("Missing --framerate value")?
-                    .parse()
-                    .context("Invalid --framerate value")?;
-            }
-            "--bitrate" => {
-                i += 1;
-                bitrate = args
-                    .get(i)
-                    .context("Missing --bitrate value")?
-                    .parse()
-                    .context("Invalid --bitrate value")?;
-            }
-            "--min-bitrate" => {
-                i += 1;
-                min_bitrate = args
-                    .get(i)
-                    .context("Missing --min-bitrate value")?
-                    .parse()
-                    .context("Invalid --min-bitrate value")?;
-            }
-            "--max-bitrate" => {
-                i += 1;
-                max_bitrate = args
-                    .get(i)
-                    .context("Missing --max-bitrate value")?
-                    .parse()
-                    .context("Invalid --max-bitrate value")?;
-            }
-            "--encoder" => {
-                i += 1;
-                encoder = Some(args.get(i).context("Missing --encoder value")?.clone());
-            }
-            "--max-width" => {
-                i += 1;
-                max_width = args
-                    .get(i)
-                    .context("Missing --max-width value")?
-                    .parse()
-                    .context("Invalid --max-width value")?;
-            }
-            "--max-height" => {
-                i += 1;
-                max_height = args
-                    .get(i)
-                    .context("Missing --max-height value")?
-                    .parse()
-                    .context("Invalid --max-height value")?;
-            }
-            other => anyhow::bail!("Unknown argument: {other}"),
-        }
-        i += 1;
-    }
-
-    // Prefer env var for agent token (CLI args are visible in /proc)
-    if agent_token.is_none() {
-        agent_token = std::env::var("BEAM_AGENT_TOKEN").ok();
-    }
-
-    Ok(Args {
-        display,
-        server_url,
-        session_id: session_id.context("--session-id is required")?,
-        ice_servers_json,
-        agent_token,
-        tls_cert_path,
-        width,
-        height,
-        framerate,
-        bitrate,
-        min_bitrate,
-        max_bitrate,
-        encoder,
-        max_width,
-        max_height,
-    })
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install rustls crypto provider (needed for TLS WebSocket to server)
@@ -519,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
 
     gstreamer::init().context("Failed to initialize GStreamer")?;
 
-    let args = parse_args()?;
+    let args = cli::parse_args()?;
     info!(
         display = %args.display,
         session_id = %args.session_id,
@@ -631,14 +425,14 @@ async fn main() -> anyhow::Result<()> {
     let config_min_bitrate = args.min_bitrate;
     let config_max_bitrate = args.max_bitrate;
 
-    // Channel for encoded video frames: capture thread → async write loop
+    // Channel for encoded video frames: capture thread -> async write loop
     // Capacity of 2: reduces frame drops under burst while keeping latency low.
     // Combined with max-buffers=1 on appsink, total pipeline depth is at most
     // 3 frames (~25ms at 120fps). Frames are dropped rather than queued when
     // the channel is full.
     let (encoded_tx, mut encoded_rx) = mpsc::channel::<Vec<u8>>(2);
 
-    // Channel for encoded audio frames: audio thread → async write loop
+    // Channel for encoded audio frames: audio thread -> async write loop
     let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(8);
 
     // Channel for signaling messages to send back to server
@@ -646,7 +440,7 @@ async fn main() -> anyhow::Result<()> {
 
     let session_id = args.session_id;
 
-    // Create input injector (uses XTEST extension — no uinput needed)
+    // Create input injector (uses XTEST extension -- no uinput needed)
     let input_width = Arc::new(std::sync::atomic::AtomicU32::new(args.width));
     let input_height = Arc::new(std::sync::atomic::AtomicU32::new(args.height));
     let injector = Arc::new(Mutex::new(
@@ -687,10 +481,10 @@ async fn main() -> anyhow::Result<()> {
     let capture_wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let capture_wake_for_input = Arc::clone(&capture_wake);
 
-    // Channel for clipboard read requests (Ctrl+C/X detection → read X11 clipboard)
+    // Channel for clipboard read requests (Ctrl+C/X detection -> read X11 clipboard)
     let (clipboard_read_tx, mut clipboard_read_rx) = mpsc::channel::<()>(4);
 
-    // Channel for file download requests (browser → agent → browser via DataChannel)
+    // Channel for file download requests (browser -> agent -> browser via DataChannel)
     let (download_request_tx, mut download_request_rx) = mpsc::channel::<String>(4);
 
     // Cursor shape monitor: tracks X11 cursor changes via XFixes and sends
@@ -708,7 +502,7 @@ async fn main() -> anyhow::Result<()> {
     let tab_backgrounded = Arc::new(AtomicBool::new(false));
     let tab_backgrounded_for_capture = Arc::clone(&tab_backgrounded);
 
-    // File transfer manager — writes uploads to ~/Downloads
+    // File transfer manager -- writes uploads to ~/Downloads
     let home_dir = std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
@@ -751,8 +545,8 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_for_audio = Arc::clone(&shutdown);
 
     // Capture + encode thread
-    const IDLE_TIMEOUT_MS: u64 = 300_000; // 5 minutes of no input → idle mode
-    const IDLE_FRAMERATE: u32 = 5; // Low framerate when no input — saves GPU/CPU
+    const IDLE_TIMEOUT_MS: u64 = 300_000; // 5 minutes of no input -> idle mode
+    const IDLE_FRAMERATE: u32 = 5; // Low framerate when no input -- saves GPU/CPU
     const BACKGROUND_FRAMERATE: u32 = 1; // Minimal framerate when browser tab is hidden
 
     let display_for_capture = args.display.clone();
@@ -915,7 +709,7 @@ async fn main() -> anyhow::Result<()> {
                 let frame_start = Instant::now();
                 let pts = start.elapsed().as_nanos() as u64;
 
-                // Check background state: browser tab hidden → minimal framerate
+                // Check background state: browser tab hidden -> minimal framerate
                 let is_backgrounded = tab_backgrounded_for_capture.load(Ordering::Relaxed);
 
                 // Check idle state: if no input for IDLE_TIMEOUT_MS, reduce framerate
@@ -993,7 +787,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                // Drain encoded frames. NVENC is async — the frame we just
+                // Drain encoded frames. NVENC is async -- the frame we just
                 // pushed may not be ready yet. Spin-poll for up to 2ms to catch
                 // it in this iteration rather than waiting for the next capture
                 // cycle (which adds up to 8.3ms of unnecessary latency at 120fps).
@@ -1052,7 +846,7 @@ async fn main() -> anyhow::Result<()> {
                 if elapsed < target {
                     let remaining = target - elapsed;
                     if is_idle || is_backgrounded {
-                        // Idle/background mode: interruptible wait — visibility change
+                        // Idle/background mode: interruptible wait -- visibility change
                         // or input wakes us immediately
                         let (lock, cvar) = &*capture_wake_for_thread;
                         let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -1127,7 +921,7 @@ async fn main() -> anyhow::Result<()> {
     // Resize forwarder (from tokio channel to capture thread)
     let cmd_tx_for_resize = capture_cmd_tx;
 
-    // Clipboard sync (remote → browser)
+    // Clipboard sync (remote -> browser)
     let clipboard_for_sync = Arc::clone(&clipboard);
 
     // Set up SIGTERM handler
@@ -1148,197 +942,22 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::select! {
         // Write encoded video frames to WebRTC (only when connected)
-        _ = async {
-            let frame_duration = Duration::from_nanos(1_000_000_000u64 / config_framerate as u64);
-            let mut video_frame_count: u64 = 0;
-            let mut dropped_count: u64 = 0;
-            let mut was_connected = false;
-            let mut waiting_for_idr = false;
-            let mut idr_wait_start = Instant::now();
-            let mut idr_wait_attempts: u32 = 0;
-            let mut error_count: u64 = 0;
-            let mut encoder_reset_count: u32 = 0;
-            const MAX_ENCODER_RESETS: u32 = 3;
-            let mut current_peer_gen: u64 = 0;
-            // Health-check: frames written since last packets_sent check
-            let mut frames_since_health_check: u64 = 0;
-            let mut last_health_check = Instant::now();
-            while let Some(data) = encoded_rx.recv().await {
-                let (current_peer, peer_gen) = peer::snapshot_with_gen(&shared_peer).await;
-
-                // Detect peer swap: unconditionally reset video loop state.
-                // This is the critical fix: the old pattern relied on detecting
-                // an is_connected() false->true transition, which can be missed
-                // if the swap + reconnect happens between loop iterations.
-                if peer_gen != current_peer_gen {
-                    if current_peer_gen != 0 {
-                        info!(
-                            old_peer_gen = current_peer_gen, new_peer_gen = peer_gen,
-                            "Peer generation changed, resetting video loop state"
-                        );
-                    }
-                    current_peer_gen = peer_gen;
-                    was_connected = false;
-                    waiting_for_idr = false;
-                    dropped_count = 0;
-                    video_frame_count = 0;
-                    error_count = 0;
-                    encoder_reset_count = 0;
-                    frames_since_health_check = 0;
-                    last_health_check = Instant::now();
-                }
-
-                // Skip frames when WebRTC isn't connected yet
-                if !current_peer.is_connected() {
-                    dropped_count += 1;
-                    was_connected = false;
-                    if dropped_count == 1 || dropped_count.is_multiple_of(300) {
-                        debug!(dropped_count, peer_gen, "Dropping video frame (not connected)");
-                    }
-                    continue;
-                }
-
-                // Force IDR keyframe on first connected frame so the browser
-                // decoder can initialize.
-                if !was_connected {
-                    info!(dropped_before_connect = dropped_count, peer_gen, "WebRTC connected, forcing IDR keyframe");
-                    force_keyframe.store(true, Ordering::Relaxed);
-                    was_connected = true;
-                    waiting_for_idr = true;
-                    idr_wait_start = Instant::now();
-                    idr_wait_attempts = 0;
-                    error_count = 0;
-                    frames_since_health_check = 0;
-                    last_health_check = Instant::now();
-                    // Don't `continue` here — the current frame may already be
-                    // an IDR from a freshly recreated encoder. Let it fall
-                    // through to the waiting_for_idr check below.
-                }
-
-                let is_idr = h264::h264_contains_idr(&data);
-
-                if waiting_for_idr {
-                    if !is_idr {
-                        // Timeout: if IDR hasn't arrived within 500ms, force
-                        // another keyframe. Bail after 5 attempts to avoid
-                        // spinning forever if the encoder can't produce IDR.
-                        if idr_wait_start.elapsed() > Duration::from_millis(500) {
-                            idr_wait_attempts += 1;
-                            if idr_wait_attempts > 5 {
-                                if encoder_reset_count < MAX_ENCODER_RESETS {
-                                    encoder_reset_count += 1;
-                                    warn!(
-                                        attempts = idr_wait_attempts,
-                                        reset = encoder_reset_count,
-                                        max_resets = MAX_ENCODER_RESETS,
-                                        peer_gen,
-                                        "Failed to get IDR, resetting encoder pipeline"
-                                    );
-                                    let _ = cmd_tx_for_video.send(CaptureCommand::ResetEncoder);
-                                    idr_wait_start = Instant::now();
-                                    idr_wait_attempts = 0;
-                                } else {
-                                    error!(
-                                        resets = encoder_reset_count, peer_gen,
-                                        "Exhausted encoder resets, proceeding with P-frames"
-                                    );
-                                    waiting_for_idr = false;
-                                }
-                            } else {
-                                info!(
-                                    attempt = idr_wait_attempts,
-                                    waited_ms = idr_wait_start.elapsed().as_millis() as u64,
-                                    peer_gen,
-                                    "IDR wait timeout, forcing another keyframe"
-                                );
-                                force_keyframe.store(true, Ordering::Relaxed);
-                                idr_wait_start = Instant::now();
-                            }
-                        }
-                        if waiting_for_idr {
-                            continue;
-                        }
-                    }
-                    info!(
-                        size = data.len(),
-                        waited_ms = idr_wait_start.elapsed().as_millis() as u64,
-                        peer_gen,
-                        "First IDR frame after connect"
-                    );
-                    waiting_for_idr = false;
-                }
-
-                let data_len = data.len();
-                if video_frame_count < 5 {
-                    let hex_preview: String = data.iter().take(32).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                    debug!(size = data_len, is_idr, hex = %hex_preview, "Frame NAL bytes (pre-write)");
-                }
-                match current_peer.write_video_sample(data, frame_duration.as_nanos() as u64).await {
-                    Ok(()) => {
-                        video_frame_count += 1;
-                        frames_since_health_check += 1;
-                        if video_frame_count <= 5 {
-                            info!(size = data_len, is_idr, frame = video_frame_count, peer_gen, "Video frame written to WebRTC");
-                        }
-                        if video_frame_count.is_multiple_of(300) {
-                            info!(video_frame_count, peer_gen, "Video frames written to WebRTC");
-                        }
-
-                        // Health check: after writing frames for 5+ seconds,
-                        // verify that RTP packets are actually being sent.
-                        // webrtc-rs silently returns Ok from write_sample when
-                        // the track's internal write pipeline is broken (no
-                        // packetizer, empty bindings, or paused sender).
-                        if frames_since_health_check >= 150
-                            && last_health_check.elapsed() >= Duration::from_secs(5)
-                        {
-                            let packets = current_peer.video_packets_sent().await;
-                            if packets == 0 {
-                                warn!(
-                                    frames_written = frames_since_health_check,
-                                    peer_gen,
-                                    "STUCK PEER: wrote {} frames but packets_sent=0. \
-                                     RTP pipeline is broken (silent write_sample drop). \
-                                     Forcing keyframe and waiting for next peer swap.",
-                                    frames_since_health_check
-                                );
-                                // Force a keyframe in case the encoder state is stale
-                                force_keyframe.store(true, Ordering::Relaxed);
-                                // Reset so we re-check later
-                                was_connected = false;
-                                waiting_for_idr = false;
-                            } else {
-                                debug!(packets, frames_since_health_check, "Video health check passed");
-                            }
-                            frames_since_health_check = 0;
-                            last_health_check = Instant::now();
-                        }
-                    }
-                    Err(e) => {
-                        error_count += 1;
-                        if error_count <= 3 || error_count.is_multiple_of(100) {
-                            warn!(error_count, peer_gen, "Write video sample: {e:#}");
-                        }
-                    }
-                }
-            }
-            info!("Video frame channel closed");
-        } => {}
+        _ = video::run_video_send_loop(
+            &mut encoded_rx,
+            &shared_peer,
+            &force_keyframe,
+            &cmd_tx_for_video,
+            config_framerate,
+        ) => {}
 
         // Write encoded audio frames to WebRTC
-        _ = async {
-            let audio_duration_ns = Duration::from_millis(20).as_nanos() as u64;
-            while let Some(data) = audio_rx.recv().await {
-                let current_peer = peer::snapshot(&shared_peer).await;
-                if let Err(e) = current_peer.write_audio_sample(&data, audio_duration_ns).await {
-                    debug!("Write audio sample: {e:#}");
-                }
-            }
-            info!("Audio frame channel closed");
-        } => {}
+        _ = video::run_audio_send_loop(
+            &mut audio_rx,
+            &shared_peer,
+        ) => {}
 
         // Handle signaling WebSocket
-        _ = run_signaling(
+        _ = signaling::run_signaling(
             &signaling_ctx,
             &mut signal_rx,
         ) => {}
@@ -1352,66 +971,18 @@ async fn main() -> anyhow::Result<()> {
         } => {}
 
         // Clipboard sync: after Ctrl+C/X, read X11 clipboard and send to browser
-        _ = async {
-            while let Some(()) = clipboard_read_rx.recv().await {
-                // Brief delay so the X11 app has time to write to the clipboard
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let text = {
-                    let cb = clipboard_for_sync.lock().unwrap_or_else(|e| e.into_inner());
-                    cb.get_text()
-                };
-                match text {
-                    Ok(Some(ref text)) if !text.is_empty() => {
-                        const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
-                        if text.len() <= MAX_CLIPBOARD_BYTES {
-                            let msg = serde_json::json!({ "t": "c", "text": text }).to_string();
-                            let current_peer = peer::snapshot(&shared_peer).await;
-                            if let Err(e) = current_peer.send_data_channel_message(&msg).await {
-                                warn!("Failed to send clipboard to browser: {e:#}");
-                            } else {
-                                info!(len = text.len(), "Clipboard text sent to browser");
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        info!("Clipboard read returned empty/none");
-                    }
-                    Err(e) => {
-                        warn!("Failed to read clipboard: {e:#}");
-                    }
-                }
-            }
-        } => {}
+        _ = clipboard_sync::run_clipboard_sync(
+            &mut clipboard_read_rx,
+            &clipboard_for_sync,
+            &shared_peer,
+        ) => {}
 
-        // File download: read file on blocking thread, send chunks via DataChannel
-        _ = async {
-            while let Some(path) = download_request_rx.recv().await {
-                info!(path, "File download request received");
-                let ft = Arc::clone(&file_transfer_for_download);
-                let peer = peer::snapshot(&shared_peer).await;
-
-                // File I/O is blocking — run on a blocking thread
-                let messages = tokio::task::spawn_blocking(move || {
-                    let collected = std::sync::Mutex::new(Vec::new());
-                    let send_fn = |msg: String| {
-                        collected.lock().unwrap().push(msg);
-                    };
-                    let mgr = ft.lock().unwrap_or_else(|e| e.into_inner());
-                    let _ = mgr.handle_download_request(&path, &send_fn);
-                    collected.into_inner().unwrap()
-                })
-                .await;
-
-                if let Ok(messages) = messages {
-                    for msg in messages {
-                        if let Err(e) = peer.send_data_channel_message(&msg).await {
-                            warn!("Failed to send download message to browser: {e:#}");
-                            break;
-                        }
-                    }
-                }
-            }
-        } => {}
+        // File download: read file on blocking thread, stream chunks via DataChannel
+        _ = file_transfer_task::run_file_download_loop(
+            &mut download_request_rx,
+            &file_transfer_for_download,
+            &shared_peer,
+        ) => {}
 
         // Cursor shape passthrough: forward X11 cursor changes to browser as CSS cursor values
         _ = async {
@@ -1430,106 +1001,14 @@ async fn main() -> anyhow::Result<()> {
         } => {}
 
         // Adaptive bitrate control loop
-        // NVIDIA: disabled at runtime — nvh264enc on ARM64 corrupts colors
-        // when bitrate is changed dynamically via set_property.
-        _ = async {
-            let mut current_bitrate = config_bitrate;
-            let min_bitrate: u32 = config_min_bitrate;
-            let max_bitrate: u32 = config_max_bitrate;
-            let abr_enabled = !matches!(encoder_type, encoder::EncoderType::Nvidia);
-            if !abr_enabled {
-                info!("Adaptive bitrate disabled for NVIDIA encoder (runtime changes cause color corruption)");
-            }
-            let mut loss_ema: f64 = 0.0;
-            let mut prev_packets_sent: u64 = 0;
-            let mut prev_packets_lost: i64 = 0;
-
-            loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-
-                let current_peer = peer::snapshot(&shared_peer).await;
-                if !current_peer.is_connected() {
-                    continue;
-                }
-
-                let stats = current_peer.get_stats().await;
-                let mut total_packets_sent: u64 = 0;
-                let mut total_packets_lost: i64 = 0;
-                let mut rtt_sum: f64 = 0.0;
-                let mut rtt_count: u32 = 0;
-
-                for (_key, stat) in stats.reports.iter() {
-                    use webrtc::stats::StatsReportType;
-                    if let StatsReportType::OutboundRTP(rtp) = stat
-                        && rtp.kind == "video"
-                    {
-                        total_packets_sent = rtp.packets_sent;
-                    }
-                    if let StatsReportType::RemoteInboundRTP(remote) = stat
-                        && remote.kind == "video"
-                    {
-                        total_packets_lost = remote.packets_lost;
-                        if let Some(rtt) = remote.round_trip_time {
-                            rtt_sum += rtt;
-                            rtt_count += 1;
-                        }
-                    }
-                }
-
-                let interval_sent = total_packets_sent.saturating_sub(prev_packets_sent);
-                let interval_lost = total_packets_lost.saturating_sub(prev_packets_lost);
-                prev_packets_sent = total_packets_sent;
-                prev_packets_lost = total_packets_lost;
-
-                let loss_rate = if interval_sent > 0 {
-                    interval_lost.max(0) as f64 / interval_sent as f64
-                } else {
-                    0.0
-                };
-                loss_ema = loss_ema * 0.7 + loss_rate * 0.3;
-
-                let avg_rtt = if rtt_count > 0 {
-                    rtt_sum / rtt_count as f64
-                } else {
-                    0.0
-                };
-
-                debug!(
-                    packets_sent = total_packets_sent,
-                    packets_lost = total_packets_lost,
-                    rtt_ms = format!("{:.0}", avg_rtt * 1000.0),
-                    loss_pct = format!("{:.1}", loss_ema * 100.0),
-                    bitrate = current_bitrate,
-                    "WebRTC stats"
-                );
-
-                if !abr_enabled {
-                    continue;
-                }
-
-                let new_bitrate = if loss_ema > 0.05 {
-                    ((current_bitrate as f64 * 0.7) as u32).max(min_bitrate)
-                } else if loss_ema < 0.01 && avg_rtt < 0.05 {
-                    ((current_bitrate as f64 * 1.5) as u32).min(max_bitrate)
-                } else if loss_ema < 0.01 {
-                    ((current_bitrate as f64 * 1.2) as u32).min(max_bitrate)
-                } else {
-                    current_bitrate
-                };
-
-                if new_bitrate != current_bitrate {
-                    info!(
-                        old = current_bitrate,
-                        new = new_bitrate,
-                        loss_pct = format!("{:.1}", loss_ema * 100.0),
-                        rtt_ms = format!("{:.0}", avg_rtt * 1000.0),
-                        "Adaptive bitrate adjustment"
-                    );
-                    let _ = cmd_tx_for_abr.send(CaptureCommand::SetBitrate(new_bitrate));
-                    current_bitrate = new_bitrate;
-                }
-            }
-        } => {}
+        _ = abr::run_abr_loop(
+            &shared_peer,
+            encoder_type,
+            config_bitrate,
+            config_min_bitrate,
+            config_max_bitrate,
+            &cmd_tx_for_abr,
+        ) => {}
 
         // Handle shutdown signals
         _ = tokio::signal::ctrl_c() => {
@@ -1558,237 +1037,4 @@ async fn main() -> anyhow::Result<()> {
     peer::snapshot(&shared_peer).await.close().await?;
     info!("Agent shutdown complete");
     Ok(())
-}
-
-/// Shared context for signaling WebSocket connection.
-struct SignalingCtx<'a> {
-    server_url: &'a str,
-    session_id: Uuid,
-    agent_token: Option<&'a str>,
-    tls_cert_path: Option<&'a str>,
-    shared_peer: &'a SharedPeer,
-    peer_config: &'a PeerConfig,
-    signal_tx: &'a mpsc::Sender<SignalingMessage>,
-    force_keyframe: Arc<AtomicBool>,
-    input_callback: Arc<dyn Fn(InputEvent) + Send + Sync>,
-    capture_cmd_tx: &'a std::sync::mpsc::Sender<CaptureCommand>,
-}
-
-async fn run_signaling(ctx: &SignalingCtx<'_>, signal_rx: &mut mpsc::Receiver<SignalingMessage>) {
-    if ctx.server_url.is_empty() {
-        info!("No server URL provided, waiting for signaling via stdin or other mechanism");
-        while let Some(msg) = signal_rx.recv().await {
-            debug!(?msg, "Outgoing signal (no server connected)");
-        }
-        return;
-    }
-
-    // Connect to WebSocket with exponential backoff retry
-    let mut backoff = Duration::from_secs(2);
-    let max_backoff = Duration::from_secs(60);
-    loop {
-        info!(url = ctx.server_url, "Connecting to signaling server");
-
-        match connect_and_handle(ctx, signal_rx).await {
-            Ok(()) => {
-                info!("Signaling connection closed cleanly");
-                break;
-            }
-            Err(e) => {
-                warn!("Signaling connection error: {e:#}");
-                info!("Reconnecting in {} seconds...", backoff.as_secs());
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(max_backoff);
-            }
-        }
-    }
-}
-
-/// Build a TLS connector, pinning the server certificate if a cert path is provided.
-/// Falls back to system roots if no cert path is given.
-fn build_tls_connector(tls_cert_path: Option<&str>) -> tokio_tungstenite::Connector {
-    let mut root_store = rustls::RootCertStore::empty();
-
-    // Load system roots as baseline
-    for cert in rustls_native_certs::load_native_certs().expect("Could not load platform certs") {
-        let _ = root_store.add(cert);
-    }
-
-    // If a pinned cert PEM is provided, add it to the root store
-    if let Some(cert_path) = tls_cert_path {
-        match std::fs::read(cert_path) {
-            Ok(pem_data) => {
-                let certs: Vec<_> = rustls_pemfile::certs(&mut pem_data.as_slice())
-                    .filter_map(|r| r.ok())
-                    .collect();
-                for cert in certs {
-                    if let Err(e) = root_store.add(cert) {
-                        warn!("Failed to add pinned cert to root store: {e}");
-                    } else {
-                        info!("Pinned server certificate from {cert_path}");
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to read TLS cert from {cert_path}: {e}, falling back to system roots"
-                );
-            }
-        }
-    }
-
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    tokio_tungstenite::Connector::Rustls(Arc::new(tls_config))
-}
-
-async fn connect_and_handle(
-    ctx: &SignalingCtx<'_>,
-    signal_rx: &mut mpsc::Receiver<SignalingMessage>,
-) -> anyhow::Result<()> {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-
-    let url = match ctx.agent_token {
-        Some(token) => format!(
-            "{}/ws/agent/{}?token={}",
-            ctx.server_url,
-            ctx.session_id,
-            urlencoding::encode(token)
-        ),
-        None => format!("{}/ws/agent/{}", ctx.server_url, ctx.session_id),
-    };
-
-    let connector = build_tls_connector(ctx.tls_cert_path);
-    let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
-    ws_config.max_message_size = Some(65_536); // 64KB max, matching server-side limit
-    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
-        &url,
-        Some(ws_config),
-        false,
-        Some(connector),
-    )
-    .await
-    .context("WebSocket connection failed")?;
-
-    info!("Connected to signaling server");
-    let (mut ws_tx, mut ws_rx) = ws_stream.split();
-
-    // Track the last processed offer's ICE ufrag to deduplicate retried
-    // offers from the browser. The browser's offer retry mechanism can
-    // re-send the same SDP before the answer arrives, which previously
-    // caused the agent to create multiple peers — only the last one
-    // surviving, with the browser holding ICE credentials for a dead peer.
-    let mut last_offer_ufrag: Option<String> = None;
-
-    loop {
-        tokio::select! {
-            // Incoming messages from server
-            msg = ws_rx.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<AgentCommand>(&text) {
-                            Ok(AgentCommand::Signal(signal)) => {
-                                match signal {
-                                    SignalingMessage::Offer { sdp, .. } => {
-                                        // Deduplicate: extract ICE ufrag from the SDP and
-                                        // skip if we already processed this exact offer.
-                                        // Browser retries re-send the same SDP (same ICE
-                                        // credentials). Processing it again would destroy
-                                        // the peer we just created for the first copy.
-                                        let offer_ufrag = sdp.lines()
-                                            .find(|l| l.starts_with("a=ice-ufrag:"))
-                                            .map(|l| l.trim_start_matches("a=ice-ufrag:").to_string());
-                                        if let Some(ref ufrag) = offer_ufrag
-                                            && last_offer_ufrag.as_deref() == Some(ufrag) {
-                                            info!(ufrag, "Ignoring duplicate SDP Offer (same ICE ufrag)");
-                                            continue;
-                                        }
-                                        last_offer_ufrag = offer_ufrag;
-
-                                        // Create a brand-new peer for every new SDP Offer.
-                                        // This gives us fresh DTLS, ICE, SCTP, and data channel
-                                        // state — the only reliable way to handle browser
-                                        // reconnects (refresh, new tab, etc.).
-                                        info!("Received SDP Offer — creating new WebRTC peer");
-                                        let old_peer = peer::snapshot(ctx.shared_peer).await;
-                                        // Close old peer (non-blocking best-effort)
-                                        let _ = old_peer.close().await;
-
-                                        match peer::create_peer(
-                                            ctx.peer_config, ctx.signal_tx, ctx.session_id,
-                                            &ctx.force_keyframe, Arc::clone(&ctx.input_callback),
-                                        ).await {
-                                            Ok(new_peer) => {
-                                                // Handle the offer on the new peer
-                                                match new_peer.handle_offer(&sdp).await {
-                                                    Ok(answer_sdp) => {
-                                                        // Swap the peer atomically
-                                                        *ctx.shared_peer.write().await = new_peer;
-                                                        info!("New peer installed, sending SDP answer");
-                                                        let reply = SignalingMessage::Answer {
-                                                            sdp: answer_sdp,
-                                                            session_id: ctx.session_id,
-                                                        };
-                                                        let text = serde_json::to_string(&reply)?;
-                                                        ws_tx.send(Message::Text(text.into())).await?;
-                                                        // Recreate encoder to guarantee IDR on first frame.
-                                                        // ForceKeyUnit events are unreliable on nvh264enc
-                                                        // after long P-frame runs with gop-size=MAX.
-                                                        let _ = ctx.capture_cmd_tx.send(CaptureCommand::ResetEncoder);
-                                                        ctx.force_keyframe.store(true, Ordering::Relaxed);
-                                                    }
-                                                    Err(e) => {
-                                                        error!("Failed to handle offer on new peer: {e:#}");
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to create new peer: {e:#}");
-                                            }
-                                        }
-                                    }
-                                    SignalingMessage::IceCandidate {
-                                        candidate, sdp_mid, sdp_mline_index, ..
-                                    } => {
-                                        let current_peer = peer::snapshot(ctx.shared_peer).await;
-                                        if let Err(e) = current_peer
-                                            .add_ice_candidate(&candidate, sdp_mid.as_deref(), sdp_mline_index)
-                                            .await
-                                        {
-                                            warn!("Failed to add ICE candidate: {e:#}");
-                                        }
-                                    }
-                                    other => {
-                                        debug!(?other, "Unhandled signal message");
-                                    }
-                                }
-                            }
-                            Ok(AgentCommand::Shutdown) => {
-                                info!("Received shutdown command");
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                warn!("Invalid message from server: {e}");
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        return Ok(());
-                    }
-                    Some(Err(e)) => {
-                        return Err(e.into());
-                    }
-                    _ => {}
-                }
-            }
-            // Outgoing signaling messages (ICE candidates from our side)
-            Some(msg) = signal_rx.recv() => {
-                let text = serde_json::to_string(&msg)?;
-                ws_tx.send(Message::Text(text.into())).await?;
-            }
-        }
-    }
 }

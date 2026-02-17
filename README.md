@@ -4,6 +4,9 @@ GPU-accelerated remote desktop for Linux, streaming to any browser via WebRTC.
 
 Fully open source, GPU-accelerated, sub-30ms latency. Built for developers who want to access their Linux workstation from any browser.
 
+<!-- TODO: Add screenshot or demo GIF here showing a desktop session with performance overlay (F9) -->
+<!-- ![Beam desktop session](docs/screenshot.png) -->
+
 ## Features
 
 - **GPU-accelerated encoding** — NVIDIA NVENC, AMD/Intel VA-API, or x264 software fallback
