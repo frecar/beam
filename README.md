@@ -2,7 +2,7 @@
 
 GPU-accelerated remote desktop for Linux, streaming to any browser via WebRTC.
 
-Unlike DCV, Beam is fully open source. Unlike Guacamole, it uses GPU encoding for sub-30ms latency. Built for developers who want to access their Linux workstation from any browser.
+Fully open source, GPU-accelerated, sub-30ms latency. Built for developers who want to access their Linux workstation from any browser.
 
 ## Features
 

@@ -25,7 +25,7 @@
 - Uninstall: `sudo make uninstall`
 
 ## Configuration
-- Default port: `8444` (avoids conflict with DCV on 8443)
+- Default port: `8444` (avoids conflict with other services on 8443)
 - SPA Fallback: Enabled (unknown paths serve `index.html`)
 - Performance:
   - Input: Unordered DataChannels, coalesced mouse moves (RAF)

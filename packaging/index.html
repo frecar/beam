@@ -1166,29 +1166,29 @@
 
           <div class="comparison">
             <div class="comparison-card">
-              <h3>vs VNC / RDP</h3>
+              <h3>GPU-Accelerated</h3>
               <ul>
-                <li>GPU-accelerated H.264, not bitmaps</li>
-                <li>Sub-30ms latency vs 100ms+</li>
-                <li>Browser-based, no client app</li>
+                <li>Hardware H.264 encoding via NVENC/VA-API</li>
+                <li>Sub-30ms latency on LAN</li>
+                <li>Adaptive bitrate for any network</li>
+                <li>Software fallback when no GPU</li>
+              </ul>
+            </div>
+            <div class="comparison-card">
+              <h3>Zero-Install Client</h3>
+              <ul>
+                <li>Works in any modern browser</li>
+                <li>No plugins, no app downloads</li>
                 <li>WebRTC for low-latency transport</li>
+                <li>Mac keyboard support built in</li>
               </ul>
             </div>
             <div class="comparison-card">
-              <h3>vs Parsec / Moonlight</h3>
+              <h3>Open Source</h3>
               <ul>
-                <li>Fully self-hosted, no cloud dependency</li>
-                <li>Full desktop, not just gaming</li>
+                <li>MIT license, fully self-hosted</li>
                 <li>Multi-user with isolated sessions</li>
-                <li>Open source (MIT license)</li>
-              </ul>
-            </div>
-            <div class="comparison-card">
-              <h3>vs NoMachine / DCV</h3>
-              <ul>
-                <li>Open source, no licensing fees</li>
-                <li>True zero-install browser client</li>
-                <li>Simple setup (one apt install)</li>
+                <li>One command install (apt)</li>
                 <li>Transparent, auditable code</li>
               </ul>
             </div>
@@ -1241,9 +1241,9 @@
             <details class="faq-item">
               <summary>Can I use it for gaming?</summary>
               <div class="faq-answer">
-                Beam is optimized for desktop and productivity workloads. While it supports 60fps H.264
-                streaming with GPU encoding, dedicated game streaming tools like Moonlight/Sunshine
-                may be better suited for low-latency gaming with features like controller passthrough.
+                Beam is optimized for desktop and productivity workloads. It supports 60fps H.264
+                streaming with GPU encoding, but does not currently include controller passthrough
+                or other gaming-specific features.
               </div>
             </details>
             <details class="faq-item">
