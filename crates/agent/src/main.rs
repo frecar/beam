@@ -589,6 +589,8 @@ async fn main() -> anyhow::Result<()> {
             let mut first_capture_logged = false;
             let mut first_encode_logged = false;
             let mut last_encoder_reset = Instant::now() - ENCODER_RESET_COOLDOWN; // Allow first reset immediately
+            let mut consecutive_capture_errors: u64 = 0;
+            let mut last_capture_heartbeat = Instant::now();
 
             loop {
                 if shutdown_for_capture.load(Ordering::Relaxed) {
@@ -596,8 +598,13 @@ async fn main() -> anyhow::Result<()> {
                     break;
                 }
 
-                // Process commands from async tasks (non-blocking)
+                // Process commands from async tasks (non-blocking).
+                // Commands that need encoder recreation set this flag and break
+                // out of the inner loop so we can drop(encoder) before creating
+                // a new one (NVENC holds its session until element refs are freed).
                 let abr_enabled = !matches!(encoder_type, encoder::EncoderType::Nvidia);
+                enum EncoderRecreate { None, Reset, Resize }
+                let mut recreate = EncoderRecreate::None;
                 while let Ok(cmd) = capture_cmd_rx.try_recv() {
                     match cmd {
                         CaptureCommand::SetBitrate(br) => {
@@ -641,34 +648,9 @@ async fn main() -> anyhow::Result<()> {
                             };
                             screen_capture = new_capture;
 
-                            // 4. Recreate encoder pipeline at new dimensions
-                            let new_w = screen_capture.width();
-                            let new_h = screen_capture.height();
-                            let new_encoder = match Encoder::with_encoder_preference(
-                                new_w, new_h, DEFAULT_FRAMERATE, current_bitrate,
-                                encoder_pref.as_deref(),
-                            ) {
-                                Ok(enc) => enc,
-                                Err(e) => {
-                                    error!("Failed to recreate encoder after resize: {e:#}");
-                                    return;
-                                }
-                            };
-                            encoder = new_encoder;
-
-                            // 5. Force IDR so browser decoder reinitializes with new SPS/PPS
-                            encoder.force_keyframe();
-                            first_capture_logged = false;
-                            first_encode_logged = false;
-
-                            // 6. Update input injector dimensions for mouse coordinate mapping
-                            input_width_for_capture.store(new_w, Ordering::Relaxed);
-                            input_height_for_capture.store(new_h, Ordering::Relaxed);
-
-                            info!(
-                                width = new_w, height = new_h,
-                                "Resize complete, capture and encoder recreated"
-                            );
+                            // 4. Encoder recreation deferred to after inner loop
+                            recreate = EncoderRecreate::Resize;
+                            break;
                         }
                         CaptureCommand::SetQualityHigh(is_high) => {
                             let new_framerate = if is_high { config_framerate } else { LOW_FRAMERATE };
@@ -693,26 +675,66 @@ async fn main() -> anyhow::Result<()> {
                                 );
                                 encoder.force_keyframe();
                             } else {
-                                info!("Recreating encoder pipeline for fresh IDR (reconnection)");
-                                let new_encoder = match Encoder::with_encoder_preference(
-                                    screen_capture.width(),
-                                    screen_capture.height(),
-                                    current_framerate,
-                                    current_bitrate,
-                                    encoder_pref.as_deref(),
-                                ) {
-                                    Ok(enc) => enc,
-                                    Err(e) => {
-                                        error!("Failed to recreate encoder: {e:#}");
-                                        continue;
-                                    }
-                                };
-                                encoder = new_encoder;
-                                first_encode_logged = false;
-                                last_encoder_reset = Instant::now();
-                                info!("Encoder pipeline recreated (next frame will be IDR)");
+                                recreate = EncoderRecreate::Reset;
+                                break;
                             }
                         }
+                    }
+                }
+
+                // Handle deferred encoder recreation outside the command loop
+                // so we can drop(encoder) to fully free NVENC sessions.
+                match recreate {
+                    EncoderRecreate::None => {}
+                    EncoderRecreate::Reset => {
+                        info!("Dropping old encoder to free NVENC session");
+                        drop(encoder);
+                        info!("Old encoder dropped, creating new pipeline");
+                        encoder = match Encoder::with_encoder_preference(
+                            screen_capture.width(),
+                            screen_capture.height(),
+                            current_framerate,
+                            current_bitrate,
+                            encoder_pref.as_deref(),
+                        ) {
+                            Ok(enc) => enc,
+                            Err(e) => {
+                                error!("Failed to recreate encoder: {e:#}");
+                                break;
+                            }
+                        };
+                        first_encode_logged = false;
+                        last_encoder_reset = Instant::now();
+                        info!("Encoder pipeline recreated (next frame will be IDR)");
+                    }
+                    EncoderRecreate::Resize => {
+                        let new_w = screen_capture.width();
+                        let new_h = screen_capture.height();
+                        info!(width = new_w, height = new_h, "Dropping old encoder for resize");
+                        drop(encoder);
+                        info!("Old encoder dropped, creating new pipeline for resize");
+                        encoder = match Encoder::with_encoder_preference(
+                            new_w, new_h, DEFAULT_FRAMERATE, current_bitrate,
+                            encoder_pref.as_deref(),
+                        ) {
+                            Ok(enc) => enc,
+                            Err(e) => {
+                                error!("Failed to recreate encoder after resize: {e:#}");
+                                break;
+                            }
+                        };
+
+                        encoder.force_keyframe();
+                        first_capture_logged = false;
+                        first_encode_logged = false;
+
+                        input_width_for_capture.store(new_w, Ordering::Relaxed);
+                        input_height_for_capture.store(new_h, Ordering::Relaxed);
+
+                        info!(
+                            width = new_w, height = new_h,
+                            "Resize complete, capture and encoder recreated"
+                        );
                     }
                 }
 
@@ -764,7 +786,9 @@ async fn main() -> anyhow::Result<()> {
 
                 // Auto-recover from GStreamer pipeline errors (GPU fault, driver issue, etc.)
                 if encoder.has_error() {
-                    warn!("GStreamer pipeline error detected, recreating encoder");
+                    warn!("GStreamer pipeline error detected, dropping encoder to free NVENC session");
+                    drop(encoder);
+                    info!("Old encoder dropped after pipeline error, creating new pipeline");
                     match Encoder::with_encoder_preference(
                         screen_capture.width(), screen_capture.height(),
                         current_framerate, current_bitrate,
@@ -784,6 +808,13 @@ async fn main() -> anyhow::Result<()> {
 
                 match screen_capture.capture_frame() {
                     Ok(frame) => {
+                        if consecutive_capture_errors > 0 {
+                            info!(
+                                recovered_after = consecutive_capture_errors,
+                                "Capture recovered after consecutive errors"
+                            );
+                            consecutive_capture_errors = 0;
+                        }
                         if !first_capture_logged {
                             info!(size = frame.len(), "First frame captured from X display");
                             first_capture_logged = true;
@@ -794,11 +825,22 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     Err(e) => {
-                        // SHM GetImage can fail with Match error when xrandr changes
-                        // the display resolution. Log and skip the frame instead of
-                        // crashing - the next frame will likely succeed or the pipeline
-                        // will be restarted.
-                        debug!("Capture frame skipped: {e:#}");
+                        consecutive_capture_errors += 1;
+                        if consecutive_capture_errors <= 3 || consecutive_capture_errors.is_multiple_of(100) {
+                            warn!(
+                                consecutive_errors = consecutive_capture_errors,
+                                "Capture frame failed: {e:#}"
+                            );
+                        }
+                        if consecutive_capture_errors >= 300 {
+                            error!(
+                                consecutive_errors = consecutive_capture_errors,
+                                "Capture failing persistently, breaking capture loop"
+                            );
+                            break;
+                        }
+                        // Brief sleep to prevent CPU spin on persistent failures
+                        std::thread::sleep(Duration::from_millis(1));
                         continue;
                     }
                 }
@@ -844,14 +886,18 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 frame_count += 1;
-                if frame_count.is_multiple_of(300) {
+
+                // Periodic capture thread heartbeat (every 5 seconds)
+                if last_capture_heartbeat.elapsed() >= Duration::from_secs(5) {
                     let elapsed = start.elapsed().as_secs_f64();
-                    debug!(
+                    info!(
                         captured = frame_count,
                         encoded = encoded_count,
                         fps = format!("{:.1}", frame_count as f64 / elapsed),
-                        "Capture stats"
+                        is_idle, is_backgrounded,
+                        "Capture heartbeat"
                     );
+                    last_capture_heartbeat = Instant::now();
                 }
 
                 // Frame pacing: use condvar wait so input can wake us immediately.

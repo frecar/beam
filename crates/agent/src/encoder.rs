@@ -35,7 +35,10 @@ impl Encoder {
         preferred_encoder: Option<&str>,
     ) -> anyhow::Result<Self> {
         let (encoder_type, encoder_name) = detect_encoder(preferred_encoder)?;
-        info!(?encoder_type, encoder_name, "Selected H.264 encoder");
+        info!(
+            ?encoder_type,
+            encoder_name, width, height, framerate, bitrate, "Creating H.264 encoder pipeline"
+        );
 
         let pipeline = gst::Pipeline::new();
 
@@ -67,6 +70,13 @@ impl Encoder {
         appsrc.set_caps(Some(&caps));
         appsrc.set_is_live(true);
         appsrc.set_format(gst::Format::Time);
+        // CRITICAL: block=false prevents push_buffer() from blocking forever
+        // when nvh264enc stalls (GPU busy, NVENC session issue). Without this,
+        // the capture thread silently hangs with 0 FPS and no error log.
+        appsrc.set_property("block", false);
+        // Disable internal queue limit -- we control flow via the tokio mpsc
+        // channel (capacity 2) and appsink (max-buffers=1, drop=true).
+        appsrc.set_property("max-bytes", 0u64);
         // Minimize internal buffering in appsrc
         appsrc.set_property("min-latency", 0i64);
         appsrc.set_property("max-latency", 0i64);
@@ -341,9 +351,10 @@ impl Encoder {
 
 impl Drop for Encoder {
     fn drop(&mut self) {
+        info!("Encoder::drop() - sending EOS and setting pipeline to Null");
         let _ = self.appsrc.end_of_stream();
         let _ = self.pipeline.set_state(gst::State::Null);
-        debug!("Encoder pipeline stopped");
+        info!("Encoder::drop() - pipeline set to Null, NVENC session should be freed");
     }
 }
 
