@@ -287,7 +287,7 @@ impl VirtualDisplay {
                     warn!(
                         "No non-snap browser found. Snap browsers fail in Beam sessions \
                          (systemd RestrictNamespaces blocks snap confinement). \
-                         Install a .deb browser: sudo apt install firefox-esr"
+                         Install a .deb browser: sudo apt install epiphany-browser"
                     );
                     String::new()
                 }
@@ -952,6 +952,7 @@ fn find_non_snap_browser() -> Option<&'static str> {
         "chromium-browser",
         "firefox",
         "chromium",
+        "epiphany-browser",
     ]
     .iter()
     .copied()

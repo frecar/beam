@@ -35,6 +35,7 @@ recommends:
   - xclip
   - libcap2-bin
   - gnome-keyring
+  - epiphany-browser
 
 suggests:
   - gstreamer1.0-vaapi

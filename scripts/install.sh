@@ -58,7 +58,7 @@ apt-get install -y -qq \
     libpulse-dev libopus-dev pulseaudio \
     libpam0g-dev libclang-dev \
     xfce4 xfce4-terminal xfce4-whiskermenu-plugin gnome-keyring \
-    unclutter-xfixes \
+    unclutter-xfixes epiphany-browser \
     nodejs npm
 
 # GPU-specific packages
