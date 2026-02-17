@@ -8,3 +8,12 @@ dist/
 .DS_Store
 web/dist/
 web/src/*.js
+
+# TLS certificates and keys
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace

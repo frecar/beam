@@ -1,5 +1,7 @@
 # Security Policy
 
+> **Disclosure**: This project has not undergone a formal security audit. The measures below represent best-effort hardening by the maintainers. If deploying in a sensitive environment, consider commissioning an independent audit.
+
 ## Reporting a Vulnerability
 
 **Do not open a public issue for security vulnerabilities.**
@@ -44,6 +46,10 @@ The following are known limitations, not vulnerabilities:
 - Local users on the same machine can see agent process environment variables (standard Unix behavior)
 - The server binds to `0.0.0.0` by default — use a firewall or set `bind` in `beam.toml` to restrict access
 - Rate limiting uses in-memory counters (reset on server restart)
+
+## Audit Status
+
+This project has not undergone a formal security audit. If you are evaluating Beam for sensitive environments, please review the source code directly and consider commissioning an independent audit.
 
 ## Supported Versions
 

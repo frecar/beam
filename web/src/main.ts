@@ -555,6 +555,8 @@ function showLoading(message: string): void {
   loadingStatus.className = "loading-status";
   loadingStatus.textContent = message;
   loadingCancel.textContent = "Cancel";
+  // Move focus to cancel button so keyboard users can act on the loading state
+  loadingCancel.focus();
 }
 
 function updateLoadingStatus(message: string): void {
@@ -579,16 +581,66 @@ function showLoadingError(message: string): void {
   loadingStatus.classList.add("error");
   shakeLoginCard();
   loadingCancel.textContent = "Back to login";
+  // Move focus to the action button so keyboard users know what to do next
+  loadingCancel.focus();
 }
 
+/** Live countdown for rate-limit lockout timer handle */
+let rateLimitTimer: ReturnType<typeof setInterval> | null = null;
+/** Client-side login failure counter for progressive warnings (no server oracle) */
+let loginFailureCount = 0;
+
 function hideLoading(): void {
+  // Clear any running rate-limit countdown
+  if (rateLimitTimer) {
+    clearInterval(rateLimitTimer);
+    rateLimitTimer = null;
+    loginError.setAttribute("aria-live", "assertive");
+  }
   loginLoading.style.display = "none";
   loginFormContent.style.display = "block";
   loadingSpinner.className = "loading-spinner";
   loadingStatus.className = "loading-status";
   loadingCancel.textContent = "Cancel";
   connectBtn.disabled = false;
-  connectBtn.textContent = "Connect";
+  connectBtn.textContent = "Sign in";
+  // Return focus to username input so keyboard users land back on the form
+  usernameInput.focus();
+}
+
+/** Live countdown for rate-limit lockout. Updates every second and
+ *  disables the submit button until the timer expires. */
+
+function startRateLimitCountdown(seconds: number): void {
+  if (rateLimitTimer) {
+    clearInterval(rateLimitTimer);
+    rateLimitTimer = null;
+  }
+
+  let remaining = seconds;
+  connectBtn.disabled = true;
+
+  // First announcement is assertive (role="alert" on loginError)
+  showLoginError(`Too many attempts. Try again in ${remaining} second${remaining === 1 ? "" : "s"}.`);
+
+  // Subsequent updates: switch to polite so screen readers don't
+  // announce every single tick of the countdown
+  loginError.setAttribute("aria-live", "polite");
+
+  rateLimitTimer = setInterval(() => {
+    remaining--;
+    if (remaining <= 0) {
+      clearInterval(rateLimitTimer!);
+      rateLimitTimer = null;
+      loginError.style.display = "none";
+      // Restore assertive for future errors
+      loginError.setAttribute("aria-live", "assertive");
+      connectBtn.disabled = false;
+      usernameInput.focus();
+    } else {
+      loginError.textContent = `Too many attempts. Try again in ${remaining} second${remaining === 1 ? "" : "s"}.`;
+    }
+  }, 1000);
 }
 
 function showDesktop(): void {
@@ -1540,7 +1592,7 @@ function handleDisconnect(): void {
   ui?.showNotification("Disconnected from remote desktop", "info");
 
   connectBtn.disabled = false;
-  connectBtn.textContent = "Connect";
+  connectBtn.textContent = "Sign in";
 }
 
 const ICON_WIFI_OFF = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1776,6 +1828,36 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
           // Use default message
         }
 
+        // 429: rate limited -- return to login form with assertive alert + countdown
+        if (response.status === 429) {
+          const retryHeader = response.headers.get("Retry-After");
+          const retryAfter = retryHeader ? parseInt(retryHeader, 10) : undefined;
+          hideLoading();
+          shakeLoginCard();
+          if (retryAfter && retryAfter > 0) {
+            startRateLimitCountdown(retryAfter);
+          } else {
+            showLoginError(message);
+          }
+          setStatus("error", "Rate limited");
+          loginFailureCount = 0; // Reset — server is now tracking
+          return;
+        }
+
+        // Client-side progressive warning (no server-side oracle)
+        if (response.status === 401) {
+          loginFailureCount++;
+          hideLoading();
+          shakeLoginCard();
+          if (loginFailureCount >= 3) {
+            showLoginError(`${message} Multiple failed attempts detected.`);
+          } else {
+            showLoginError(message);
+          }
+          setStatus("error", message);
+          return;
+        }
+
         // Only retry on 5xx or network errors, not on 4xx (auth failures)
         if (response.status >= 500 && attempt < MAX_RETRIES) {
           const delay = BASE_DELAY * Math.pow(2, attempt);
@@ -1788,6 +1870,7 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
       }
 
       const data = (await response.json()) as LoginResponse;
+      loginFailureCount = 0; // Reset on success
 
       // Persist session for reconnect on page refresh / browser crash
       saveSession(data);

@@ -276,6 +276,33 @@ impl BeamConfig {
             ));
         }
 
+        // --- Admin users ---
+        for user in &self.server.admin_users {
+            let trimmed = user.trim();
+            if trimmed != user {
+                issues.push(format!(
+                    "WARNING: admin_users entry '{}' has leading/trailing whitespace. \
+                     This will never match a login username. Did you mean '{}'?",
+                    user, trimmed
+                ));
+            }
+            if user.is_empty() {
+                issues.push(
+                    "WARNING: admin_users contains an empty string. This entry will never match."
+                        .to_string(),
+                );
+            } else if !user
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+            {
+                issues.push(format!(
+                    "WARNING: admin_users entry '{}' contains characters not allowed in usernames \
+                     (only a-z, 0-9, _, -, . are valid). This entry will never match.",
+                    user
+                ));
+            }
+        }
+
         // --- STUN URLs ---
         for url in &self.ice.stun_urls {
             if !url.starts_with("stun:") && !url.starts_with("stuns:") {
@@ -925,6 +952,54 @@ turn_credential = "pass"
         assert!(
             !issues.iter().any(|i| i.starts_with("ERROR:")),
             "should only contain warnings, not errors"
+        );
+    }
+
+    #[test]
+    fn validate_admin_users_whitespace_warning() {
+        let mut config = valid_config();
+        config.server.admin_users = vec!["admin ".to_string()];
+        let issues = validate_issues(&config);
+        assert!(
+            issues.iter().any(|i| i.contains("whitespace")),
+            "trailing whitespace should produce warning"
+        );
+    }
+
+    #[test]
+    fn validate_admin_users_invalid_chars_warning() {
+        let mut config = valid_config();
+        config.server.admin_users = vec!["admin@host".to_string()];
+        let issues = validate_issues(&config);
+        assert!(
+            issues.iter().any(|i| i.contains("not allowed")),
+            "invalid chars should produce warning"
+        );
+    }
+
+    #[test]
+    fn validate_admin_users_valid_names_ok() {
+        let mut config = valid_config();
+        config.server.admin_users = vec![
+            "alice".to_string(),
+            "bob-1".to_string(),
+            "sys_admin.2".to_string(),
+        ];
+        let issues = validate_issues(&config);
+        assert!(
+            !issues.iter().any(|i| i.contains("admin_users")),
+            "valid admin usernames should not produce warnings"
+        );
+    }
+
+    #[test]
+    fn validate_admin_users_empty_string_warning() {
+        let mut config = valid_config();
+        config.server.admin_users = vec!["".to_string()];
+        let issues = validate_issues(&config);
+        assert!(
+            issues.iter().any(|i| i.contains("empty string")),
+            "empty admin username should produce warning"
         );
     }
 }

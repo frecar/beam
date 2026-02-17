@@ -1006,6 +1006,43 @@ mod tests {
         assert!(!constant_time_eq(b"", b"x"));
     }
 
+    #[test]
+    fn constant_time_eq_last_byte_differs() {
+        // Must not short-circuit on matching prefix
+        assert!(!constant_time_eq(b"abcdefg1", b"abcdefg2"));
+        assert!(!constant_time_eq(
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX",
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaY",
+        ));
+    }
+
+    #[test]
+    fn constant_time_eq_length_difference_with_zero_padding() {
+        // The longer string ends with null bytes. The XOR with unwrap_or(0)
+        // padding would produce 0, but the initial length check must still
+        // cause the function to return false.
+        let short = b"abc";
+        let mut long = Vec::from(&b"abc"[..]);
+        long.extend_from_slice(&[0u8; 300]);
+
+        assert!(
+            !constant_time_eq(short, &long),
+            "different lengths must return false even when padding XOR is zero"
+        );
+        assert!(
+            !constant_time_eq(&long, short),
+            "different lengths must return false (reversed argument order)"
+        );
+    }
+
+    #[test]
+    fn constant_time_eq_single_byte_values() {
+        assert!(constant_time_eq(b"\x00", b"\x00"));
+        assert!(constant_time_eq(b"\xff", b"\xff"));
+        assert!(!constant_time_eq(b"\x00", b"\x01"));
+        assert!(!constant_time_eq(b"\x00", b"\xff"));
+    }
+
     #[tokio::test]
     async fn increment_restart_count_returns_new_count() {
         let manager = SessionManager::new(

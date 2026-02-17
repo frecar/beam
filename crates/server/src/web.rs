@@ -25,6 +25,7 @@ pub struct AppState {
     pub jwt_secret: String,
     pub login_limiter: LoginRateLimiter,
     pub ip_limiter: LoginRateLimiter,
+    pub release_limiter: LoginRateLimiter,
     pub started_at: std::time::Instant,
     /// Metrics counters (atomic for lock-free thread safety)
     pub metrics_logins_attempted: std::sync::atomic::AtomicU64,
@@ -60,7 +61,8 @@ impl LoginRateLimiter {
         }
     }
 
-    /// Check if a key is currently rate-limited (read-only, does not record).
+    /// Check if a key is currently rate-limited (does not record new failures).
+    /// May perform periodic cleanup of expired entries.
     /// Returns true if the key has NOT exceeded the limit (allowed).
     pub fn is_allowed(&self, key: &str) -> bool {
         let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
@@ -84,7 +86,7 @@ impl LoginRateLimiter {
             return false;
         }
 
-        // Read-only check — don't insert empty entries for unknown keys
+        // Check only — don't insert empty entries for unknown keys
         match attempts.get_mut(key) {
             Some(entry) => {
                 entry.retain(|t| now.duration_since(*t) < self.window);
@@ -124,6 +126,35 @@ impl LoginRateLimiter {
         self.ttl_cleanup_interval = interval;
         self
     }
+
+    /// Return how many attempts remain before a key is rate-limited.
+    /// Returns None if the key has no recorded failures (don't reveal limiter state).
+    /// Returns Some(n) when failures are >= the warning threshold.
+    pub fn remaining_attempts(&self, key: &str, warn_threshold: usize) -> Option<usize> {
+        let attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        match attempts.get(key) {
+            Some(entry) => {
+                let active = entry
+                    .iter()
+                    .filter(|t| now.duration_since(**t) < self.window)
+                    .count();
+                if active >= warn_threshold {
+                    Some(self.max_attempts.saturating_sub(active))
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    }
+
+    /// Create a limiter with a custom max_keys cap (for testing).
+    #[cfg(test)]
+    fn with_max_keys(mut self, max_keys: usize) -> Self {
+        self.max_keys = max_keys;
+        self
+    }
 }
 
 /// Middleware that adds security headers to every response.
@@ -152,7 +183,7 @@ async fn security_headers(
         "content-security-policy",
         HeaderValue::from_static(
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-             connect-src 'self' wss: ws:; img-src 'self' data:; media-src 'self' blob:",
+             connect-src 'self' wss:; img-src 'self' data:; media-src 'self' blob:",
         ),
     );
     headers.insert(
@@ -264,6 +295,28 @@ fn is_valid_username(username: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
+/// Normalize an IP address for rate limiting.
+/// IPv4: use full address. IPv6: truncate to /64 prefix to prevent
+/// per-address rotation bypasses (cloud/VPN providers can cycle /64 trivially).
+fn normalize_ip_for_rate_limit(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => {
+            // Handle IPv4-mapped IPv6 (::ffff:x.x.x.x) — rate limit as the inner IPv4
+            // to prevent bypassing IPv4 rate limits via the mapped form
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.to_string();
+            }
+            let segments = v6.segments();
+            // Keep first 4 segments (64 bits) — the network prefix
+            format!(
+                "{:x}:{:x}:{:x}:{:x}::/64",
+                segments[0], segments[1], segments[2], segments[3]
+            )
+        }
+    }
+}
+
 /// POST /api/auth/login
 ///
 /// Authenticate via PAM and return a JWT + session.
@@ -273,7 +326,7 @@ async fn login(
     Json(req): Json<AuthRequest>,
 ) -> impl IntoResponse {
     let peer_ip = peer
-        .map(|axum::extract::Extension(addr)| addr.ip().to_string())
+        .map(|axum::extract::Extension(addr)| normalize_ip_for_rate_limit(addr.ip()))
         .unwrap_or_else(|| {
             tracing::warn!("Could not extract peer address from connection");
             "unknown".to_string()
@@ -321,6 +374,7 @@ async fn login(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return (
             StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, "60")],
             Json(json!({ "error": "Too many login attempts. Please wait 60 seconds and try again." })),
         )
             .into_response();
@@ -368,6 +422,10 @@ async fn login(
             state
                 .metrics_logins_failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Log remaining attempts server-side for ops visibility (not exposed to client)
+            if let Some(remaining) = state.login_limiter.remaining_attempts(&req.username, 3) {
+                tracing::warn!(username = %req.username, remaining, "Approaching rate limit");
+            }
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "Invalid credentials" })),
@@ -1070,11 +1128,11 @@ async fn release_session(
     body: String,
 ) -> impl IntoResponse {
     let peer_ip = peer
-        .map(|axum::extract::Extension(addr)| addr.ip().to_string())
+        .map(|axum::extract::Extension(addr)| normalize_ip_for_rate_limit(addr.ip()))
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Rate limit release attempts per IP to prevent brute-forcing release tokens
-    if !state.ip_limiter.is_allowed(&peer_ip) {
+    // Rate limit release attempts per IP (separate from login limiter)
+    if !state.release_limiter.is_allowed(&peer_ip) {
         return (StatusCode::TOO_MANY_REQUESTS, "Rate limited").into_response();
     }
 
@@ -1087,7 +1145,7 @@ async fn release_session(
     }
 
     if !state.session_manager.verify_release_token(id, token).await {
-        state.ip_limiter.record_failure(&peer_ip);
+        state.release_limiter.record_failure(&peer_ip);
         // Don't reveal whether the session exists or the token is wrong
         return (StatusCode::UNAUTHORIZED, "Invalid release token").into_response();
     }
@@ -1384,6 +1442,124 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_boundary_exact_limit() {
+        // With max_attempts=5, the 5th failure should block but 4 should not
+        let limiter = LoginRateLimiter::new(5, 60);
+        for _ in 0..4 {
+            limiter.record_failure("user");
+        }
+        assert!(
+            limiter.is_allowed("user"),
+            "4 failures out of 5 should still be allowed"
+        );
+
+        limiter.record_failure("user");
+        assert!(
+            !limiter.is_allowed("user"),
+            "5th failure should trigger block"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_max_keys_rejects_new_keys() {
+        // With max_keys=3, once 3 keys are tracked, new unknown keys are rejected
+        let limiter = LoginRateLimiter::new(5, 60).with_max_keys(3);
+        limiter.record_failure("user1");
+        limiter.record_failure("user2");
+        limiter.record_failure("user3");
+
+        // Existing keys still work
+        assert!(limiter.is_allowed("user1"));
+        // New key is rejected because map is at capacity
+        assert!(
+            !limiter.is_allowed("new-user"),
+            "new keys should be rejected when at max_keys capacity"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_max_keys_allows_existing_at_capacity() {
+        let limiter = LoginRateLimiter::new(5, 60).with_max_keys(2);
+        limiter.record_failure("alice");
+        limiter.record_failure("bob");
+
+        // Both existing keys should still work even at max_keys
+        assert!(limiter.is_allowed("alice"));
+        assert!(limiter.is_allowed("bob"));
+    }
+
+    #[test]
+    fn rate_limiter_remaining_attempts() {
+        let limiter = LoginRateLimiter::new(5, 60);
+        // No failures — remaining_attempts returns None (don't reveal state)
+        assert_eq!(limiter.remaining_attempts("user", 3), None);
+
+        // 2 failures (below threshold of 3) — still None
+        limiter.record_failure("user");
+        limiter.record_failure("user");
+        assert_eq!(limiter.remaining_attempts("user", 3), None);
+
+        // 3 failures (at threshold) — returns Some(2)
+        limiter.record_failure("user");
+        assert_eq!(limiter.remaining_attempts("user", 3), Some(2));
+
+        // 4 failures — returns Some(1)
+        limiter.record_failure("user");
+        assert_eq!(limiter.remaining_attempts("user", 3), Some(1));
+
+        // 5 failures (at limit) — returns Some(0)
+        limiter.record_failure("user");
+        assert_eq!(limiter.remaining_attempts("user", 3), Some(0));
+    }
+
+    #[test]
+    fn normalize_ipv6_to_64_prefix() {
+        use std::net::IpAddr;
+        // IPv4 — unchanged
+        let v4: IpAddr = "192.168.1.100".parse().unwrap();
+        assert_eq!(normalize_ip_for_rate_limit(v4), "192.168.1.100");
+
+        // IPv6 — truncated to /64
+        let v6: IpAddr = "2001:db8:85a3:1234:5678:abcd:ef01:2345".parse().unwrap();
+        assert_eq!(normalize_ip_for_rate_limit(v6), "2001:db8:85a3:1234::/64");
+
+        // Two IPs in same /64 should produce same key
+        let v6a: IpAddr = "2001:db8::1".parse().unwrap();
+        let v6b: IpAddr = "2001:db8::ffff".parse().unwrap();
+        assert_eq!(
+            normalize_ip_for_rate_limit(v6a),
+            normalize_ip_for_rate_limit(v6b),
+            "IPs in same /64 should map to same rate limit key"
+        );
+
+        // Different /64 should produce different keys
+        let v6c: IpAddr = "2001:db8:0:1::1".parse().unwrap();
+        assert_ne!(
+            normalize_ip_for_rate_limit(v6a),
+            normalize_ip_for_rate_limit(v6c),
+            "IPs in different /64 should have different rate limit keys"
+        );
+
+        // IPv4-mapped IPv6 (::ffff:x.x.x.x) should rate-limit as inner IPv4
+        let mapped: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        assert_eq!(
+            normalize_ip_for_rate_limit(mapped),
+            "10.0.0.1",
+            "IPv4-mapped IPv6 should be treated as IPv4"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_empty_key() {
+        let limiter = LoginRateLimiter::new(2, 60);
+        // Empty string is a valid key — should behave like any other
+        assert!(limiter.is_allowed(""));
+        limiter.record_failure("");
+        limiter.record_failure("");
+        assert!(!limiter.is_allowed(""));
+    }
+
+    #[test]
     fn extract_claims_from_bearer_header() {
         let secret = "test-secret";
         let token = crate::auth::generate_jwt("alice", secret).unwrap();
@@ -1506,6 +1682,7 @@ mod tests {
             jwt_secret: TEST_JWT_SECRET.to_string(),
             login_limiter: LoginRateLimiter::new(5, 60),
             ip_limiter: LoginRateLimiter::new(20, 60),
+            release_limiter: LoginRateLimiter::new(10, 60),
             started_at: std::time::Instant::now(),
             metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
             metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
@@ -1799,7 +1976,7 @@ mod tests {
             headers.get("content-security-policy").map(|v| v.as_bytes()),
             Some(
                 b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-                  connect-src 'self' wss: ws:; img-src 'self' data:; media-src 'self' blob:"
+                  connect-src 'self' wss:; img-src 'self' data:; media-src 'self' blob:"
                     .as_slice()
             ),
             "missing or wrong Content-Security-Policy"
@@ -1908,6 +2085,7 @@ mod tests {
             jwt_secret: TEST_JWT_SECRET.to_string(),
             login_limiter: LoginRateLimiter::new(5, 60),
             ip_limiter: LoginRateLimiter::new(20, 60),
+            release_limiter: LoginRateLimiter::new(10, 60),
             started_at: std::time::Instant::now(),
             metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
             metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),

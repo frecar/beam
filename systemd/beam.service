@@ -18,7 +18,10 @@ LimitNOFILE=65536
 # - /run/user access (PulseAudio, D-Bus)
 ProtectSystem=full
 ProtectHome=no
+# NoNewPrivileges must be off: the server uses setuid/setgid to spawn
+# agent processes as authenticated users (same pattern as GDM/LightDM).
 NoNewPrivileges=no
+# PrivateTmp must be off: agents use /tmp for X11 sockets and PulseAudio.
 PrivateTmp=no
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_AUDIT_WRITE
 ProtectKernelTunables=yes
@@ -26,8 +29,14 @@ ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
-RestrictRealtime=yes
+ProtectHostname=yes
+# RestrictRealtime is NOT set: beam-agent uses cap_sys_nice for real-time
+# frame pacing, and seccomp filters propagate to child processes.
+# RestrictRealtime=yes would silently block sched_setscheduler() in agents.
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
 LockPersonality=yes
+UMask=0077
 TimeoutStopSec=30
 
 # Logging

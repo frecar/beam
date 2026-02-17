@@ -206,6 +206,7 @@ async fn main() -> Result<()> {
         jwt_secret,
         login_limiter: web::LoginRateLimiter::new(5, 60), // 5 attempts per username per 60s
         ip_limiter: web::LoginRateLimiter::new(20, 60),   // 20 attempts per IP per 60s
+        release_limiter: web::LoginRateLimiter::new(10, 60), // 10 release attempts per IP per 60s
         started_at: std::time::Instant::now(),
         metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
         metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),

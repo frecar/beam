@@ -31,18 +31,50 @@ pub fn build_tls_config(
 
             std::fs::create_dir_all("/var/lib/beam").context("Failed to create /var/lib/beam")?;
 
-            // Reuse existing self-signed cert+key if both files exist and are valid
+            // Reuse existing self-signed cert+key if both files exist, are valid,
+            // and haven't expired (check file age as a proxy for cert expiry).
             let loaded = if std::path::Path::new(cert_pem_path).exists()
                 && std::path::Path::new(key_pem_path).exists()
             {
-                match load_certs_from_files(cert_pem_path, key_pem_path) {
-                    Ok((certs, key)) => {
-                        tracing::info!("Loaded existing self-signed cert from {cert_pem_path}");
-                        Some((certs, key))
-                    }
-                    Err(e) => {
-                        tracing::warn!("Existing self-signed cert invalid, regenerating: {e}");
-                        None
+                // Check cert file age — regenerate if older than 365 days
+                let cert_too_old = std::fs::metadata(cert_pem_path)
+                    .and_then(|m| m.modified())
+                    .map(|mtime| {
+                        mtime.elapsed().unwrap_or_default()
+                            > std::time::Duration::from_secs(365 * 24 * 3600)
+                    })
+                    .unwrap_or(false);
+
+                if cert_too_old {
+                    tracing::warn!(
+                        "Self-signed cert is older than 365 days, regenerating: {cert_pem_path}"
+                    );
+                    None
+                } else {
+                    match load_certs_from_files(cert_pem_path, key_pem_path) {
+                        Ok((certs, key)) => {
+                            // Log cert file age for monitoring
+                            if let Ok(age) = std::fs::metadata(cert_pem_path)
+                                .and_then(|m| m.modified())
+                                .map(|mtime| mtime.elapsed().unwrap_or_default())
+                            {
+                                let days = age.as_secs() / 86400;
+                                if days > 300 {
+                                    tracing::warn!(
+                                        "Self-signed cert is {days} days old, will regenerate at 365 days"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "Loaded self-signed cert from {cert_pem_path} (age: {days} days)"
+                                    );
+                                }
+                            }
+                            Some((certs, key))
+                        }
+                        Err(e) => {
+                            tracing::warn!("Existing self-signed cert invalid, regenerating: {e}");
+                            None
+                        }
                     }
                 }
             } else {
@@ -54,10 +86,28 @@ pub fn build_tls_config(
                 None => {
                     let (certs, priv_key) = generate_self_signed()?;
 
-                    // Persist cert PEM for agent pinning
+                    // Persist cert PEM for agent pinning (fsync for crash safety).
+                    // Mode 0644: the cert is public; agents need to read it after
+                    // dropping privileges. UMask=0077 in systemd would make it 0600
+                    // if we used File::create() without explicit mode.
                     let pem_data = pem::encode(&pem::Pem::new("CERTIFICATE", certs[0].to_vec()));
-                    std::fs::write(cert_pem_path, pem_data.as_bytes())
-                        .context("Failed to write self-signed cert PEM")?;
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        let cert_file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .mode(0o644)
+                            .open(cert_pem_path)
+                            .context("Failed to create self-signed cert PEM")?;
+                        use std::io::Write;
+                        let mut writer = std::io::BufWriter::new(&cert_file);
+                        writer
+                            .write_all(pem_data.as_bytes())
+                            .context("Failed to write self-signed cert PEM")?;
+                        writer.flush()?;
+                        cert_file.sync_all().context("Failed to fsync cert PEM")?;
+                    }
 
                     // Persist key PEM so cert survives restarts
                     {
@@ -68,17 +118,22 @@ pub fn build_tls_config(
                         };
                         let key_pem_data =
                             pem::encode(&pem::Pem::new("PRIVATE KEY", key_bytes.to_vec()));
-                        std::fs::OpenOptions::new()
+                        let key_file = std::fs::OpenOptions::new()
                             .write(true)
                             .create(true)
                             .truncate(true)
                             .mode(0o600)
                             .open(key_pem_path)
-                            .and_then(|mut f| {
-                                use std::io::Write;
-                                f.write_all(key_pem_data.as_bytes())
-                            })
-                            .context("Failed to write self-signed key PEM")?;
+                            .context("Failed to create self-signed key PEM")?;
+                        {
+                            use std::io::Write;
+                            let mut writer = std::io::BufWriter::new(&key_file);
+                            writer
+                                .write_all(key_pem_data.as_bytes())
+                                .context("Failed to write self-signed key PEM")?;
+                            writer.flush()?;
+                        }
+                        key_file.sync_all().context("Failed to fsync key PEM")?;
                     }
 
                     tracing::info!("Generated self-signed cert: {cert_pem_path} + {key_pem_path}");

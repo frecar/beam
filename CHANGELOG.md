@@ -7,34 +7,52 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.21] - 2026-02-17
 
+Security hardening release: rate limiting improvements, file permission tightening, systemd sandboxing, accessibility fixes, and first-boot reliability.
+
 ### Security
 - Rate limiter: split into read-only check + failure recording; only failed attempts count against the limit
 - Rate limiter: dual IP (20/60s) + username (5/60s) limiting to prevent both brute-force and user lockout attacks
+- Rate limiter: IPv6 addresses normalized to /64 prefix to prevent per-address rotation bypass
+- Rate limiter: separate limiter for release endpoint (no longer shared with login)
+- CSP: removed `ws:` from connect-src, only `wss:` allowed
 - Admin endpoints: require explicit `admin_users` config (empty = admin panel disabled)
-- Release endpoint: rate-limited per IP to prevent token brute-force
-- Self-signed TLS cert and key persisted to `/var/lib/beam/` (survives restarts, no longer in world-readable `/tmp`)
+- Admin usernames validated at config load (warns on whitespace, invalid chars)
+- Self-signed TLS cert and key persisted to `/var/lib/beam/` with fsync (survives restarts and power loss)
+- Self-signed TLS cert auto-regenerated if older than 365 days
 - Agent logs moved from `/tmp` to `/var/log/beam/`
 - Fixed `constant_time_eq` u8 truncation bug in token comparison (lengths >255 apart would compare as equal)
 - udev rules: input device permissions tightened from 0666 to 0660 with GROUP=input
 - Config file permissions: 0644 to 0640 (may contain jwt_secret)
 - Directory permissions: `/var/lib/beam/` and `/var/log/beam/` set to 0750
-- systemd: added CapabilityBoundingSet and kernel protection directives
-- Admin error responses no longer leak config file details
+- systemd: added CapabilityBoundingSet, ProtectHostname, RestrictNamespaces, RestrictSUIDSGID, UMask=0077, and kernel protection directives
 
 ### Added
-- SECURITY.md with vulnerability disclosure process and security model documentation
-- GitHub issue templates for bug reports and feature requests
+- SECURITY.md with vulnerability disclosure process, security model, and audit status
+- GitHub issue templates: bug reports (with connection type) and feature requests (with workaround field)
 - `make bump-version VERSION=x.y.z` for consistent version management
 - Version consistency check in CI pipeline
 - Startup log when admin panel is disabled (empty `admin_users`)
+- Login: rate limit countdown timer with live seconds remaining
+- Login: client-side progressive warning after multiple failed attempts
+- Login: `Retry-After` header on 429 responses
+- Rate limiter: IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) normalized to inner IPv4
+- README: GPU prerequisites section, production deployment guide, competitive positioning
 
 ### Fixed
 - README: corrected port from 8443 to 8444
+- README: fixed broken mkcert download URL (was using glob in URL)
 - README: updated agent log path from `/tmp` to `/var/log/beam/`
-- Landing page: removed stale hardcoded version number
+- Landing page: removed stale hardcoded version number, fixed terminal demo accessibility
 - Admin delete endpoint: now returns consistent JSON responses (was plain text)
 - First-boot crash: `/var/lib/beam/` directory created before TLS cert write
 - Self-signed cert persisted across restarts (was regenerated on every restart, breaking session persistence)
+- Login button text aligned with subtitle ("Sign in" instead of "Connect")
+- Accessibility: 429 errors routed through assertive alert for screen readers
+- Accessibility: focus management in loading/error state transitions
+
+### Upgrading from 0.1.20
+- Self-signed TLS certificates moved from `/tmp` to `/var/lib/beam/`. New certs are auto-generated on first run
+- The CSP now blocks unencrypted WebSocket (`ws:`). This should not affect any deployments since Beam requires TLS
 
 ## [0.1.20] - 2026-02-15
 

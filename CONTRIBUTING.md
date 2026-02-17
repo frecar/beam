@@ -10,12 +10,12 @@ cd beam
 # Install development dependencies
 ./scripts/dev-setup.sh
 
-# Build
-cargo build --workspace
-cd web && npm install && npm run build && cd ..
+# Build and run (builds web + Rust, starts server in debug mode)
+make dev
 
-# Run with debug logging
-RUST_LOG=debug cargo run -p beam-server
+# Or build separately:
+# cargo build --workspace
+# cd web && npm install && npm run build && cd ..
 ```
 
 ## Code Style

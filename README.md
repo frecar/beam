@@ -2,7 +2,7 @@
 
 GPU-accelerated remote desktop for Linux, streaming to any browser via WebRTC.
 
-<!-- Replace with actual screenshot: ![Beam desktop session](docs/screenshot.png) -->
+Unlike DCV, Beam is fully open source. Unlike Guacamole, it uses GPU encoding for sub-30ms latency. Built for developers who want to access their Linux workstation from any browser.
 
 ## Features
 
@@ -47,7 +47,14 @@ sudo make install
 sudo systemctl enable --now beam
 ```
 
-Requires Ubuntu 24.04+ or Debian 13+ (x86_64 or ARM64). GPU recommended but not required. Rust and Node.js are installed automatically if not present.
+Requires Ubuntu 24.04+ or Debian 13+ (x86_64 or ARM64). Rust and Node.js are installed automatically if not present.
+
+### GPU Support
+
+Beam auto-detects your GPU and selects the best encoder:
+- **NVIDIA** — requires drivers 535+ (`nvidia-smi` to check). Uses NVENC for lowest latency
+- **AMD / Intel** — uses VA-API (`vainfo` to check)
+- **No GPU** — falls back to x264 software encoding (higher CPU usage, still functional)
 
 ## Verify
 
@@ -98,8 +105,8 @@ Beam auto-generates a self-signed certificate on first run. Browsers will show a
 ```bash
 # Install mkcert (creates a local CA trusted by your browser)
 sudo apt install libnss3-tools
-curl -JLO "https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v*-linux-amd64"
-sudo mv mkcert-* /usr/local/bin/mkcert && sudo chmod +x /usr/local/bin/mkcert
+curl -JLO "https://github.com/FiloSottile/mkcert/releases/download/v1.4.4/mkcert-v1.4.4-linux-amd64"
+sudo mv mkcert-v1.4.4-linux-amd64 /usr/local/bin/mkcert && sudo chmod +x /usr/local/bin/mkcert
 mkcert -install
 
 # Generate cert for your hostname
@@ -127,6 +134,21 @@ sudo systemctl restart beam
 | F9 | Toggle performance overlay (RTT, FPS, bitrate, loss, resolution) |
 | Esc | Exit fullscreen |
 
+## Production Deployment
+
+### Network
+
+Beam needs **port 8444/tcp** open (HTTPS + WebSocket signaling). WebRTC media uses ephemeral UDP ports negotiated via ICE.
+
+If deploying behind a firewall or NAT:
+- Open port 8444/tcp inbound
+- For clients behind symmetric NAT, configure a TURN server in `beam.toml` under `[ice]`
+- Beam binds to `0.0.0.0` by default — restrict with `bind = "10.0.0.1"` in `beam.toml` if needed
+
+### Reverse Proxy
+
+Beam's IP-based rate limiting uses the direct TCP peer address. If running behind a reverse proxy (nginx, Caddy), all clients share the proxy's IP. Configure `bind = "127.0.0.1"` and handle TLS termination at the proxy level.
+
 ## Troubleshooting
 
 Run the diagnostic tool:
@@ -143,6 +165,12 @@ beam-doctor
 - Check agent logs: `journalctl -u beam -f` and `/var/log/beam/agent-*.log`
 - Press F9 to open the performance overlay and check if frames are arriving
 - This usually means H.264 frames aren't reaching the browser — force a reconnect (refresh the page)
+
+### High latency or choppy video
+- Press F9 to open the performance overlay and check RTT, FPS, and encoder
+- High RTT (>50ms on LAN) may indicate network congestion or TURN relay
+- Low FPS with high CPU may mean software encoding — install GPU drivers for hardware acceleration
+- Try reducing resolution or bitrate in `/etc/beam/beam.toml`
 
 ### Connection fails behind corporate firewall
 - WebRTC requires UDP connectivity. Configure a TURN server in `/etc/beam/beam.toml` under `[ice]`

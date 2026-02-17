@@ -46,7 +46,7 @@
 **CRITICAL**: Version bumps require updating THREE files in sync:
 1. `Cargo.toml` — `[workspace.package]` version field (source of truth)
 2. `web/package.json` — version field (must match exactly)
-3. `Cargo.lock` — regenerate by running `cargo check` after editing Cargo.toml
+3. `Cargo.lock` — updated automatically when any `cargo` command runs (e.g., `make check`). No manual step needed if you follow the release workflow
 
 **Before committing any version bump**: run `make version-check` — this MUST pass or CI will block the release.
 
@@ -93,11 +93,13 @@ Follow strict semver:
 Recorded: 2026-02-17. These are settled decisions — do not re-debate without a clear reason.
 
 ### Rate Limiter Architecture
-- Split into read-only `is_allowed()` + write `record_failure()` — only failures increment counters
+- Split into read-only `is_allowed()` + write `record_failure()` -- only failures increment counters
 - Dual limiters: username (5 failures / 60s) + IP (20 failures / 60s)
 - On success: clear username counter only, NOT the IP counter
 - Rationale: one success from IP shouldn't reset brute-force protection against other usernames from the same IP
 - Rejected: single combined limiter (too coarse), clearing both on success (creates bypass)
+- Release endpoint (`/api/sessions/:id/release`) uses a **separate** `release_limiter` (10 failures / 60s per IP) — decoupled from login in v0.1.21. Failed release token guesses no longer affect login availability.
+- IPv6 addresses normalized to /64 prefix before rate limiting (`normalize_ip_for_rate_limit`) — prevents per-address rotation bypass from a single /64 allocation. Fixed in v0.1.21.
 
 ### Admin Authorization
 - Config-based `admin_users` list in `beam.toml`; empty list = admin panel disabled (returns 403)
@@ -117,8 +119,11 @@ Recorded: 2026-02-17. These are settled decisions — do not re-debate without a
 - This was a security bug: attacker could supply a token of sufficiently wrong length and bypass length check
 
 ### systemd Hardening
-- Added: `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `RestrictRealtime`, `LockPersonality`, `TimeoutStopSec=30`
-- Note: some broader hardening flags (e.g., `PrivateTmp`, `ProtectSystem=strict`) were relaxed in v0.1.14 due to Xorg/display access requirements — do not blindly re-add them
+- Full directive set (v0.1.21): `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `RestrictNamespaces`, `RestrictSUIDSGID`, `LockPersonality`, `UMask=0077`, `TimeoutStopSec=30`
+- `RestrictRealtime` is NOT set — beam-agent uses `cap_sys_nice` for real-time frame pacing; seccomp propagates to children, blocking `sched_setscheduler()`
+- `CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_AUDIT_WRITE` -- minimal set for spawning agent processes as real users
+- Note: `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=yes` were relaxed in v0.1.14 due to Xorg/display access requirements -- do not blindly re-add them
+- `RestrictAddressFamilies` is NOT set -- beam-server needs AF_INET, AF_INET6, and AF_UNIX. Adding this is safe but was deferred; add `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` when convenient
 
 ### udev Rules
 - Input device permissions: `MODE="0660" GROUP="input"` (was `0666` world-writable)
@@ -127,3 +132,23 @@ Recorded: 2026-02-17. These are settled decisions — do not re-debate without a
 ### Config File Permissions
 - `beam.toml` installed as `0640` (was `0644`)
 - Rationale: config contains `jwt_secret`; world-readable config is a credential leak
+
+### TLS Certificate Handling
+- Self-signed cert persisted to `/var/lib/beam/server-cert.pem` + `server-key.pem` (key file mode 0600)
+- On startup: reuse existing cert if files exist and parse successfully; regenerate if missing or corrupt
+- Cert age check (v0.1.21): uses file mtime as proxy for expiry — regenerates self-signed cert if >365 days old, warns at startup if >300 days. Does NOT parse x509 `not_after` (avoids adding x509 parsing dependency for self-signed certs). User-provided certs are not age-checked — the user is responsible for rotation.
+- Rejected: automatic cert rotation, ACME/Let's Encrypt integration (out of scope for a LAN/home lab tool)
+
+### Admin Error Responses
+- Admin endpoints return `"You do not have permission to access this resource"` (generic, no information leakage)
+- Rationale (Faramir security review): detailed messages leak config file name, format, and key names to authenticated non-admin users
+- Configuration guidance belongs in server startup logs and documentation, not API responses
+- Empty `admin_users` list = admin panel disabled (returns 403)
+- Startup log emitted when admin panel is disabled
+
+### Frontend Accessibility (Login Flow)
+- 429 rate-limit responses: redirect to login form with countdown timer, assertive ARIA alert, submit button disabled during lockout
+- Countdown uses `aria-live="assertive"` for first announcement, then `aria-live="polite"` for tick updates (prevents screen reader spam)
+- Focus management: login error returns focus to username input; loading state moves focus to cancel button; reconnect overlay focuses reconnect button
+- Progressive warning on failed attempts: client-side counter (never server-side — that would be a brute-force oracle per Faramir security review)
+- Shake animation on login card for visual feedback on errors

@@ -16,8 +16,17 @@ Steps to reproduce the behavior:
 1. ...
 2. ...
 
+**What actually happened**
+What you saw instead (error messages, black screen, etc.).
+
 **Expected behavior**
 What you expected to happen.
+
+**Connection type**
+- [ ] LAN (same network)
+- [ ] WAN (over the internet)
+- [ ] VPN
+- [ ] Other: ___
 
 **Environment**
 - OS: (e.g., Ubuntu 24.04)

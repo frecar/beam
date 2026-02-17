@@ -2,7 +2,7 @@
 # 1. make bump-version VERSION=x.y.z
 # 2. Update CHANGELOG.md (add section for new version)
 # 3. make check              (full CI run locally)
-# 4. git add -A && git commit -m "release: vx.y.z"
+# 4. git add Cargo.toml Cargo.lock web/package.json web/package-lock.json CHANGELOG.md && git commit -m "release: vx.y.z"
 # 5. git tag vx.y.z
 # 6. git push && git push --tags
 # CI will version-check, build, package, and publish automatically.
