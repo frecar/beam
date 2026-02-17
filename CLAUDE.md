@@ -57,20 +57,25 @@ Follow strict semver:
 - **Minor** (0.1.2 → 0.2.0): New features, new capabilities, backward-compatible changes
 - **Major** (0.2.0 → 1.0.0): Breaking changes to config, API, or behavior that require user action
 
-### Release Process (DO NOT SKIP STEPS)
+### Release Process
 
-1. Update versions in `Cargo.toml` and `web/package.json`, then run `cargo check` to update `Cargo.lock`
-2. Validate: `make version-check`
-3. Commit all three files: `git add Cargo.toml Cargo.lock web/package.json && git commit -m "Bump version to X.Y.Z"`
-4. Tag and push: `git tag vX.Y.Z && git push && git push --tags`
-5. CI verifies version match, builds binaries, packages .deb, tests install, publishes to APT repo and GitHub Releases
+```bash
+# 1. Bump version (updates Cargo.toml, web/package.json, Cargo.lock, package-lock.json)
+make bump-version VERSION=X.Y.Z
 
-### Common Mistakes
+# 2. Update CHANGELOG.md with the new version section
 
-- Forgetting `web/package.json` → CI rejects the release
-- Forgetting `cargo check` after editing Cargo.toml → Cargo.lock out of sync
-- Tagging before pushing the version bump commit → tag points to wrong code
-- Pushing tag before `git push` on main → CI builds stale code
+# 3. Commit everything
+git add Cargo.toml Cargo.lock web/package.json web/package-lock.json CHANGELOG.md
+git commit -m "release: vX.Y.Z"
+
+# 4. Release (runs full CI, tags, pushes -- all automatic)
+make release VERSION=X.Y.Z
+```
+
+`make release` validates version sync, runs the full CI suite (fmt, clippy, tests, tsc, vite build), creates the git tag, and pushes both the commit and tag. CI then builds the `.deb` and publishes to the APT repo and GitHub Releases.
+
+**IMPORTANT**: Always use `make release` to tag and push -- never tag manually. This ensures CI passes before a tag is created.
 
 ### APT Repository
 - Hosted on `gh-pages` branch, served via `raw.githubusercontent.com` (avoids GitHub Pages CDN caching)

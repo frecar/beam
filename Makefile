@@ -1,11 +1,11 @@
-# RELEASE PROCESS:
-# 1. make bump-version VERSION=x.y.z
-# 2. Update CHANGELOG.md (add section for new version)
-# 3. make check              (full CI run locally)
-# 4. git add Cargo.toml Cargo.lock web/package.json web/package-lock.json CHANGELOG.md && git commit -m "release: vx.y.z"
-# 5. git tag vx.y.z
-# 6. git push && git push --tags
-# CI will version-check, build, package, and publish automatically.
+# RELEASE PROCESS (single command after committing your changes):
+#   make release VERSION=x.y.z
+#
+# This validates versions, runs full CI, tags, and pushes. CI then builds
+# the .deb package and publishes to the APT repo automatically.
+#
+# If you need to bump version separately (e.g., before committing):
+#   make bump-version VERSION=x.y.z
 #
 # PRE-1.0 VERSIONING:
 # - Patch (0.1.x): bug fixes, new features, security fixes, improvements
@@ -38,6 +38,10 @@ help:
 	@echo "  sudo make install   Build and install to system"
 	@echo "  sudo make deploy    Build release + restart service"
 	@echo "  sudo make uninstall Remove from system"
+	@echo ""
+	@echo "Release:"
+	@echo "  make bump-version VERSION=x.y.z  Bump version in all files"
+	@echo "  make release VERSION=x.y.z       Run CI, tag, push (triggers APT build)"
 	@echo ""
 	@echo "Setup:"
 	@echo "  make setup          Check and install dev dependencies"
@@ -135,15 +139,29 @@ bump-version:
 	@echo "Bumping version to $(VERSION)..."
 	@sed -i '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
 	@node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync('web/package.json','utf8')); p.version='$(VERSION)'; fs.writeFileSync('web/package.json',JSON.stringify(p,null,2)+'\n')"
+	@cd web && npm install --package-lock-only --silent 2>/dev/null || true
+	@$(CARGO) check --quiet
 	@$(MAKE) version-check
+
+# Full release: bump, check, commit, tag, push. Requires VERSION and CHANGELOG already updated.
+# Usage: make release VERSION=0.2.0
+release:
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make release VERSION=x.y.z"; exit 1; fi
+	@if [ -n "$$(git status --porcelain)" ]; then echo "ERROR: Working tree not clean. Commit or stash changes first."; exit 1; fi
+	@CURRENT_VER=$$(grep -A5 '^\[workspace\.package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)"/\1/'); \
+	if [ "$$CURRENT_VER" != "$(VERSION)" ]; then \
+		echo "ERROR: Cargo.toml version ($$CURRENT_VER) != requested version ($(VERSION))"; \
+		echo "Run 'make bump-version VERSION=$(VERSION)' first, update CHANGELOG.md, then commit."; \
+		exit 1; \
+	fi
+	@$(MAKE) version-check
+	@$(MAKE) ci
 	@echo ""
-	@echo "Version bumped to $(VERSION). Next steps:"
-	@echo "  1. Update CHANGELOG.md"
-	@echo "  2. make check"
-	@echo "  3. git add Cargo.toml Cargo.lock web/package.json CHANGELOG.md"
-	@echo "  4. git commit -m 'release: v$(VERSION)'"
-	@echo "  5. git tag v$(VERSION)"
-	@echo "  6. git push && git push --tags"
+	@echo "All checks passed. Tagging v$(VERSION) and pushing..."
+	git tag v$(VERSION)
+	git push && git push --tags
+	@echo ""
+	@echo "Release v$(VERSION) pushed. CI will build .deb and publish to APT repo."
 
 # === Installation ===
 
