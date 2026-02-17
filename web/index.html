@@ -182,17 +182,18 @@
         width: 360px;
         padding: 40px;
         border: 1px solid var(--border-accent);
+        border-top: 2px solid var(--accent);
         border-radius: 8px;
         background: var(--bg-card);
         box-shadow: 0 4px 24px var(--shadow-card);
       }
 
       .login-card h1 {
-        font-size: 20px;
-        font-weight: 500;
-        margin-bottom: 8px;
+        font-size: 22px;
+        font-weight: 600;
+        margin-bottom: 6px;
         color: var(--text-primary);
-        letter-spacing: 0.5px;
+        letter-spacing: 1px;
       }
 
       .login-card p {
@@ -335,31 +336,76 @@
         display: none;
       }
 
-      .login-hints {
+      .login-shortcuts {
         margin-top: 20px;
         padding-top: 16px;
         border-top: 1px solid var(--border-subtle);
-        font-size: 11px;
-        color: var(--text-hint);
-        line-height: 1.8;
       }
 
-      .login-hints kbd {
+      .login-shortcuts-title {
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--text-tertiary);
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-bottom: 10px;
+      }
+
+      .login-shortcuts-grid {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 6px 12px;
+        align-items: baseline;
+      }
+
+      .login-shortcuts-grid kbd {
         display: inline-block;
-        padding: 1px 5px;
+        padding: 2px 6px;
         background: var(--bg-kbd);
         border: 1px solid var(--border-color);
         border-radius: 3px;
         font-size: 11px;
         font-family: inherit;
         color: var(--text-kbd);
+        text-align: center;
+        min-width: 28px;
+        line-height: 1.4;
       }
 
-      .version-footer {
-        margin-top: 24px;
+      .login-shortcuts-grid span {
         font-size: 11px;
-        color: rgba(255, 255, 255, 0.3);
-        text-align: center;
+        color: var(--text-hint);
+        line-height: 1.4;
+      }
+
+      .login-footer {
+        margin-top: 16px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border-subtle);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .login-footer-hint {
+        font-size: 11px;
+        color: var(--text-tertiary);
+      }
+
+      .login-footer-hint kbd {
+        display: inline-block;
+        padding: 1px 5px;
+        background: var(--bg-kbd);
+        border: 1px solid var(--border-color);
+        border-radius: 3px;
+        font-size: 10px;
+        font-family: inherit;
+        color: var(--text-kbd);
+      }
+
+      .login-version {
+        font-size: 11px;
+        color: var(--text-version);
         user-select: none;
       }
 
@@ -1489,8 +1535,16 @@
         }
 
         /* Hide keyboard shortcut hints on mobile */
-        .login-hints {
+        .login-shortcuts {
           display: none;
+        }
+
+        .login-footer-hint {
+          display: none;
+        }
+
+        .login-footer {
+          justify-content: center;
         }
 
         /* Desktop view: full height on mobile (no status bar) */
@@ -1610,14 +1664,18 @@
             <button type="submit" id="connect-btn">Connect</button>
           </form>
           <div class="login-error" id="login-error" role="alert" aria-live="assertive"></div>
-          <div class="login-hints">
-            <kbd>F7</kbd> Sessions &middot;
-            <kbd>F8</kbd> Toggle audio &middot;
-            <kbd>F9</kbd> Performance overlay &middot;
-            <kbd>F10</kbd> Session info &middot;
-            <kbd>F11</kbd> Toggle fullscreen &middot;
-            <kbd>Esc</kbd> Exit fullscreen &middot;
-            <kbd>F12</kbd> Screenshot
+          <div class="login-shortcuts">
+            <div class="login-shortcuts-title">Shortcuts</div>
+            <div class="login-shortcuts-grid">
+              <kbd>F8</kbd>  <span>Toggle audio</span>
+              <kbd>F9</kbd>  <span>Performance overlay</span>
+              <kbd>F11</kbd> <span>Toggle fullscreen</span>
+              <kbd>F12</kbd> <span>Screenshot</span>
+            </div>
+          </div>
+          <div class="login-footer">
+            <span class="login-footer-hint"><kbd>F1</kbd> for all shortcuts</span>
+            <span class="login-version" id="version-footer"></span>
           </div>
         </div>
         <div id="login-loading" class="login-loading" style="display: none;">
@@ -1626,7 +1684,6 @@
           <button type="button" class="loading-cancel" id="loading-cancel">Cancel</button>
         </div>
       </div>
-      <div class="version-footer" id="version-footer"></div>
     </main>
 
     <!-- Desktop View -->
