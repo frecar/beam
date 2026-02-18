@@ -20,7 +20,6 @@ pub struct Encoder {
     appsrc: AppSrc,
     encoded_rx: std::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
     _bus_watch: gst::bus::BusWatchGuard,
-    encoder_type: EncoderType,
     /// Set by the GStreamer bus watch on pipeline error. The capture thread
     /// checks this each iteration and recreates the encoder if set.
     pipeline_error: Arc<AtomicBool>,
@@ -74,19 +73,24 @@ impl Encoder {
         // when nvh264enc stalls (GPU busy, NVENC session issue). Without this,
         // the capture thread silently hangs with 0 FPS and no error log.
         appsrc.set_property("block", false);
-        // Disable internal queue limit -- we control flow via the tokio mpsc
-        // channel (capacity 2) and appsink (max-buffers=1, drop=true).
-        appsrc.set_property("max-bytes", 0u64);
+        // Limit internal queue to 3 frames worth of raw data. When the encoder
+        // can't keep up (e.g. software x264enc at high fps), excess frames are
+        // dropped via push_buffer returning FlowError. Without this limit,
+        // the queue grows unbounded and causes OOM (seen with x264enc at 120fps).
+        let frame_bytes = (width * height * 4) as u64; // BGRA = 4 bytes/pixel
+        appsrc.set_property("max-bytes", frame_bytes * 3);
         // Minimize internal buffering in appsrc
         appsrc.set_property("min-latency", 0i64);
         appsrc.set_property("max-latency", 0i64);
 
         // encoder element
-        let encoder = build_encoder_element(encoder_type, &encoder_name, bitrate)?;
+        let encoder = build_encoder_element(encoder_type, &encoder_name, bitrate, framerate)?;
 
-        // capsfilter: force constrained-baseline profile for browser compatibility
+        // capsfilter: force main profile for best quality/compression ratio.
+        // constrained-baseline was required for WebRTC browser compatibility but
+        // WebCodecs VideoDecoder handles all profiles natively.
         let profile_caps = gst::Caps::builder("video/x-h264")
-            .field("profile", "constrained-baseline")
+            .field("profile", "main")
             .build();
         let capsfilter = ElementFactory::make("capsfilter")
             .property("caps", &profile_caps)
@@ -149,9 +153,11 @@ impl Encoder {
         // h264parse with config-interval=-1 inlines SPS/PPS with every IDR frame
         // (required for Chrome's decoder to initialize).
         //
-        // NVIDIA: appsrc(BGRA) → nvh264enc → h264parse → appsink
+        // NVIDIA: appsrc(BGRA) → nvh264enc → capsfilter(main) → h264parse → appsink
         //   No videoconvert: nvh264enc accepts BGRA directly and does GPU color
-        //   conversion. No profile capsfilter: nvh264enc outputs main profile.
+        //   conversion. Profile capsfilter forces main profile to match browser's
+        //   VideoDecoder codec string (avc1.4d0033). Without it, nvh264enc may
+        //   output high profile, causing VideoDecoder decode errors.
         // Other:  appsrc(BGRx) → videoconvert → encoder → capsfilter → h264parse → appsink
         match encoder_type {
             EncoderType::Nvidia => {
@@ -159,6 +165,7 @@ impl Encoder {
                     .add_many([
                         appsrc.upcast_ref(),
                         &encoder,
+                        &capsfilter,
                         &parser,
                         &parse_capsfilter,
                         appsink.upcast_ref(),
@@ -167,12 +174,13 @@ impl Encoder {
                 gst::Element::link_many([
                     appsrc.upcast_ref(),
                     &encoder,
+                    &capsfilter,
                     &parser,
                     &parse_capsfilter,
                     appsink.upcast_ref(),
                 ])
                 .context("Failed to link NVIDIA pipeline")?;
-                info!("NVIDIA pipeline: appsrc(BGRA) → nvh264enc → h264parse → appsink");
+                info!("NVIDIA pipeline: appsrc(BGRA) → nvh264enc → capsfilter(main) → h264parse → appsink");
             }
             _ => {
                 let convert = ElementFactory::make("videoconvert")
@@ -261,7 +269,6 @@ impl Encoder {
             appsrc,
             encoded_rx: std::sync::Mutex::new(encoded_rx),
             _bus_watch,
-            encoder_type,
             pipeline_error,
         })
     }
@@ -281,12 +288,6 @@ impl Encoder {
             .push_buffer(buffer)
             .context("Failed to push buffer to appsrc")?;
         Ok(())
-    }
-
-    /// The encoder type detected at construction (NVIDIA, VA-API, or software).
-    /// Used for diagnostics and quality mode decisions.
-    pub fn encoder_type(&self) -> EncoderType {
-        self.encoder_type
     }
 
     /// Dynamically adjust the encoder bitrate (kbps).
@@ -372,6 +373,12 @@ fn can_instantiate(name: &str) -> bool {
     }
 }
 
+/// Detect which encoder type is available without creating a full pipeline.
+/// Returns (encoder_type, encoder_element_name).
+pub fn detect_encoder_type(preferred: Option<&str>) -> anyhow::Result<(EncoderType, String)> {
+    detect_encoder(preferred)
+}
+
 fn detect_encoder(preferred: Option<&str>) -> anyhow::Result<(EncoderType, String)> {
     // If user specified a preferred encoder, try it first
     if let Some(pref) = preferred {
@@ -412,6 +419,7 @@ fn build_encoder_element(
     encoder_type: EncoderType,
     name: &str,
     bitrate: u32,
+    framerate: u32,
 ) -> anyhow::Result<gst::Element> {
     let elem = match encoder_type {
         EncoderType::Nvidia => ElementFactory::make(name)
@@ -423,9 +431,9 @@ fn build_encoder_element(
             .property("rc-lookahead", 0u32)
             .property("bframes", 0u32)
             .property("strict-gop", true)
-            .property("qp-max-i", 25i32)
-            .property("qp-max-p", 28i32)
-            .property("vbv-buffer-size", bitrate / 60) // 1 frame buffer
+            .property("qp-max-i", 20i32)
+            .property("qp-max-p", 23i32)
+            .property("vbv-buffer-size", bitrate / framerate.max(1)) // 1 frame buffer
             .build()
             .context("Failed to create nvh264enc")?,
         EncoderType::VaApi => ElementFactory::make(name)

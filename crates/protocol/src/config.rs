@@ -192,10 +192,10 @@ impl BeamConfig {
         }
 
         // --- Video bitrate ---
-        if self.video.bitrate > 100_000 {
+        if self.video.bitrate > 200_000 {
             issues.push(format!(
                 "WARNING: video.bitrate is {} kbps ({} Mbps) — this is unusually high \
-                 and may indicate a misconfiguration. Typical values: 2000-20000 kbps.",
+                 and may indicate a misconfiguration. Typical values: 20000-100000 kbps.",
                 self.video.bitrate,
                 self.video.bitrate / 1000
             ));
@@ -291,16 +291,16 @@ fn default_port() -> u16 {
     8444
 }
 fn default_bitrate() -> u32 {
-    5000
+    50000
 }
 fn default_min_bitrate() -> u32 {
-    500
+    2000
 }
 fn default_max_bitrate() -> u32 {
-    20000
+    100000
 }
 fn default_framerate() -> u32 {
-    60
+    120
 }
 fn default_max_width() -> u32 {
     3840 // 4K
@@ -349,10 +349,10 @@ mod tests {
         assert!(config.server.metrics_require_auth);
 
         // Video defaults
-        assert_eq!(config.video.bitrate, 5000);
-        assert_eq!(config.video.min_bitrate, 500);
-        assert_eq!(config.video.max_bitrate, 20000);
-        assert_eq!(config.video.framerate, 60);
+        assert_eq!(config.video.bitrate, 50000);
+        assert_eq!(config.video.min_bitrate, 2000);
+        assert_eq!(config.video.max_bitrate, 100000);
+        assert_eq!(config.video.framerate, 120);
         assert!(config.video.encoder.is_none());
         assert_eq!(config.video.max_width, 3840);
         assert_eq!(config.video.max_height, 2160);
@@ -383,8 +383,8 @@ framerate = 30
         assert_eq!(config.video.bitrate, 8000);
         assert_eq!(config.video.framerate, 30);
         // Video: remaining fields use defaults
-        assert_eq!(config.video.min_bitrate, 500);
-        assert_eq!(config.video.max_bitrate, 20000);
+        assert_eq!(config.video.min_bitrate, 2000);
+        assert_eq!(config.video.max_bitrate, 100000);
         assert!(config.video.encoder.is_none());
         assert_eq!(config.video.max_width, 3840);
         assert_eq!(config.video.max_height, 2160);
@@ -427,8 +427,8 @@ max_height = 0
         assert_eq!(config.video.max_width, 0);
         assert_eq!(config.video.max_height, 0);
         // Other video fields retain defaults
-        assert_eq!(config.video.bitrate, 5000);
-        assert_eq!(config.video.framerate, 60);
+        assert_eq!(config.video.bitrate, 50000);
+        assert_eq!(config.video.framerate, 120);
     }
 
     #[test]
@@ -628,13 +628,13 @@ idle_timeout = 7200
     }
 
     #[test]
-    fn validate_bitrate_over_100k_is_warning() {
+    fn validate_bitrate_over_200k_is_warning() {
         let mut config = valid_config();
-        config.video.bitrate = 100_001;
+        config.video.bitrate = 200_001;
         let issues = validate_issues(&config);
         assert!(
             has_warning(&issues, "bitrate"),
-            "bitrate > 100000 should warn"
+            "bitrate > 200000 should warn"
         );
         assert!(
             !has_error(&issues, "bitrate"),
@@ -643,9 +643,9 @@ idle_timeout = 7200
     }
 
     #[test]
-    fn validate_bitrate_100k_is_ok() {
+    fn validate_bitrate_200k_is_ok() {
         let mut config = valid_config();
-        config.video.bitrate = 100_000;
+        config.video.bitrate = 200_000;
         assert!(config.validate().is_ok());
     }
 
@@ -814,7 +814,7 @@ idle_timeout = 7200
     #[test]
     fn validate_warnings_only_is_err_with_no_errors() {
         let mut config = valid_config();
-        config.video.bitrate = 200_000; // warning only
+        config.video.bitrate = 200_001; // warning only
         let issues = validate_issues(&config);
         assert!(!issues.is_empty(), "should have warning");
         assert!(

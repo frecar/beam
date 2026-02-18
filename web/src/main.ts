@@ -798,12 +798,11 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   ui.setOnDisconnect(handleDisconnect);
   ui.setOnEndSession(handleEndSession);
 
-  // Wire FPS updates from renderer to UI + perf overlay
-  renderer.onFpsUpdate((fps) => {
-    updateLatencyStatsFps(fps);
+  // Wire FPS + decode time updates from renderer to UI + perf overlay
+  renderer.onFpsUpdate((fps, decodeMs) => {
+    updateLatencyStatsFps(fps, decodeMs);
     perfFps = fps;
-    // Update perf overlay with just FPS (no RTT/bitrate/loss in WS mode)
-    updatePerfOverlay(0, perfFps, 0, 0);
+    updatePerfOverlay(decodeMs, perfFps, 0, 0);
   });
 
   // Wire video frames from connection to renderer

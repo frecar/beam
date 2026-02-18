@@ -1,9 +1,9 @@
 use anyhow::Context;
 use uuid::Uuid;
 
-pub(crate) const DEFAULT_BITRATE: u32 = 100_000; // 100 Mbps -- for VA-API/software encoders
-pub(crate) const LOW_BITRATE: u32 = 5_000; // 5 Mbps -- for constrained WAN connections
-pub(crate) const DEFAULT_FRAMERATE: u32 = 120; // 120fps -- WebCodecs removes WebRTC jitter buffer bottleneck
+pub(crate) const DEFAULT_BITRATE: u32 = 50_000; // 50 Mbps -- LAN default
+pub(crate) const LOW_BITRATE: u32 = 5_000; // 5 Mbps -- bandwidth-constrained mode
+pub(crate) const DEFAULT_FRAMERATE: u32 = 120; // 120fps -- WebCodecs removes jitter buffer bottleneck
 pub(crate) const LOW_FRAMERATE: u32 = 30; // 30fps for low quality mode
 
 pub(crate) struct Args {

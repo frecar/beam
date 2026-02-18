@@ -379,23 +379,36 @@ async fn main() -> anyhow::Result<()> {
     let width = screen_capture.width();
     let height = screen_capture.height();
 
-    // Create encoder
-    let initial_framerate = args.framerate;
-    let initial_bitrate = args.bitrate;
+    // Detect encoder type first to determine framerate/bitrate caps.
+    // Software x264enc ultrafast on ARM64 can only sustain ~60fps at 1080p.
+    // Attempting 120fps causes the appsrc queue to grow faster than the
+    // encoder drains it, leading to OOM.
+    let encoder_pref = args.encoder.clone();
+    let (encoder_type, _) = encoder::detect_encoder_type(args.encoder.as_deref())?;
+    let config_framerate;
+    let config_bitrate;
+    if matches!(encoder_type, encoder::EncoderType::Software) && args.framerate > 60 {
+        config_framerate = 60;
+        config_bitrate = args.bitrate.min(20_000);
+        warn!(
+            requested_fps = args.framerate,
+            capped_fps = config_framerate,
+            capped_bitrate = config_bitrate,
+            "Software encoder: capping framerate to 60fps and bitrate to 20Mbps"
+        );
+    } else {
+        config_framerate = args.framerate;
+        config_bitrate = args.bitrate;
+    }
+
     let encoder = Encoder::with_encoder_preference(
         width,
         height,
-        initial_framerate,
-        initial_bitrate,
+        config_framerate,
+        config_bitrate,
         args.encoder.as_deref(),
     )
     .context("Failed to initialize encoder")?;
-    let encoder_type = encoder.encoder_type();
-    let encoder_pref = args.encoder.clone();
-
-    // Config-driven values for capture/encode
-    let config_bitrate = args.bitrate;
-    let config_framerate = args.framerate;
 
     // Channel for encoded video frames: capture thread -> async write loop
     let (encoded_tx, mut encoded_rx) = mpsc::channel::<Vec<u8>>(2);
@@ -584,18 +597,25 @@ async fn main() -> anyhow::Result<()> {
                         }
                         CaptureCommand::SetQualityHigh(is_high) => {
                             let new_framerate = if is_high { config_framerate } else { LOW_FRAMERATE };
-                            let dynamic_bitrate = !matches!(encoder_type, encoder::EncoderType::Nvidia);
-                            if dynamic_bitrate {
-                                let new_bitrate = if is_high { config_bitrate } else { LOW_BITRATE };
-                                encoder.set_bitrate(new_bitrate);
-                                current_bitrate = new_bitrate;
-                                info!(bitrate = new_bitrate, fps = new_framerate, high = is_high, "Quality mode applied");
-                            } else {
-                                info!(fps = new_framerate, high = is_high, "Quality mode applied (framerate only, NVIDIA bitrate locked)");
-                            }
+                            let new_bitrate = if is_high { config_bitrate } else { LOW_BITRATE };
+
                             current_framerate = new_framerate;
+                            current_bitrate = new_bitrate;
                             active_frame_duration_ns = 1_000_000_000u64 / new_framerate as u64;
-                            encoder.force_keyframe();
+
+                            if matches!(encoder_type, encoder::EncoderType::Nvidia) {
+                                // NVIDIA: runtime set_bitrate() corrupts colors.
+                                // Recreate the entire pipeline with the new bitrate.
+                                info!(bitrate = new_bitrate, fps = new_framerate, high = is_high,
+                                      "Quality mode changed, recreating NVIDIA encoder");
+                                recreate = EncoderRecreate::Reset;
+                                break;
+                            } else {
+                                encoder.set_bitrate(new_bitrate);
+                                encoder.force_keyframe();
+                                info!(bitrate = new_bitrate, fps = new_framerate, high = is_high,
+                                      "Quality mode applied");
+                            }
                         }
                         CaptureCommand::ResetEncoder => {
                             let elapsed = last_encoder_reset.elapsed();

@@ -401,10 +401,10 @@ mod tests {
         let config: crate::BeamConfig = toml::from_str("").unwrap();
         assert_eq!(config.server.port, 8444);
         assert_eq!(config.server.bind, "0.0.0.0");
-        assert_eq!(config.video.bitrate, 5000);
-        assert_eq!(config.video.min_bitrate, 500);
-        assert_eq!(config.video.max_bitrate, 20000);
-        assert_eq!(config.video.framerate, 60);
+        assert_eq!(config.video.bitrate, 50000);
+        assert_eq!(config.video.min_bitrate, 2000);
+        assert_eq!(config.video.max_bitrate, 100000);
+        assert_eq!(config.video.framerate, 120);
         assert!(config.audio.enabled);
         assert_eq!(config.session.max_sessions, 8);
         assert_eq!(config.session.default_width, 1920);

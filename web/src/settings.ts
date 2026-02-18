@@ -211,55 +211,14 @@ export function updatePerfOverlay(perfLatency: number, perfFps: number, perfBitr
 
 // --- Latency stats display (status bar) ---
 
-function tooltipRow(label: string, value: string): string {
-  return `<div class="ls-tooltip-row"><span class="ls-tooltip-label">${label}</span><span>${value}</span></div>`;
-}
 
-/** Update the compact latency stats display in the status bar */
-export function updateLatencyStats(
-  rttMs: number | null,
-  decodeMs: number,
-  lossPercent: number,
-  rttSamples: number[],
-  perfFps: number,
-  lastJitterMs: number,
-  totalPacketsReceived: number,
-  totalPacketsLost: number,
-  lastVideoResolution: string,
-  lastVideoCodec: string,
-): void {
-  if (rttMs !== null) {
-    const rttRounded = Math.round(rttMs);
-    lsRtt.textContent = `RTT: ${rttRounded}ms`;
-    lsRtt.className = "ls-stat " + (rttMs < 20 ? "ls-good" : rttMs <= 50 ? "ls-warn" : "ls-bad");
-  }
-
-  if (decodeMs > 0) {
-    lsDecode.textContent = `Dec: ${decodeMs.toFixed(1)}ms`;
-  }
-
-  lsLoss.textContent = `Loss: ${lossPercent.toFixed(1)}%`;
-
-  // Update tooltip with detailed stats
-  const avgRtt = rttSamples.length > 0
-    ? Math.round(rttSamples.reduce((a, b) => a + b, 0) / rttSamples.length)
-    : null;
-
-  lsTooltip.innerHTML = [
-    tooltipRow("RTT", rttMs !== null ? `${Math.round(rttMs)} ms${avgRtt !== null ? ` (avg: ${avgRtt} ms)` : ""}` : "--"),
-    tooltipRow("Jitter", `${lastJitterMs.toFixed(1)} ms`),
-    tooltipRow("FPS", `${Math.round(perfFps)}`),
-    tooltipRow("Decode", decodeMs > 0 ? `${decodeMs.toFixed(1)} ms` : "--"),
-    tooltipRow("Received", `${totalPacketsReceived.toLocaleString()} pkts`),
-    tooltipRow("Lost", `${totalPacketsLost.toLocaleString()} (${lossPercent.toFixed(2)}%)`),
-    tooltipRow("Resolution", lastVideoResolution || "--"),
-    tooltipRow("Codec", lastVideoCodec || "--"),
-  ].join("");
-}
-
-/** Update just the FPS in the latency stats (called from renderer callback) */
-export function updateLatencyStatsFps(fps: number): void {
+/** Update FPS and decode time in the latency stats (called from renderer callback) */
+export function updateLatencyStatsFps(fps: number, decodeMs?: number): void {
   lsFps.textContent = `FPS: ${Math.round(fps)}`;
+  if (decodeMs !== undefined && decodeMs > 0) {
+    lsDecode.textContent = `Dec: ${decodeMs.toFixed(1)}ms`;
+    lsDecode.className = "ls-stat " + (decodeMs < 5 ? "ls-good" : decodeMs <= 16 ? "ls-warn" : "ls-bad");
+  }
 }
 
 // --- Idle timeout warning ---
@@ -279,11 +238,12 @@ export function hideIdleWarning(idleWarningVisible: boolean): boolean {
 
 /** Reset the latency stats display to defaults */
 export function resetLatencyStats(): void {
-  lsRtt.textContent = "RTT: --";
-  lsRtt.className = "ls-stat";
+  lsRtt.textContent = "";
+  lsRtt.style.display = "none";
   lsFps.textContent = "FPS: --";
   lsDecode.textContent = "Dec: --";
-  lsLoss.textContent = "Loss: --";
+  lsLoss.textContent = "";
+  lsLoss.style.display = "none";
   lsTooltip.innerHTML = "";
 }
 

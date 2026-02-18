@@ -22,10 +22,13 @@ export class WebCodecsRenderer {
   private currentFps = 0;
   private fpsInterval: ReturnType<typeof setInterval> | null = null;
   private audioMuted = true;
+  private nextAudioPlayTime = 0;
   private muteChangeCallback: ((muted: boolean) => void) | null = null;
-  private fpsCallback: ((fps: number) => void) | null = null;
+  private fpsCallback: ((fps: number, decodeMs: number) => void) | null = null;
   private firstFrameCallback: (() => void) | null = null;
   private firstFrameFired = false;
+  private lastFeedTimeMs = 0;
+  private decodeTimeMs = 0;
 
   constructor(canvas: HTMLCanvasElement, containerElement: HTMLElement) {
     this.canvas = canvas;
@@ -120,6 +123,7 @@ export class WebCodecsRenderer {
         this.ctx.drawImage(frame, 0, 0);
         frame.close();
         this.framesDecoded++;
+        this.decodeTimeMs = performance.now() - this.lastFeedTimeMs;
 
         if (!this.firstFrameFired) {
           this.firstFrameFired = true;
@@ -132,7 +136,7 @@ export class WebCodecsRenderer {
     });
 
     this.decoder.configure({
-      codec: "avc1.4d0028", // Main profile, Level 4.0
+      codec: "avc1.4d0033", // Main profile, Level 5.1
       hardwareAcceleration: "prefer-hardware",
       optimizeForLatency: true,
     });
@@ -167,6 +171,7 @@ export class WebCodecsRenderer {
     });
 
     try {
+      this.lastFeedTimeMs = performance.now();
       this.decoder.decode(chunk);
     } catch (err) {
       console.error("VideoDecoder.decode() error:", err);
@@ -178,6 +183,7 @@ export class WebCodecsRenderer {
     if (this.audioMuted || !this.audioContext) return;
 
     if (!this.audioDecoder) {
+      this.nextAudioPlayTime = 0;
       this.audioDecoder = new AudioDecoder({
         output: (audioData: AudioData) => {
           // Play audio via AudioContext
@@ -195,7 +201,14 @@ export class WebCodecsRenderer {
             const source = this.audioContext.createBufferSource();
             source.buffer = buffer;
             source.connect(this.audioContext.destination);
-            source.start();
+
+            const now = this.audioContext.currentTime;
+            // Snap forward if we've fallen behind (network stall, tab resume)
+            if (this.nextAudioPlayTime < now) {
+              this.nextAudioPlayTime = now;
+            }
+            source.start(this.nextAudioPlayTime);
+            this.nextAudioPlayTime += buffer.duration;
           }
           audioData.close();
         },
@@ -231,8 +244,8 @@ export class WebCodecsRenderer {
     return this.currentFps;
   }
 
-  /** Set callback to receive FPS updates */
-  onFpsUpdate(callback: (fps: number) => void): void {
+  /** Set callback to receive FPS and decode time updates */
+  onFpsUpdate(callback: (fps: number, decodeMs: number) => void): void {
     this.fpsCallback = callback;
   }
 
@@ -261,6 +274,7 @@ export class WebCodecsRenderer {
       try { this.audioDecoder.close(); } catch { /* already closed */ }
       this.audioDecoder = null;
     }
+    this.nextAudioPlayTime = 0;
     if (this.audioContext) {
       this.audioContext.close();
       this.audioContext = null;
@@ -278,7 +292,7 @@ export class WebCodecsRenderer {
       const decoded = this.framesDecoded - this.prevFrameCount;
       this.currentFps = decoded;
       this.prevFrameCount = this.framesDecoded;
-      this.fpsCallback?.(this.currentFps);
+      this.fpsCallback?.(this.currentFps, this.decodeTimeMs);
     }, 1000);
   }
 
