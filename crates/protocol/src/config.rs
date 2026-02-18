@@ -870,5 +870,4 @@ idle_timeout = 7200
             "empty admin username should produce warning"
         );
     }
-
 }

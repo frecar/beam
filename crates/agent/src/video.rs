@@ -2,10 +2,10 @@ use crate::CaptureCommand;
 use crate::h264;
 use crate::signaling::WsSender;
 
+use beam_protocol::VideoFrameHeader;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use beam_protocol::VideoFrameHeader;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
@@ -81,13 +81,8 @@ pub(crate) async fn run_video_send_loop(
         let width = capture_width.load(Ordering::Relaxed) as u16;
         let height = capture_height.load(Ordering::Relaxed) as u16;
         let timestamp_us = capture_start.elapsed().as_micros() as u64;
-        let header = VideoFrameHeader::video(
-            width,
-            height,
-            timestamp_us,
-            data.len() as u32,
-            is_idr,
-        );
+        let header =
+            VideoFrameHeader::video(width, height, timestamp_us, data.len() as u32, is_idr);
         let frame_bytes = header.serialize_with_payload(&data);
 
         match ws_tx.try_send(Message::Binary(frame_bytes.into())) {
@@ -119,10 +114,7 @@ pub(crate) async fn run_video_send_loop(
 
 /// Write encoded audio frames as WebSocket binary messages.
 /// Uses the same VideoFrameHeader format with the audio flag set.
-pub(crate) async fn run_audio_send_loop(
-    audio_rx: &mut mpsc::Receiver<Vec<u8>>,
-    ws_tx: &WsSender,
-) {
+pub(crate) async fn run_audio_send_loop(audio_rx: &mut mpsc::Receiver<Vec<u8>>, ws_tx: &WsSender) {
     let capture_start = Instant::now();
     while let Some(data) = audio_rx.recv().await {
         let timestamp_us = capture_start.elapsed().as_micros() as u64;

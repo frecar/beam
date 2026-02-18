@@ -31,7 +31,13 @@ pub struct VideoFrameHeader {
 
 impl VideoFrameHeader {
     /// Create a new video frame header.
-    pub fn video(width: u16, height: u16, timestamp_us: u64, payload_length: u32, keyframe: bool) -> Self {
+    pub fn video(
+        width: u16,
+        height: u16,
+        timestamp_us: u64,
+        payload_length: u32,
+        keyframe: bool,
+    ) -> Self {
         Self {
             flags: if keyframe { FLAG_KEYFRAME } else { 0 },
             width,

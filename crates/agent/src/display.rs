@@ -299,6 +299,33 @@ impl VirtualDisplay {
             }
             let _ = fs::write(format!("{helpers_dir}/helpers.rc"), &helpers_rc);
 
+            // Set XDG default browser via mimeapps.list so the "choose your browser"
+            // dialog never appears. Map the browser binary name to its .desktop file.
+            // Written to XDG_CONFIG_HOME (which we set to xfce_config_dir for sessions).
+            if let Some(browser) = find_non_snap_browser() {
+                let desktop_file = match browser {
+                    "firefox-esr" => "firefox-esr.desktop",
+                    "firefox" => "firefox.desktop",
+                    "google-chrome-stable" | "google-chrome" => "google-chrome.desktop",
+                    "chromium-browser" | "chromium" => "chromium-browser.desktop",
+                    "epiphany-browser" => "org.gnome.Epiphany.desktop",
+                    _ => "",
+                };
+                if !desktop_file.is_empty() {
+                    let mimeapps_path = format!("{xfce_config_dir}/mimeapps.list");
+                    let content = format!(
+                        "[Default Applications]\n\
+                         x-scheme-handler/http={d}\n\
+                         x-scheme-handler/https={d}\n\
+                         text/html={d}\n\
+                         application/xhtml+xml={d}\n",
+                        d = desktop_file,
+                    );
+                    let _ = fs::write(&mimeapps_path, content);
+                    info!(desktop_file, "Set XDG default browser via mimeapps.list");
+                }
+            }
+
             // Create XDG_RUNTIME_DIR for this session. Without it, D-Bus services,
             // GVFS, and PulseAudio can't find proper socket paths. Normally created
             // by logind for interactive sessions, but beam-agent is spawned by the

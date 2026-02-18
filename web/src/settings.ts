@@ -1,15 +1,12 @@
 /**
- * Quality mode, theme toggling, idle timeout, performance overlay,
- * network quality monitoring, and latency stats display.
+ * Theme toggling, idle timeout, performance overlay, and latency stats display.
  */
 
-import type { BeamConnection } from "./connection";
-import type { BeamUI } from "./ui";
 import type { ConnectionState } from "./ui-state";
 import {
   btnTheme, perfOverlay, remoteVideo,
   lsRtt, lsFps, lsDecode, lsLoss, lsTooltip,
-  bandwidthIndicator, nqDot, idleWarning,
+  bandwidthIndicator, idleWarning,
 } from "./ui-state";
 
 // --- Storage keys ---
@@ -18,8 +15,6 @@ export const SCROLL_SPEED_KEY = "beam_scroll_speed";
 export const THEME_KEY = "beam_theme";
 export const FORWARD_KEYS_KEY = "beam_forward_keys";
 export const SESSION_TIMEOUT_KEY = "beam_session_timeout";
-export const QUALITY_MODE_KEY = "beam_quality_mode";
-
 // --- Idle timeout ---
 export const IDLE_WARNING_BEFORE_SECS = 120; // Show warning 2 min before expiry
 export const IDLE_CHECK_INTERVAL_MS = 30_000; // Check every 30s
@@ -71,79 +66,6 @@ export function initTheme(): void {
   // If no saved preference, neither class is set, so the
   // @media (prefers-color-scheme: light) rule in CSS takes effect.
   updateThemeButton();
-}
-
-// --- Network quality monitor ---
-
-/** Compute a 0-100 network quality score from RTT and packet loss */
-export function computeNetworkScore(rttMs: number | null, lossPercent: number): number {
-  let rttScore = 100;
-  if (rttMs !== null) {
-    if (rttMs > 100) rttScore = 20;
-    else if (rttMs > 50) rttScore = 50;
-    else if (rttMs > 20) rttScore = 80;
-  }
-
-  let lossScore = 100;
-  if (lossPercent > 1) lossScore = 20;
-  else if (lossPercent > 0.1) lossScore = 60;
-
-  return Math.round((rttScore + lossScore) / 2);
-}
-
-/** Update the network quality dot color */
-export function updateNetworkQualityDot(score: number, currentConnectionState: ConnectionState): void {
-  if (currentConnectionState !== "connected") {
-    nqDot.classList.remove("visible");
-    return;
-  }
-  nqDot.classList.remove("nq-good", "nq-fair", "nq-poor");
-  if (score > 70) {
-    nqDot.classList.add("nq-good");
-  } else if (score > 40) {
-    nqDot.classList.add("nq-fair");
-  } else {
-    nqDot.classList.add("nq-poor");
-  }
-  nqDot.classList.add("visible");
-}
-
-/** Update the quality select option text to reflect auto level */
-export function updateQualitySelectDisplay(qualityMode: "auto" | "high" | "low", autoQualityLevel: "high" | "low"): void {
-  const qualitySelect = document.getElementById("quality-select") as HTMLSelectElement | null;
-  if (!qualitySelect) return;
-  const autoOption = qualitySelect.querySelector('option[value="auto"]') as HTMLOptionElement | null;
-  if (autoOption) {
-    autoOption.textContent = qualityMode === "auto"
-      ? `Auto (${autoQualityLevel === "high" ? "High" : "Low"})`
-      : "Auto";
-  }
-}
-
-/** Switch auto quality level and notify the agent */
-export function switchAutoQuality(
-  level: "high" | "low",
-  autoQualityLevel: "high" | "low",
-  qualityMode: "auto" | "high" | "low",
-  connection: BeamConnection | null,
-  ui: BeamUI | null,
-): { newLevel: "high" | "low" } {
-  if (autoQualityLevel === level) return { newLevel: autoQualityLevel };
-
-  // Send quality command to agent
-  connection?.sendInput({ t: "q", mode: level });
-
-  // Update select display
-  updateQualitySelectDisplay(qualityMode, level);
-
-  // Toast notification
-  if (level === "low") {
-    ui?.showNotification("Quality reduced due to network conditions", "warning");
-  } else {
-    ui?.showNotification("Quality restored to high", "success");
-  }
-
-  return { newLevel: level };
 }
 
 // --- Format helpers ---
@@ -247,8 +169,7 @@ export function resetLatencyStats(): void {
   lsTooltip.innerHTML = "";
 }
 
-/** Hide bandwidth indicator and network quality dot */
+/** Hide bandwidth indicator */
 export function resetNetworkIndicators(): void {
   bandwidthIndicator.classList.remove("visible");
-  nqDot.classList.remove("visible");
 }

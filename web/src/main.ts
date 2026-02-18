@@ -11,9 +11,8 @@ import {
 import {
   initTheme, toggleTheme, updateThemeButton,
   THEME_KEY, AUDIO_MUTED_KEY, SCROLL_SPEED_KEY,
-  FORWARD_KEYS_KEY, QUALITY_MODE_KEY, SESSION_TIMEOUT_KEY,
+  FORWARD_KEYS_KEY, SESSION_TIMEOUT_KEY,
   IDLE_WARNING_BEFORE_SECS, IDLE_CHECK_INTERVAL_MS,
-  updateQualitySelectDisplay,
   updatePerfOverlay,
   updateLatencyStatsFps,
   showIdleWarning, hideIdleWarning,
@@ -68,10 +67,6 @@ let isReturningToLogin = false;
 // Performance overlay state (updated from renderer)
 let perfFps = 0;
 
-
-// --- Auto quality mode ---
-let qualityMode: "auto" | "high" | "low" = "auto";
-let autoQualityLevel: "high" | "low" = "high";
 
 // Idle timeout warning state
 let lastActivity = Date.now();
@@ -856,23 +851,6 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
         };
       }
 
-      // Wire up quality mode selector
-      const qualitySelect = document.getElementById("quality-select") as HTMLSelectElement | null;
-      if (qualitySelect) {
-        qualitySelect.onchange = () => {
-          const mode = qualitySelect.value as "auto" | "high" | "low";
-          localStorage.setItem(QUALITY_MODE_KEY, mode);
-          qualityMode = mode;
-          if (mode === "auto") {
-            autoQualityLevel = "high";
-            connection?.sendInput({ t: "q", mode: "high" });
-          } else {
-            connection?.sendInput({ t: "q", mode });
-          }
-          updateQualitySelectDisplay(qualityMode, autoQualityLevel);
-        };
-      }
-
       // Wire up scroll speed selector
       const scrollSpeedSelect = document.getElementById("scroll-speed-select") as HTMLSelectElement | null;
       if (scrollSpeedSelect) {
@@ -889,14 +867,9 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
       }
     }
 
-    // Always re-send layout, quality, and current dimensions on (re)connect
+    // Re-send layout and current dimensions on (re)connect
     inputHandler.sendLayout();
     inputHandler.sendCurrentDimensions();
-    const savedQuality = localStorage.getItem(QUALITY_MODE_KEY) || "auto";
-    qualityMode = savedQuality as "auto" | "high" | "low";
-    const effectiveQuality = qualityMode === "auto" ? autoQualityLevel : qualityMode;
-    sendInput({ t: "q", mode: effectiveQuality });
-    updateQualitySelectDisplay(qualityMode, autoQualityLevel);
 
     if (!fileUploader) {
       fileUploader = new FileUploader(sendInput);
@@ -1114,7 +1087,7 @@ loadingCancel.addEventListener("click", () => {
 // Track user activity for idle timeout warning
 desktopView.addEventListener("mousemove", recordActivity);
 desktopView.addEventListener("mousedown", recordActivity);
-desktopView.addEventListener("wheel", recordActivity);
+desktopView.addEventListener("wheel", recordActivity, { passive: true });
 document.addEventListener("keydown", recordActivity);
 
 // Graceful session release on tab/window close
@@ -1320,17 +1293,6 @@ const savedUsername = localStorage.getItem("beam_username");
 if (savedUsername) {
   usernameInput.value = savedUsername;
   passwordInput.focus();
-}
-
-// Restore saved quality mode selection
-const savedQualityMode = localStorage.getItem(QUALITY_MODE_KEY);
-if (savedQualityMode) {
-  qualityMode = savedQualityMode as "auto" | "high" | "low";
-  const qualitySelect = document.getElementById("quality-select") as HTMLSelectElement | null;
-  if (qualitySelect) {
-    qualitySelect.value = savedQualityMode;
-  }
-  updateQualitySelectDisplay(qualityMode, autoQualityLevel);
 }
 
 // Restore saved session timeout selection

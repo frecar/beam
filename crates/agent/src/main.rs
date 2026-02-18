@@ -17,7 +17,7 @@ use anyhow::Context;
 use audio::AudioCapture;
 use beam_protocol::InputEvent;
 use capture::ScreenCapture;
-use cli::{DEFAULT_FRAMERATE, LOW_BITRATE, LOW_FRAMERATE};
+use cli::DEFAULT_FRAMERATE;
 use clipboard::ClipboardBridge;
 use encoder::Encoder;
 use input::InputInjector;
@@ -37,8 +37,6 @@ pub(crate) enum CaptureCommand {
         width: u32,
         height: u32,
     },
-    /// Switch quality mode: true = high (LAN), false = low (WAN)
-    SetQualityHigh(bool),
     /// Recreate the encoder pipeline to guarantee a fresh IDR frame.
     ResetEncoder,
 }
@@ -72,7 +70,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
         clipboard_read_tx,
         download_request_tx,
         capture_wake,
-        capture_cmd_tx,
+        capture_cmd_tx: _capture_cmd_tx,
         tab_backgrounded,
         display,
         max_width,
@@ -250,10 +248,8 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                     warn!(layout = %layout, "Invalid keyboard layout name, ignoring");
                 }
             }
-            InputEvent::Quality { ref mode } => {
-                let is_high = mode == "high";
-                info!(mode = %mode, "Quality mode changed");
-                let _ = capture_cmd_tx.send(CaptureCommand::SetQualityHigh(is_high));
+            InputEvent::Quality { .. } => {
+                // Quality selector removed — bitrate/framerate set by config
             }
             InputEvent::VisibilityState { visible } => {
                 debug!(visible, "Browser tab visibility changed");
@@ -536,9 +532,9 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let mut encoder = encoder;
-            let mut current_bitrate = config_bitrate;
-            let mut current_framerate = config_framerate;
-            let mut active_frame_duration_ns = 1_000_000_000u64 / config_framerate as u64;
+            let current_bitrate = config_bitrate;
+            let current_framerate = config_framerate;
+            let active_frame_duration_ns = 1_000_000_000u64 / config_framerate as u64;
             let idle_frame_duration_ns = 1_000_000_000u64 / IDLE_FRAMERATE as u64;
             let background_frame_duration_ns = 1_000_000_000u64 / BACKGROUND_FRAMERATE as u64;
             let mut frame_count: u64 = 0;
@@ -594,28 +590,6 @@ async fn main() -> anyhow::Result<()> {
                             screen_capture = new_capture;
                             recreate = EncoderRecreate::Resize;
                             break;
-                        }
-                        CaptureCommand::SetQualityHigh(is_high) => {
-                            let new_framerate = if is_high { config_framerate } else { LOW_FRAMERATE };
-                            let new_bitrate = if is_high { config_bitrate } else { LOW_BITRATE };
-
-                            current_framerate = new_framerate;
-                            current_bitrate = new_bitrate;
-                            active_frame_duration_ns = 1_000_000_000u64 / new_framerate as u64;
-
-                            if matches!(encoder_type, encoder::EncoderType::Nvidia) {
-                                // NVIDIA: runtime set_bitrate() corrupts colors.
-                                // Recreate the entire pipeline with the new bitrate.
-                                info!(bitrate = new_bitrate, fps = new_framerate, high = is_high,
-                                      "Quality mode changed, recreating NVIDIA encoder");
-                                recreate = EncoderRecreate::Reset;
-                                break;
-                            } else {
-                                encoder.set_bitrate(new_bitrate);
-                                encoder.force_keyframe();
-                                info!(bitrate = new_bitrate, fps = new_framerate, high = is_high,
-                                      "Quality mode applied");
-                            }
                         }
                         CaptureCommand::ResetEncoder => {
                             let elapsed = last_encoder_reset.elapsed();

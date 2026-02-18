@@ -50,8 +50,6 @@ export const reconnectBtn = document.getElementById("reconnect-btn") as HTMLButt
 export const reconnectDisconnectBtn = document.getElementById("reconnect-disconnect-btn") as HTMLButtonElement;
 export const reconnectDesc = document.getElementById("reconnect-desc") as HTMLParagraphElement;
 export const idleWarning = document.getElementById("idle-warning") as HTMLDivElement;
-export const nqDot = document.getElementById("nq-dot") as HTMLSpanElement;
-
 // Clipboard history panel
 export const clipboardHistoryPanel = document.getElementById("clipboard-history-panel") as HTMLDivElement;
 export const chpList = document.getElementById("chp-list") as HTMLDivElement;
@@ -131,22 +129,6 @@ export function setStatus(
       document.title = "Beam - Login";
       setFavicon("#888"); // gray
       break;
-  }
-}
-
-/** Update status bar dot color and text based on current RTT latency */
-export function updateConnectionQuality(rttMs: number, currentConnectionState: ConnectionState): void {
-  if (currentConnectionState !== "connected") return;
-
-  if (rttMs > 80) {
-    statusDot.style.backgroundColor = "#ff6b6b";
-    statusText.textContent = "Connected (slow)";
-  } else if (rttMs >= 30) {
-    statusDot.style.backgroundColor = "#facc15";
-    statusText.textContent = "Connected";
-  } else {
-    statusDot.style.backgroundColor = "#4ade80";
-    statusText.textContent = "Connected";
   }
 }
 

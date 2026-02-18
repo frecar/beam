@@ -180,7 +180,9 @@ impl Encoder {
                     appsink.upcast_ref(),
                 ])
                 .context("Failed to link NVIDIA pipeline")?;
-                info!("NVIDIA pipeline: appsrc(BGRA) → nvh264enc → capsfilter(main) → h264parse → appsink");
+                info!(
+                    "NVIDIA pipeline: appsrc(BGRA) → nvh264enc → capsfilter(main) → h264parse → appsink"
+                );
             }
             _ => {
                 let convert = ElementFactory::make("videoconvert")
@@ -288,37 +290,6 @@ impl Encoder {
             .push_buffer(buffer)
             .context("Failed to push buffer to appsrc")?;
         Ok(())
-    }
-
-    /// Dynamically adjust the encoder bitrate (kbps).
-    /// Works at runtime on VA-API and software encoders.
-    /// NOT safe for NVIDIA (use set_qp instead — runtime bitrate changes corrupt colors).
-    pub fn set_bitrate(&self, bitrate_kbps: u32) {
-        // Find the encoder element in the pipeline
-        let encoder_names = ["vah264enc0", "x264enc0"];
-        for name in &encoder_names {
-            if let Some(elem) = self.pipeline.by_name(name) {
-                elem.set_property("bitrate", bitrate_kbps);
-                debug!(bitrate_kbps, encoder = name, "Bitrate updated");
-                return;
-            }
-        }
-        // Fallback: iterate children to find the encoder
-        for elem in self.pipeline.iterate_elements().into_iter().flatten() {
-            let factory_name = elem
-                .factory()
-                .map(|f| f.name().to_string())
-                .unwrap_or_default();
-            if factory_name.contains("264enc") {
-                elem.set_property("bitrate", bitrate_kbps);
-                debug!(bitrate_kbps, factory = factory_name, "Bitrate updated");
-                return;
-            }
-        }
-        warn!(
-            bitrate_kbps,
-            "No encoder element found in pipeline, bitrate unchanged"
-        );
     }
 
     /// Returns true if the GStreamer pipeline has encountered an error.

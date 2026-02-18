@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
-use beam_protocol::{AgentCommand, InputEvent, SignalingMessage, FRAME_MAGIC};
+use beam_protocol::{AgentCommand, FRAME_MAGIC, InputEvent, SignalingMessage};
 use bytes::Bytes;
 use tokio::sync::{Notify, RwLock, broadcast};
 use tokio::time::{Duration, Instant, interval};

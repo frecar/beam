@@ -909,13 +909,8 @@ mod tests {
 
     #[tokio::test]
     async fn verify_agent_token_rejects_wrong_token() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id = Uuid::new_v4();
         // Non-existent session should reject
         assert!(!manager.verify_agent_token(id, "fake-token").await);
@@ -946,13 +941,8 @@ mod tests {
 
     #[tokio::test]
     async fn verify_release_token_rejects_wrong_token() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id = Uuid::new_v4();
         // Non-existent session should reject
         assert!(!manager.verify_release_token(id, "fake-token").await);
@@ -1031,13 +1021,8 @@ mod tests {
 
     #[tokio::test]
     async fn increment_restart_count_returns_new_count() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id = Uuid::new_v4();
 
         // Insert a session manually
@@ -1078,39 +1063,24 @@ mod tests {
 
     #[tokio::test]
     async fn increment_restart_count_nonexistent_session() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id = Uuid::new_v4();
         assert_eq!(manager.increment_restart_count(id).await, None);
     }
 
     #[tokio::test]
     async fn get_restart_count_nonexistent_session() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id = Uuid::new_v4();
         assert_eq!(manager.get_restart_count(id).await, None);
     }
 
     #[tokio::test]
     async fn restart_count_starts_at_zero() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id = Uuid::new_v4();
 
         // Insert a session
@@ -1144,13 +1114,8 @@ mod tests {
 
     #[tokio::test]
     async fn restart_count_independent_per_session() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
 
@@ -1195,13 +1160,8 @@ mod tests {
 
     #[tokio::test]
     async fn stale_sessions_uses_per_session_timeout() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1302,13 +1262,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_idle_timeout_returns_override_when_set() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id = Uuid::new_v4();
 
         {
@@ -1341,13 +1296,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_idle_timeout_returns_global_when_no_override() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id = Uuid::new_v4();
 
         {
@@ -1380,13 +1330,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_idle_timeout_nonexistent_returns_global() {
-        let manager = SessionManager::new(
-            100,
-            1920,
-            1080,
-            None,
-            beam_protocol::VideoConfig::default(),
-        );
+        let manager =
+            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
         let id = Uuid::new_v4();
         assert_eq!(manager.get_idle_timeout(id, 3600).await, 3600);
     }

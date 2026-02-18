@@ -29,6 +29,7 @@ export class WebCodecsRenderer {
   private firstFrameFired = false;
   private lastFeedTimeMs = 0;
   private decodeTimeMs = 0;
+  private needsKeyframe = true;
 
   constructor(canvas: HTMLCanvasElement, containerElement: HTMLElement) {
     this.canvas = canvas;
@@ -140,6 +141,7 @@ export class WebCodecsRenderer {
       hardwareAcceleration: "prefer-hardware",
       optimizeForLatency: true,
     });
+    this.needsKeyframe = true;
 
     this.startFpsCounter();
   }
@@ -161,8 +163,12 @@ export class WebCodecsRenderer {
 
     const isKeyframe = (flags & 0x01) !== 0;
 
-    // If decoder not yet configured or needs a keyframe to start, skip delta frames
+    // If decoder not yet configured, skip
     if (this.decoder.state !== "configured") return;
+
+    // After configure() or flush(), decoder requires a keyframe first
+    if (this.needsKeyframe && !isKeyframe) return;
+    if (isKeyframe) this.needsKeyframe = false;
 
     const chunk = new EncodedVideoChunk({
       type: isKeyframe ? "key" : "delta",
