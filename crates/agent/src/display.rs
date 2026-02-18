@@ -272,37 +272,33 @@ impl VirtualDisplay {
                 );
             }
 
-            // Configure XFCE preferred applications. On Ubuntu 24.04, many default
-            // apps (Firefox, Chromium) are snap packages which fail under systemd's
-            // RestrictNamespaces (snap confinement needs mount/user/pid namespaces).
-            // Point XFCE to non-snap alternatives if available.
+            // Configure default browser. Snap browsers fail in Beam sessions
+            // (no logind session, no snap env vars, no cgroup access).
+            // We set three layers to cover all lookup mechanisms:
+            // 1. XFCE helpers.rc (exo-open --launch WebBrowser)
+            // 2. XDG mimeapps.list (xdg-open for http/https)
+            // 3. BROWSER env var (universal fallback)
             let helpers_dir = format!("{xfce_config_dir}/xfce4");
             let _ = fs::create_dir_all(&helpers_dir);
-            let browser_line = match find_non_snap_browser() {
-                Some(browser) => {
-                    info!(browser, "Configured XFCE preferred browser (non-snap)");
-                    format!("WebBrowser={browser}")
-                }
-                None => {
-                    warn!(
-                        "No non-snap browser found. Snap browsers fail in Beam sessions \
-                         (systemd RestrictNamespaces blocks snap confinement). \
-                         Install a .deb browser: sudo apt install epiphany-browser"
-                    );
-                    String::new()
-                }
-            };
-            let mut helpers_rc = String::from("[Default]\nTerminalEmulator=xfce4-terminal\n");
-            if !browser_line.is_empty() {
-                helpers_rc.push_str(&browser_line);
-                helpers_rc.push('\n');
-            }
-            let _ = fs::write(format!("{helpers_dir}/helpers.rc"), &helpers_rc);
+            let detected_browser = find_non_snap_browser();
+            if let Some(browser) = detected_browser {
+                info!(browser, "Detected non-snap browser");
 
-            // Set XDG default browser via mimeapps.list so the "choose your browser"
-            // dialog never appears. Map the browser binary name to its .desktop file.
-            // Written to XDG_CONFIG_HOME (which we set to xfce_config_dir for sessions).
-            if let Some(browser) = find_non_snap_browser() {
+                // XFCE helper ID (used by exo-open): must match a helper name
+                // in /usr/share/xfce4/helpers/, NOT the binary name
+                let helper_id = match browser {
+                    "firefox-esr" => "firefox-esr",
+                    "firefox" => "firefox",
+                    "google-chrome-stable" | "google-chrome" => "google-chrome",
+                    "chromium-browser" | "chromium" => "chromium",
+                    "epiphany-browser" => "epiphany",
+                    _ => browser,
+                };
+                let helpers_rc =
+                    format!("[Default]\nTerminalEmulator=xfce4-terminal\nWebBrowser={helper_id}\n");
+                let _ = fs::write(format!("{helpers_dir}/helpers.rc"), &helpers_rc);
+
+                // XDG mimeapps.list (used by xdg-open)
                 let desktop_file = match browser {
                     "firefox-esr" => "firefox-esr.desktop",
                     "firefox" => "firefox.desktop",
@@ -322,8 +318,14 @@ impl VirtualDisplay {
                         d = desktop_file,
                     );
                     let _ = fs::write(&mimeapps_path, content);
-                    info!(desktop_file, "Set XDG default browser via mimeapps.list");
                 }
+            } else {
+                warn!(
+                    "No non-snap browser found. Snap browsers fail in Beam sessions \
+                     (no logind session). Install a .deb browser: sudo apt install epiphany-browser"
+                );
+                let helpers_rc = "[Default]\nTerminalEmulator=xfce4-terminal\n";
+                let _ = fs::write(format!("{helpers_dir}/helpers.rc"), helpers_rc);
             }
 
             // Create XDG_RUNTIME_DIR for this session. Without it, D-Bus services,
@@ -340,25 +342,25 @@ impl VirtualDisplay {
             }
 
             let pulse_server = format!("unix:/tmp/beam-pulse-{}/native", self.display_num);
+            let mut cmd = Command::new("/usr/bin/dbus-launch");
+            cmd.arg("--exit-with-session")
+                .arg("xfce4-session")
+                .env("DISPLAY", &display)
+                .env("PULSE_SERVER", &pulse_server)
+                .env("XDG_CONFIG_HOME", &xfce_config_dir)
+                .env("XDG_RUNTIME_DIR", &runtime_dir)
+                .env("XDG_CURRENT_DESKTOP", "XFCE")
+                .env("XDG_SESSION_DESKTOP", "xfce")
+                .env("GVFS_DISABLE_FUSE", "1");
+
+            // Set BROWSER env var as universal fallback for xdg-open and apps
+            // that check it directly (terminals, non-XFCE apps).
+            if let Some(browser) = detected_browser {
+                cmd.env("BROWSER", browser);
+            }
+
             let child = unsafe {
-                Command::new("/usr/bin/dbus-launch")
-                    .arg("--exit-with-session")
-                    .arg("xfce4-session")
-                    .env("DISPLAY", &display)
-                    .env("PULSE_SERVER", &pulse_server)
-                    .env("XDG_CONFIG_HOME", &xfce_config_dir)
-                    .env("XDG_RUNTIME_DIR", &runtime_dir)
-                    // Electron/libsecret credential storage uses the D-Bus service
-                    // name org.freedesktop.secrets (registered by our gnome-keyring-
-                    // daemon), NOT XDG_CURRENT_DESKTOP. The ":GNOME" suffix was
-                    // activating ~20 GNOME services that all crash in a virtual
-                    // session, causing error dialogs on login.
-                    .env("XDG_CURRENT_DESKTOP", "XFCE")
-                    .env("XDG_SESSION_DESKTOP", "xfce")
-                    // Suppress GVFS FUSE mount (fusermount3 fails under systemd
-                    // restrictions). Thunar still works via GIO API without FUSE.
-                    .env("GVFS_DISABLE_FUSE", "1")
-                    .stdout(Stdio::null())
+                cmd.stdout(Stdio::null())
                     .stderr(Stdio::null())
                     // Create a new session (process group) so we can kill all
                     // grandchildren (xfwm4, xfce4-panel, etc.) on cleanup.
@@ -955,21 +957,32 @@ fn which_exists(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Check if a binary is a snap package (lives under /snap/bin/).
-/// Snap apps fail in Beam sessions because systemd's RestrictNamespaces
-/// blocks the namespace creation that snap confinement requires.
+/// Check if a binary is a snap package. Detects both direct snap binaries
+/// (/snap/bin/...) and wrapper scripts at /usr/bin/ that delegate to snap.
+/// Snap apps fail in Beam sessions because they require a logind session,
+/// snap environment variables, and cgroup access that beam-agent doesn't have.
 fn is_snap_binary(program: &str) -> bool {
-    Command::new("which")
+    let path = Command::new("which")
         .arg(program)
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|path| path.trim().starts_with("/snap/"))
-        .unwrap_or(false)
+        .map(|p| p.trim().to_string());
+
+    match path {
+        Some(p) if p.starts_with("/snap/") => true,
+        Some(p) => {
+            // Check if it's a wrapper script that invokes snap
+            std::fs::read_to_string(&p)
+                .map(|contents| contents.contains("/snap/bin/") || contents.contains("exec snap"))
+                .unwrap_or(false)
+        }
+        None => false,
+    }
 }
 
-/// Find a non-snap browser binary. Snap browsers fail under systemd's
-/// RestrictNamespaces (snap confinement needs mount/user/pid namespaces).
+/// Find a non-snap browser binary. Snap browsers fail in Beam sessions
+/// (no logind session, no snap env vars, no cgroup access).
 fn find_non_snap_browser() -> Option<&'static str> {
     // Order: common .deb browsers, then fallbacks
     [
