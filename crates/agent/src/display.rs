@@ -272,20 +272,34 @@ impl VirtualDisplay {
                 );
             }
 
-            // Configure default browser. Snap browsers fail in Beam sessions
-            // (no logind session, no snap env vars, no cgroup access).
-            // We set three layers to cover all lookup mechanisms:
-            // 1. XFCE helpers.rc (exo-open --launch WebBrowser)
-            // 2. XDG mimeapps.list (xdg-open for http/https)
-            // 3. BROWSER env var (universal fallback)
+            // Configure default applications (browser + terminal).
+            // Three layers to cover all lookup mechanisms:
+            // 1. XFCE helpers.rc — exo-open --launch WebBrowser / TerminalEmulator
+            // 2. XDG mimeapps.list — xdg-open for http/https MIME types
+            // 3. BROWSER / TERMINAL env vars — universal fallback
             let helpers_dir = format!("{xfce_config_dir}/xfce4");
             let _ = fs::create_dir_all(&helpers_dir);
-            let detected_browser = find_non_snap_browser();
-            if let Some(browser) = detected_browser {
-                info!(browser, "Detected non-snap browser");
 
-                // XFCE helper ID (used by exo-open): must match a helper name
-                // in /usr/share/xfce4/helpers/, NOT the binary name
+            let detected_browser = find_non_snap_app(&[
+                "firefox-esr",
+                "google-chrome-stable",
+                "google-chrome",
+                "chromium-browser",
+                "firefox",
+                "chromium",
+                "epiphany-browser",
+            ]);
+            let detected_terminal =
+                find_non_snap_app(&["xfce4-terminal", "gnome-terminal", "xterm"]);
+
+            // helpers.rc: XFCE helper IDs (NOT binary names)
+            let mut helpers_rc = String::from("[Default]\n");
+            if let Some(term) = detected_terminal {
+                // Terminal binary names match XFCE helper IDs directly
+                helpers_rc.push_str(&format!("TerminalEmulator={term}\n"));
+                info!(term, "Default terminal");
+            }
+            if let Some(browser) = detected_browser {
                 let helper_id = match browser {
                     "firefox-esr" => "firefox-esr",
                     "firefox" => "firefox",
@@ -294,11 +308,18 @@ impl VirtualDisplay {
                     "epiphany-browser" => "epiphany",
                     _ => browser,
                 };
-                let helpers_rc =
-                    format!("[Default]\nTerminalEmulator=xfce4-terminal\nWebBrowser={helper_id}\n");
-                let _ = fs::write(format!("{helpers_dir}/helpers.rc"), &helpers_rc);
+                helpers_rc.push_str(&format!("WebBrowser={helper_id}\n"));
+                info!(browser, "Default browser");
+            } else {
+                warn!(
+                    "No non-snap browser found. Install a .deb browser: \
+                     sudo apt install epiphany-browser"
+                );
+            }
+            let _ = fs::write(format!("{helpers_dir}/helpers.rc"), &helpers_rc);
 
-                // XDG mimeapps.list (used by xdg-open)
+            // mimeapps.list: XDG MIME type associations
+            if let Some(browser) = detected_browser {
                 let desktop_file = match browser {
                     "firefox-esr" => "firefox-esr.desktop",
                     "firefox" => "firefox.desktop",
@@ -308,7 +329,6 @@ impl VirtualDisplay {
                     _ => "",
                 };
                 if !desktop_file.is_empty() {
-                    let mimeapps_path = format!("{xfce_config_dir}/mimeapps.list");
                     let content = format!(
                         "[Default Applications]\n\
                          x-scheme-handler/http={d}\n\
@@ -317,15 +337,8 @@ impl VirtualDisplay {
                          application/xhtml+xml={d}\n",
                         d = desktop_file,
                     );
-                    let _ = fs::write(&mimeapps_path, content);
+                    let _ = fs::write(format!("{xfce_config_dir}/mimeapps.list"), content);
                 }
-            } else {
-                warn!(
-                    "No non-snap browser found. Snap browsers fail in Beam sessions \
-                     (no logind session). Install a .deb browser: sudo apt install epiphany-browser"
-                );
-                let helpers_rc = "[Default]\nTerminalEmulator=xfce4-terminal\n";
-                let _ = fs::write(format!("{helpers_dir}/helpers.rc"), helpers_rc);
             }
 
             // Create XDG_RUNTIME_DIR for this session. Without it, D-Bus services,
@@ -353,10 +366,12 @@ impl VirtualDisplay {
                 .env("XDG_SESSION_DESKTOP", "xfce")
                 .env("GVFS_DISABLE_FUSE", "1");
 
-            // Set BROWSER env var as universal fallback for xdg-open and apps
-            // that check it directly (terminals, non-XFCE apps).
+            // Set env vars as universal fallback for apps that check directly.
             if let Some(browser) = detected_browser {
                 cmd.env("BROWSER", browser);
+            }
+            if let Some(term) = detected_terminal {
+                cmd.env("TERMINAL", term);
             }
 
             let child = unsafe {
@@ -981,22 +996,13 @@ fn is_snap_binary(program: &str) -> bool {
     }
 }
 
-/// Find a non-snap browser binary. Snap browsers fail in Beam sessions
-/// (no logind session, no snap env vars, no cgroup access).
-fn find_non_snap_browser() -> Option<&'static str> {
-    // Order: common .deb browsers, then fallbacks
-    [
-        "firefox-esr",
-        "google-chrome-stable",
-        "google-chrome",
-        "chromium-browser",
-        "firefox",
-        "chromium",
-        "epiphany-browser",
-    ]
-    .iter()
-    .copied()
-    .find(|name| which_exists(name) && !is_snap_binary(name))
+/// Find the first non-snap binary from a list of candidates.
+/// Snap apps fail in Beam sessions (no logind session, no snap env vars).
+fn find_non_snap_app(candidates: &[&'static str]) -> Option<&'static str> {
+    candidates
+        .iter()
+        .copied()
+        .find(|name| which_exists(name) && !is_snap_binary(name))
 }
 
 /// Discover DBUS_SESSION_BUS_ADDRESS from a running xfce4-panel process on
