@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-02-18
+
+### Fixed
+- **VideoDecoder keyframe error**: Added keyframe gating after `configureDecoder()` — delta frames before the first keyframe are now skipped instead of causing a `DataError`
+- **NVIDIA encoder profile mismatch**: Added capsfilter to force Main profile in NVENC pipeline. Without it, `nvh264enc` could output High profile, mismatching the `avc1.4d0033` codec string and causing `VideoDecoder` decode errors
+- **Audio distortion**: Fixed overlapping playback — audio chunks are now sequentially scheduled via `nextAudioPlayTime` tracking instead of all starting at `currentTime`
+- **Software encoder OOM**: Capped software encoder (x264enc) to 60fps/20Mbps and bounded appsrc queue to 3 frames to prevent unbounded memory growth
+- **Non-passive wheel listener**: Made activity-tracking wheel listener passive to eliminate Chrome console warning
+
+### Removed
+- **Quality selector** (High/Low/Auto): Removed broken quality mode toggle — NVIDIA encoders don't support runtime bitrate changes, and the selector caused 0fps on mode switch
+- **Dead stats**: Hidden RTT and packet loss from status bar (these were WebRTC stats, no longer available)
+
+### Added
+- **Decode time stat**: Status bar now shows `Dec: X.Xms` (time from feed to decoded frame)
+- **Default browser**: New sessions auto-configure XDG default browser via `mimeapps.list`, eliminating the "choose your browser" dialog on first click
+
+## [0.2.1] - 2026-02-18
+
+### Fixed
+- NVIDIA encoder compatibility: capsfilter for Main profile, audio scheduling, OOM protection for software encoder
+
 ## [0.2.0] - 2026-02-17
 
 **BREAKING**: Complete migration from WebRTC to WebCodecs + WebSocket transport.

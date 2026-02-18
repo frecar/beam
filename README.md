@@ -22,7 +22,7 @@ Fully open source, GPU-accelerated, sub-30ms latency. Built for developers who w
 - **Mac keyboard support** — Cmd-to-Ctrl remapping, smooth trackpad scrolling
 - **Auto keyboard layout** — detects your keyboard layout and syncs to the remote desktop
 - **Adaptive bitrate** — adjusts video quality based on network conditions (VA-API/software encoders)
-- **Performance overlay** — press F9 to see RTT, FPS, bitrate, and resolution
+- **Performance overlay** — press F9 to see FPS, decode time, bitrate, and resolution
 - **120fps default** — smooth desktop experience at high frame rates
 
 ## Install (Ubuntu 24.04+ / Debian 13+)
@@ -129,7 +129,7 @@ sudo systemctl restart beam
 | Key | Action |
 |-----|--------|
 | F11 | Toggle fullscreen |
-| F9 | Toggle performance overlay (RTT, FPS, bitrate, resolution) |
+| F9 | Toggle performance overlay (FPS, decode time, bitrate, resolution) |
 | Esc | Exit fullscreen |
 
 ## Production Deployment
