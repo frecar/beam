@@ -1,7 +1,5 @@
 /**
  * WebCodecs-based video/audio renderer for the Beam remote desktop client.
- * Replaces the old Renderer class that used <video> + srcObject (WebRTC MediaStream).
- *
  * Video frames arrive as H.264 Annex B payloads over WebSocket binary messages,
  * are decoded via VideoDecoder, and drawn to a <canvas> via drawImage(VideoFrame).
  *

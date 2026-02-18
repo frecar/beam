@@ -87,8 +87,7 @@ impl Encoder {
         let encoder = build_encoder_element(encoder_type, &encoder_name, bitrate, framerate)?;
 
         // capsfilter: force main profile for best quality/compression ratio.
-        // constrained-baseline was required for WebRTC browser compatibility but
-        // WebCodecs VideoDecoder handles all profiles natively.
+        // WebCodecs VideoDecoder handles all H.264 profiles natively.
         let profile_caps = gst::Caps::builder("video/x-h264")
             .field("profile", "main")
             .build();

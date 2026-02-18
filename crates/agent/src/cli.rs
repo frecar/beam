@@ -2,7 +2,7 @@ use anyhow::Context;
 use uuid::Uuid;
 
 pub(crate) const DEFAULT_BITRATE: u32 = 50_000; // 50 Mbps -- LAN default
-pub(crate) const DEFAULT_FRAMERATE: u32 = 120; // 120fps -- WebCodecs removes jitter buffer bottleneck
+pub(crate) const DEFAULT_FRAMERATE: u32 = 120; // 120fps
 
 pub(crate) struct Args {
     pub display: String,

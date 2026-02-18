@@ -415,12 +415,7 @@ function updateSessionInfoPanel(): void {
     setText("sip-video-codec", "H.264");
   }
 
-  // Transport is now WebSocket
-  setText("sip-ice-state", "N/A (WebSocket)");
   setText("sip-transport", "WSS");
-  setText("sip-local-candidate", "N/A");
-  setText("sip-remote-candidate", "N/A");
-  setText("sip-dtls-state", "N/A");
 
   // Audio muted state
   const sipAudioMuted = document.getElementById("sip-audio-muted");
@@ -843,9 +838,6 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
       inputHandler.forwardBrowserShortcuts = savedForwardKeys;
       updateForwardKeysButton(savedForwardKeys);
       inputHandler.enable();
-
-      // No soft reconnect needed in WebCodecs mode -- the decoder handles
-      // resolution changes inline via reconfiguration.
 
       // Wire up manual layout selector
       const layoutSelect = document.getElementById("layout-select") as HTMLSelectElement | null;

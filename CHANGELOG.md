@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-02-18
+
+### Fixed
+- **Stale WebRTC references**: Removed all remaining WebRTC, STUN/TURN, SRTP, and DataChannel references from documentation, landing page, config templates, and code comments. All text now accurately describes the WebCodecs + WebSocket architecture.
+- **Dead stat display code**: Removed `setText` calls for nonexistent ICE/DTLS status panel elements in browser client
+- **Stale ICE config template**: Removed `[ice]` section from `beam-production.toml` (config parser has no ICE support since v0.2.0)
+- **Landing page architecture diagram**: Fixed "uinput injection" to "XTEST injection" and "WebRTC SRTP" to "WebSocket stream"
+
 ## [0.2.6] - 2026-02-18
 
 ### Fixed

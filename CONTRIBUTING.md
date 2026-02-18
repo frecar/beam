@@ -48,8 +48,8 @@ cd web && npx tsc --noEmit
 ## Architecture Guidelines
 
 - **Server** handles authentication, session lifecycle, and signaling relay
-- **Agent** handles all media: capture, encoding, WebRTC transport, input injection
+- **Agent** handles all media: capture, encoding, WebSocket streaming, input injection
 - **Protocol** contains shared types used by both server and agent
 - Each user gets their own agent process running under their UID
 - Capture and encoding run in a dedicated thread (not async) for timing precision
-- Use channels to bridge between sync capture/encode and async WebRTC/signaling
+- Use channels to bridge between sync capture/encode and async WebSocket/signaling

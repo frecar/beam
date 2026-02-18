@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Beam - GPU-Accelerated Remote Desktop for Linux</title>
-    <meta name="description" content="Stream your Linux desktop to any browser via WebRTC. NVIDIA NVENC hardware encoding, sub-30ms latency, zero-install client, multi-user with PAM auth. Open source." />
+    <meta name="description" content="Stream your Linux desktop to any browser. GPU-accelerated H.264 encoding, sub-30ms latency, zero-install client, multi-user with PAM auth. Open source." />
     <meta property="og:title" content="Beam - GPU-Accelerated Remote Desktop" />
     <meta property="og:description" content="Stream your Linux desktop to any browser. Hardware-accelerated, open source, sub-30ms latency." />
     <meta property="og:type" content="website" />
@@ -934,7 +934,7 @@
             Your Linux desktop,<br/><span class="highlight">anywhere.</span>
           </h1>
           <p class="hero-tagline">
-            Stream your GPU-accelerated desktop to any browser via WebRTC.
+            Stream your GPU-accelerated desktop to any browser.
             No client install. No VPN. Open source.
           </p>
           <div class="hero-badges">
@@ -1121,7 +1121,7 @@
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
               </div>
               <h3>Ultra-Low Latency</h3>
-              <p>Sub-30ms round-trip on LAN via WebRTC. Local cursor rendering, hardware decoding in the browser, adaptive bitrate.</p>
+              <p>Sub-30ms round-trip on LAN. Local cursor rendering, hardware decoding in browser, adaptive bitrate.</p>
             </div>
             <div class="feature-card">
               <div class="feature-icon" aria-hidden="true">
@@ -1179,7 +1179,7 @@
               <ul>
                 <li>Works in any modern browser</li>
                 <li>No plugins, no app downloads</li>
-                <li>WebRTC for low-latency transport</li>
+                <li>WebSocket for low-latency transport</li>
                 <li>Mac keyboard support built in</li>
               </ul>
             </div>
@@ -1218,8 +1218,8 @@
               <summary>Does it work over the internet or just LAN?</summary>
               <div class="faq-answer">
                 Both. On LAN you'll see sub-30ms latency. Over the internet, latency depends on your
-                connection &mdash; Beam's adaptive bitrate adjusts automatically. For internet use,
-                configure STUN/TURN servers in the config file.
+                connection &mdash; Beam's adaptive bitrate adjusts automatically. Beam uses a single
+                HTTPS/WebSocket port (default 8444) &mdash; just ensure it's reachable from the client.
               </div>
             </details>
             <details class="faq-item">
@@ -1233,7 +1233,7 @@
             <details class="faq-item">
               <summary>Is it secure?</summary>
               <div class="faq-answer">
-                Yes. All traffic is encrypted via TLS (HTTPS + WebSocket) and SRTP (WebRTC media).
+                Yes. All traffic is encrypted via TLS (HTTPS + WebSocket).
                 Authentication uses Linux PAM with JWT session tokens and rate limiting.
                 Each user session runs in an isolated X display. The code is open source and auditable.
               </div>
@@ -1267,11 +1267,11 @@
             Three components: a browser client, a signaling server, and a per-user desktop agent.
           </p>
 
-          <div class="arch-diagram" role="img" aria-label="Architecture: Browser connects via HTTPS/WebSocket to Server, which spawns an Agent per user. The Agent captures the screen and streams via WebRTC back to the Browser.">
+          <div class="arch-diagram" role="img" aria-label="Architecture: Browser connects via HTTPS/WebSocket to Server, which spawns an Agent per user. The Agent captures the screen and streams via WebSocket back to the Browser.">
             <div class="arch-box">
               <h4>Browser</h4>
               <ul>
-                <li>WebRTC video/audio</li>
+                <li>WebCodecs video/audio</li>
                 <li>Keyboard &amp; mouse input</li>
                 <li>Clipboard sync</li>
                 <li>Local cursor rendering</li>
@@ -1285,7 +1285,7 @@
               <h4>Server</h4>
               <ul>
                 <li>PAM auth + JWT</li>
-                <li>WebSocket signaling</li>
+                <li>Binary frame relay</li>
                 <li>Session management</li>
                 <li>Agent lifecycle</li>
               </ul>
@@ -1299,8 +1299,8 @@
               <ul>
                 <li>XCB/SHM capture</li>
                 <li>GStreamer encode</li>
-                <li>WebRTC SRTP</li>
-                <li>uinput injection</li>
+                <li>WebSocket stream</li>
+                <li>XTEST injection</li>
               </ul>
             </div>
           </div>
