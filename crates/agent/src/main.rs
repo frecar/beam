@@ -326,18 +326,26 @@ async fn main() -> anyhow::Result<()> {
         "Starting beam-agent"
     );
 
-    // PulseAudio server path (set when we start a virtual display with PulseAudio)
+    // PulseAudio server path — derived from display number regardless of new/existing display
     let mut pulse_server: Option<String> = None;
+    let display_num: u32 = args.display.trim_start_matches(':').parse().unwrap_or(10);
 
     // Try to connect to the display; if it doesn't exist, start a virtual one
     let mut virtual_display = match ScreenCapture::new(&args.display) {
         Ok(_) => {
             info!(display = %args.display, "Connected to existing display");
+            // Session reuse: PulseAudio should already be running for this display
+            let pulse_path = format!("/tmp/beam-pulse-{display_num}/native");
+            if std::path::Path::new(&pulse_path).exists() {
+                pulse_server = Some(format!("unix:{pulse_path}"));
+                info!(%pulse_path, "Found existing PulseAudio socket for reused display");
+            } else {
+                warn!(%pulse_path, "No PulseAudio socket found for reused display, audio may not work");
+            }
             None
         }
         Err(e) => {
             warn!(display = %args.display, "Display not available ({e:#}), starting virtual display");
-            let display_num: u32 = args.display.trim_start_matches(':').parse().unwrap_or(10);
             match display::VirtualDisplay::start(display_num, args.width, args.height) {
                 Ok(mut vd) => {
                     info!(display = %args.display, "Virtual display started");

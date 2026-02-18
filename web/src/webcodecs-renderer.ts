@@ -38,16 +38,19 @@ export class WebCodecsRenderer {
     if (!ctx) throw new Error("Failed to get 2d context from canvas");
     this.ctx = ctx;
 
-    // Unmute on first click on the desktop view (autoplay policy).
-    this.containerElement.addEventListener(
-      "click",
-      () => {
-        if (this.audioMuted) {
-          this.setAudioMuted(false);
-        }
-      },
-      { once: true },
-    );
+    // Auto-unmute on first desktop click only if user has never set a preference.
+    // Returning users get their saved preference restored by main.ts instead.
+    if (localStorage.getItem("beam_audio_muted") === null) {
+      this.containerElement.addEventListener(
+        "click",
+        () => {
+          if (this.audioMuted) {
+            this.setAudioMuted(false);
+          }
+        },
+        { once: true },
+      );
+    }
   }
 
   /** Register callback for the first decoded video frame */

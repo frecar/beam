@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-02-18
+
+### Fixed
+- **Audio not working on session reuse**: Agent now probes for existing PulseAudio socket when reusing a display, fixing silent audio on reconnect
+- **Audio mute preference not persisted**: Browser now restores saved mute preference from localStorage on reconnect instead of always starting muted
+- **Auto-unmute on first click**: Only triggers for first-time users who have never set a preference; returning users get their saved preference
+
+### Improved
+- **Binary frame relay diagnostics**: Server signaling now logs receiver count and delivery status at trace level for video frame relay troubleshooting
+
 ## [0.2.2] - 2026-02-18
 
 ### Fixed

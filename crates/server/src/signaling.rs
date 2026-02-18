@@ -270,11 +270,18 @@ pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: 
                     }
                     Ok(Message::Binary(data)) => {
                         // Binary frames: validate magic header, relay to browser
-                        if data.len() >= 4 {
+                        let len = data.len();
+                        if len >= 4 {
                             let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                             if magic == FRAME_MAGIC {
-                                if let Err(e) = channel.video_frames.send(Bytes::from(data.to_vec())) {
-                                    tracing::debug!(%session_id, "No browser listening for video: {e}");
+                                let receivers = channel.video_frames.receiver_count();
+                                match channel.video_frames.send(Bytes::from(data.to_vec())) {
+                                    Ok(n) => {
+                                        tracing::trace!(%session_id, len, receivers, sent_to = n, "Relayed binary frame");
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(%session_id, len, receivers, "No browser listening for video: {e}");
+                                    }
                                 }
                             } else {
                                 tracing::warn!(%session_id, "Agent sent binary with bad magic: 0x{magic:08x}");

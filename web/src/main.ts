@@ -784,8 +784,14 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   // Sync mute button when renderer's mute state changes (e.g. click-to-unmute)
   renderer.onMuteChange((muted) => updateMuteButton(muted));
 
-  // Apply saved audio preference
-  updateMuteButton(true); // default: muted until interaction
+  // Restore saved audio preference — if user previously unmuted, attempt to
+  // resume AudioContext. Browsers allow AudioContext.resume() after any prior
+  // user gesture in this origin, so this succeeds for returning users.
+  const savedMuted = localStorage.getItem(AUDIO_MUTED_KEY) !== "false";
+  updateMuteButton(savedMuted);
+  if (!savedMuted) {
+    renderer.setAudioMuted(false);
+  }
 
   // Initialize UI
   ui = new BeamUI();
