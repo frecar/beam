@@ -21,7 +21,7 @@
 
 ## Deployment
 - Install to system: `sudo make install`
-- Deploy and restart: `sudo make deploy`
+- Deploy and restart: `make build-release && sudo make deploy`
 - Uninstall: `sudo make uninstall`
 
 ## Configuration

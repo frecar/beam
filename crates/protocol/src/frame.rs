@@ -254,4 +254,42 @@ mod tests {
     fn header_size_is_24() {
         assert_eq!(FRAME_HEADER_SIZE, 24);
     }
+
+    #[test]
+    fn roundtrip_max_values() {
+        let header = VideoFrameHeader::video(u16::MAX, u16::MAX, u64::MAX, u32::MAX, true);
+        let mut buf = [0u8; FRAME_HEADER_SIZE];
+        header.serialize(&mut buf);
+        let parsed = VideoFrameHeader::deserialize(&buf).unwrap();
+        assert_eq!(header, parsed);
+    }
+
+    #[test]
+    fn roundtrip_zero_values() {
+        let header = VideoFrameHeader::video(0, 0, 0, 0, false);
+        let mut buf = [0u8; FRAME_HEADER_SIZE];
+        header.serialize(&mut buf);
+        let parsed = VideoFrameHeader::deserialize(&buf).unwrap();
+        assert_eq!(header, parsed);
+    }
+
+    #[test]
+    fn reserved_bytes_ignored_on_deserialize() {
+        // Ensure arbitrary values in the reserved field [10..12] do not cause failure.
+        // This is important for forward compatibility if future protocol versions use
+        // those bytes.
+        let header = VideoFrameHeader::video(1920, 1080, 42, 100, true);
+        let mut buf = [0u8; FRAME_HEADER_SIZE];
+        header.serialize(&mut buf);
+
+        // Mutate the reserved bytes to non-zero
+        buf[10] = 0xFF;
+        buf[11] = 0xAB;
+
+        let parsed = VideoFrameHeader::deserialize(&buf).unwrap();
+        assert_eq!(parsed.width, 1920);
+        assert_eq!(parsed.height, 1080);
+        assert_eq!(parsed.timestamp_us, 42);
+        assert_eq!(parsed.payload_length, 100);
+    }
 }

@@ -116,15 +116,28 @@ pub(crate) async fn run_video_send_loop(
 /// Uses the same VideoFrameHeader format with the audio flag set.
 pub(crate) async fn run_audio_send_loop(audio_rx: &mut mpsc::Receiver<Vec<u8>>, ws_tx: &WsSender) {
     let capture_start = Instant::now();
+    let mut audio_frame_count: u64 = 0;
     while let Some(data) = audio_rx.recv().await {
         let timestamp_us = capture_start.elapsed().as_micros() as u64;
         let header = VideoFrameHeader::audio(timestamp_us, data.len() as u32);
         let frame_bytes = header.serialize_with_payload(&data);
 
         match ws_tx.try_send(Message::Binary(frame_bytes.into())) {
-            Ok(()) => {}
+            Ok(()) => {
+                audio_frame_count += 1;
+                if audio_frame_count <= 3 {
+                    info!(
+                        size = data.len(),
+                        frame = audio_frame_count,
+                        "Audio frame sent via WebSocket"
+                    );
+                }
+                if audio_frame_count.is_multiple_of(500) {
+                    info!(audio_frame_count, "Audio frames sent");
+                }
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                debug!("Dropping audio frame (WS outbox full)");
+                warn!("Dropping audio frame (WS outbox full)");
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 info!("WS outbox closed, stopping audio send");

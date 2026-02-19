@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] - 2026-02-19
+
+### Added
+- **Test coverage**: 36 new tests protecting the WebCodecs architecture against regressions
+  - 10 signaling channel registry tests (Rust) — channel lifecycle, frame relay, browser kick, text relay
+  - 3 boundary-value frame header tests (Rust) — max values, zero values, reserved bytes forward-compat
+  - 8 cross-language binary frame parsing tests (TypeScript) — validates Rust/TS header serialization contract
+  - 6 WebSocket reconnect logic tests (TypeScript) — exponential backoff, max attempts, auth failure, session replaced
+  - 9 WebCodecs renderer state machine tests (TypeScript) — keyframe gating, resolution change, audio mute, cleanup
+- **Audio diagnostic logging**: Audio send loop now logs first 3 frames and periodic heartbeat (every 500 frames), matching video's existing logging pattern. Dropped audio frames logged at warn level.
+- **Browser audio diagnostics**: Console logs for first audio frame received and first successful decode
+
+### Fixed
+- **Deploy creates root-owned files**: `make deploy` no longer depends on `make build-release`, preventing `sudo make deploy` from running the entire build as root. New workflow: `make build-release && sudo make deploy`
+- **Stale .js artifacts**: Added `noEmit: true` to `web/tsconfig.json` to prevent TypeScript compiler from emitting .js files alongside .ts sources (Vite handles bundling)
+
+### Changed
+- **Documentation accuracy**: Removed stale "adaptive bitrate" feature claim from README (quality selector removed in v0.2.2)
+- **Deploy workflow**: README and CLAUDE.md updated to show `make build-release && sudo make deploy`
+- **Landing page**: Updated framerate from 60fps to 120fps, removed adaptive bitrate references
+- Exported `parseFrameHeader`, `FRAME_HEADER_SIZE`, `FRAME_MAGIC` from `connection.ts` for testability
+
 ## [0.2.7] - 2026-02-18
 
 ### Fixed

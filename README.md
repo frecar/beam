@@ -21,7 +21,6 @@ Fully open source, GPU-accelerated, sub-30ms latency. Built for developers who w
 - **Reconnect without re-login** — connection loss shows a reconnect overlay, no need to re-enter credentials
 - **Mac keyboard support** — Cmd-to-Ctrl remapping, smooth trackpad scrolling
 - **Auto keyboard layout** — detects your keyboard layout and syncs to the remote desktop
-- **Adaptive bitrate** — adjusts video quality based on network conditions (VA-API/software encoders)
 - **Performance overlay** — press F9 to see FPS, decode time, bitrate, and resolution
 - **120fps default** — smooth desktop experience at high frame rates
 
@@ -226,7 +225,8 @@ make test           Run Rust tests + TypeScript type check
 make lint           Run clippy + tsc
 make check          Full pre-commit check (fmt + lint + test)
 make doctor         Check system readiness
-sudo make deploy    Build release, deploy, restart service
+make build-release && sudo make deploy
+                    Build as user, deploy as root
 ```
 
 ### Architecture

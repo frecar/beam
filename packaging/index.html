@@ -939,7 +939,7 @@
           </p>
           <div class="hero-badges">
             <span class="hero-badge"><strong>&lt;30ms</strong> latency</span>
-            <span class="hero-badge"><strong>60fps</strong> H.264</span>
+            <span class="hero-badge"><strong>120fps</strong> H.264</span>
             <span class="hero-badge"><strong>NVENC</strong> / VA-API</span>
             <span class="hero-badge"><strong>Zero</strong> client install</span>
           </div>
@@ -988,7 +988,7 @@
               <div class="metric-label">Round-trip latency</div>
             </div>
             <div class="metric">
-              <div class="metric-value">60<span class="unit">fps</span></div>
+              <div class="metric-value">120<span class="unit">fps</span></div>
               <div class="metric-label">Smooth streaming</div>
             </div>
             <div class="metric">
@@ -1121,7 +1121,7 @@
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
               </div>
               <h3>Ultra-Low Latency</h3>
-              <p>Sub-30ms round-trip on LAN. Local cursor rendering, hardware decoding in browser, adaptive bitrate.</p>
+              <p>Sub-30ms round-trip on LAN. Local cursor rendering, hardware decoding in browser, 120fps default.</p>
             </div>
             <div class="feature-card">
               <div class="feature-icon" aria-hidden="true">
@@ -1170,7 +1170,7 @@
               <ul>
                 <li>Hardware H.264 encoding via NVENC/VA-API</li>
                 <li>Sub-30ms latency on LAN</li>
-                <li>Adaptive bitrate for any network</li>
+                <li>120fps default, configurable bitrate</li>
                 <li>Software fallback when no GPU</li>
               </ul>
             </div>
@@ -1218,7 +1218,7 @@
               <summary>Does it work over the internet or just LAN?</summary>
               <div class="faq-answer">
                 Both. On LAN you'll see sub-30ms latency. Over the internet, latency depends on your
-                connection &mdash; Beam's adaptive bitrate adjusts automatically. Beam uses a single
+                connection &mdash; lower the bitrate in <code>/etc/beam/beam.toml</code> for slower links. Beam uses a single
                 HTTPS/WebSocket port (default 8444) &mdash; just ensure it's reachable from the client.
               </div>
             </details>
@@ -1241,7 +1241,7 @@
             <details class="faq-item">
               <summary>Can I use it for gaming?</summary>
               <div class="faq-answer">
-                Beam is optimized for desktop and productivity workloads. It supports 60fps H.264
+                Beam is optimized for desktop and productivity workloads. It supports up to 120fps H.264
                 streaming with GPU encoding, but does not currently include controller passthrough
                 or other gaming-specific features.
               </div>

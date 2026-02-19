@@ -17,8 +17,49 @@
  *   [24..]   payload
  */
 
-const FRAME_HEADER_SIZE = 24;
-const FRAME_MAGIC = 0x56414542; // "BEAV" in little-endian
+export const FRAME_HEADER_SIZE = 24;
+export const FRAME_MAGIC = 0x56414542; // "BEAV" in little-endian
+
+/** Parsed binary frame header */
+export interface FrameHeader {
+  flags: number;
+  width: number;
+  height: number;
+  timestampUs: bigint;
+  payloadLength: number;
+}
+
+/**
+ * Parse a 24-byte binary frame header from an ArrayBuffer.
+ * Returns null if the buffer is too short, has bad magic, or is truncated.
+ */
+export function parseFrameHeader(
+  data: ArrayBuffer,
+): { header: FrameHeader; payload: Uint8Array } | null {
+  if (data.byteLength < FRAME_HEADER_SIZE) {
+    return null;
+  }
+
+  const view = new DataView(data);
+  const magic = view.getUint32(0, true);
+  if (magic !== FRAME_MAGIC) {
+    return null;
+  }
+
+  const flags = view.getUint8(5);
+  const width = view.getUint16(6, true);
+  const height = view.getUint16(8, true);
+  const timestampUs = view.getBigUint64(12, true);
+  const payloadLength = view.getUint32(20, true);
+
+  const expectedSize = FRAME_HEADER_SIZE + payloadLength;
+  if (data.byteLength < expectedSize) {
+    return null;
+  }
+
+  const payload = new Uint8Array(data, FRAME_HEADER_SIZE, payloadLength);
+  return { header: { flags, width, height, timestampUs, payloadLength }, payload };
+}
 
 /**
  * Input events sent over the WebSocket as JSON text.
@@ -213,37 +254,19 @@ export class BeamConnection {
 
   /** Parse a 24-byte binary frame header and dispatch to video/audio callback */
   private handleBinaryMessage(data: ArrayBuffer): void {
-    if (data.byteLength < FRAME_HEADER_SIZE) {
-      console.warn("Binary message too short for frame header:", data.byteLength);
+    const result = parseFrameHeader(data);
+    if (!result) {
+      console.warn("Invalid binary frame:", data.byteLength, "bytes");
       return;
     }
 
-    const view = new DataView(data);
-    const magic = view.getUint32(0, true);
-    if (magic !== FRAME_MAGIC) {
-      console.warn("Invalid frame magic:", magic.toString(16));
-      return;
-    }
-
-    const flags = view.getUint8(5);
-    const width = view.getUint16(6, true);
-    const height = view.getUint16(8, true);
-    const timestampUs = view.getBigUint64(12, true);
-    const payloadLength = view.getUint32(20, true);
-
-    const expectedSize = FRAME_HEADER_SIZE + payloadLength;
-    if (data.byteLength < expectedSize) {
-      console.warn(`Frame truncated: expected ${expectedSize}, got ${data.byteLength}`);
-      return;
-    }
-
-    const payload = new Uint8Array(data, FRAME_HEADER_SIZE, payloadLength);
-    const isAudio = (flags & 0x02) !== 0;
+    const { header, payload } = result;
+    const isAudio = (header.flags & 0x02) !== 0;
 
     if (isAudio) {
-      this.audioFrameCallback?.(timestampUs, payload);
+      this.audioFrameCallback?.(header.timestampUs, payload);
     } else {
-      this.videoFrameCallback?.(flags, width, height, timestampUs, payload);
+      this.videoFrameCallback?.(header.flags, header.width, header.height, header.timestampUs, payload);
     }
   }
 

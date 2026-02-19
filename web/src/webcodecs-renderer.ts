@@ -28,6 +28,7 @@ export class WebCodecsRenderer {
   private lastFeedTimeMs = 0;
   private decodeTimeMs = 0;
   private needsKeyframe = true;
+  private audioFrameCount = 0;
 
   constructor(canvas: HTMLCanvasElement, containerElement: HTMLElement) {
     this.canvas = canvas;
@@ -189,10 +190,27 @@ export class WebCodecsRenderer {
   feedAudioFrame(timestampUs: bigint, payload: Uint8Array): void {
     if (this.audioMuted || !this.audioContext) return;
 
+    this.audioFrameCount++;
+    if (this.audioFrameCount === 1) {
+      console.log("Audio: first frame received", {
+        payloadSize: payload.byteLength,
+        audioContextState: this.audioContext.state,
+      });
+    }
+
     if (!this.audioDecoder) {
       this.nextAudioPlayTime = 0;
+      let firstDecodeLogged = false;
       this.audioDecoder = new AudioDecoder({
         output: (audioData: AudioData) => {
+          if (!firstDecodeLogged) {
+            console.log("Audio: first decode successful", {
+              frames: audioData.numberOfFrames,
+              channels: audioData.numberOfChannels,
+              sampleRate: audioData.sampleRate,
+            });
+            firstDecodeLogged = true;
+          }
           // Play audio via AudioContext
           if (this.audioContext && this.audioContext.state === "running") {
             const numFrames = audioData.numberOfFrames;

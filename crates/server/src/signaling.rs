@@ -308,3 +308,135 @@ pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: 
 
     tracing::info!(%session_id, "Agent WebSocket disconnected");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_or_create_channel_creates_new() {
+        let registry = new_channel_registry();
+        let id = Uuid::new_v4();
+        let channel = get_or_create_channel(&registry, id).await;
+
+        // Verify it's in the registry
+        let channels = registry.read().await;
+        assert!(channels.contains_key(&id));
+        assert!(Arc::ptr_eq(channels.get(&id).unwrap(), &channel));
+    }
+
+    #[tokio::test]
+    async fn get_or_create_channel_returns_existing() {
+        let registry = new_channel_registry();
+        let id = Uuid::new_v4();
+        let ch1 = get_or_create_channel(&registry, id).await;
+        let ch2 = get_or_create_channel(&registry, id).await;
+        assert!(Arc::ptr_eq(&ch1, &ch2));
+    }
+
+    #[tokio::test]
+    async fn get_or_create_different_ids_different_channels() {
+        let registry = new_channel_registry();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let ch1 = get_or_create_channel(&registry, id1).await;
+        let ch2 = get_or_create_channel(&registry, id2).await;
+        assert!(!Arc::ptr_eq(&ch1, &ch2));
+    }
+
+    #[tokio::test]
+    async fn remove_channel_clears_registry() {
+        let registry = new_channel_registry();
+        let id = Uuid::new_v4();
+        let _channel = get_or_create_channel(&registry, id).await;
+        remove_channel(&registry, id).await;
+
+        let channels = registry.read().await;
+        assert!(channels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_nonexistent_channel_no_panic() {
+        let registry = new_channel_registry();
+        remove_channel(&registry, Uuid::new_v4()).await;
+        // Should not panic
+    }
+
+    #[tokio::test]
+    async fn remove_then_recreate_gives_fresh_channel() {
+        let registry = new_channel_registry();
+        let id = Uuid::new_v4();
+        let ch1 = get_or_create_channel(&registry, id).await;
+        remove_channel(&registry, id).await;
+        let ch2 = get_or_create_channel(&registry, id).await;
+        assert!(!Arc::ptr_eq(&ch1, &ch2));
+    }
+
+    #[tokio::test]
+    async fn video_frame_relay() {
+        let channel = SignalingChannel::new();
+        let mut rx = channel.video_frames.subscribe();
+        let payload = Bytes::from_static(b"fake-frame-data");
+        channel.video_frames.send(payload.clone()).unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received, payload);
+    }
+
+    #[tokio::test]
+    async fn video_frame_lagged_drops() {
+        let channel = SignalingChannel::new();
+        let mut rx = channel.video_frames.subscribe();
+
+        // Channel capacity is 16; send 20 frames to trigger lag
+        for i in 0..20u8 {
+            let _ = channel.video_frames.send(Bytes::from(vec![i]));
+        }
+
+        // First recv should report lag
+        match rx.recv().await {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                assert!(n > 0, "expected some lagged frames, got 0");
+            }
+            other => panic!("expected Lagged, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_kick_notification() {
+        let channel = SignalingChannel::new();
+        let notified = channel.browser_kick.notified();
+
+        // Kick fires after notified() is registered
+        channel.browser_kick.notify_waiters();
+
+        // The future should complete immediately
+        tokio::time::timeout(Duration::from_millis(100), notified)
+            .await
+            .expect("browser_kick notification should resolve");
+    }
+
+    #[tokio::test]
+    async fn text_relay_browser_to_agent() {
+        let channel = SignalingChannel::new();
+        let mut rx = channel.to_agent.subscribe();
+
+        let cmd = AgentCommand::Shutdown;
+        channel.to_agent.send(cmd.clone()).unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert!(matches!(received, AgentCommand::Shutdown));
+    }
+
+    #[tokio::test]
+    async fn text_relay_agent_to_browser() {
+        let channel = SignalingChannel::new();
+        let mut rx = channel.to_browser.subscribe();
+
+        let msg = r#"{"type":"session_ready"}"#.to_string();
+        channel.to_browser.send(msg.clone()).unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received, msg);
+    }
+}

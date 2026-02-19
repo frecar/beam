@@ -36,7 +36,8 @@ help:
 	@echo ""
 	@echo "Deployment:"
 	@echo "  sudo make install   Build and install to system"
-	@echo "  sudo make deploy    Build release + restart service"
+	@echo "  make build-release && sudo make deploy"
+	@echo "                      Build as user, deploy as root"
 	@echo "  sudo make uninstall Remove from system"
 	@echo ""
 	@echo "Release:"
@@ -173,8 +174,12 @@ uninstall:
 	@if [ "$$(id -u)" -ne 0 ]; then echo "Run with sudo: sudo make uninstall"; exit 1; fi
 	./scripts/uninstall.sh
 
-deploy: build-release
+deploy:
 	@if [ "$$(id -u)" -ne 0 ]; then echo "Run with sudo: sudo make deploy"; exit 1; fi
+	@if [ ! -f target/release/beam-server ] || [ ! -f target/release/beam-agent ]; then \
+		echo "ERROR: Release binaries not found. Run 'make build-release' first."; exit 1; fi
+	@if [ ! -d web/dist ]; then \
+		echo "ERROR: web/dist not found. Run 'make build-release' first."; exit 1; fi
 	@echo "Deploying Beam..."
 	mkdir -p /var/lib/beam/sessions
 	cp target/release/beam-server /tmp/beam-server-new && mv /tmp/beam-server-new $(INSTALL_DIR)/beam-server
