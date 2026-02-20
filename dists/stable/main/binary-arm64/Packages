@@ -1,0 +1,18 @@
+Package: beam
+Version: 0.2.9
+Architecture: arm64
+Maintainer: Beam Contributors
+Installed-Size: 14763
+Depends: libc6 (>= 2.38), libgstreamer1.0-0 (>= 1.24), gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, libxcb1, libxcb-shm0, libxcb-randr0, libxcb-xfixes0, libpulse0, libopus0, libpam0g, xserver-xorg-core, xserver-xorg-video-dummy, x11-xserver-utils, x11-xkb-utils
+Recommends: gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, xfce4, xfce4-whiskermenu-plugin, dbus-x11, pulseaudio | pipewire-pulse, xclip, libcap2-bin, gnome-keyring, epiphany-browser
+Suggests: gstreamer1.0-vaapi, xdotool
+Filename: pool/main/b/beam/beam_0.2.9_arm64.deb
+Size: 5927440
+MD5sum: c659f3611b08604fc3b40ea9855ca13d
+SHA1: 611776b639d9f1416bfc5265908da7bbd9f68b55
+SHA256: b04c4b28689309956aa35ed4f5ddbdf55b048f8705e1fc5913410c06a82ef090
+Priority: optional
+Homepage: https://github.com/frecar/beam
+Description: GPU-accelerated remote desktop streaming to any browser via WebCodecs
+License: MIT
+
