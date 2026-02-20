@@ -2,6 +2,7 @@ import { ClipboardBridge, type ClipboardHistoryEntry } from "./clipboard";
 import { BeamConnection } from "./connection";
 import { FileDownloader, FileUploader } from "./filetransfer";
 import type { DownloadMessage } from "./filetransfer";
+import { ICON_CAPTURE, ICON_MUTE, ICON_UNMUTE } from "./icons";
 import { InputHandler } from "./input";
 import { performLogin, clearRateLimitTimer } from "./login";
 import { WebCodecsRenderer } from "./webcodecs-renderer";
@@ -700,7 +701,8 @@ function toggleFullscreen(): void {
 
 /** Update the forward keys button to reflect current state */
 function updateForwardKeysButton(enabled: boolean): void {
-  btnForwardKeys.textContent = enabled ? "Capturing" : "Capture";
+  const label = enabled ? "Capturing" : "Capture";
+  btnForwardKeys.innerHTML = `${ICON_CAPTURE}<span class="btn-label">${label}</span>`;
   btnForwardKeys.classList.toggle("active", enabled);
   btnForwardKeys.setAttribute("aria-pressed", String(enabled));
 }
@@ -714,9 +716,12 @@ function toggleForwardKeys(): void {
   updateForwardKeysButton(enabled);
 }
 
-/** Update the mute button text to reflect current audio state */
+/** Update the mute button to reflect current audio state */
 function updateMuteButton(muted: boolean): void {
-  btnMute.textContent = muted ? "Unmute" : "Mute";
+  const label = muted ? "Unmute" : "Mute";
+  const icon = muted ? ICON_UNMUTE : ICON_MUTE;
+  btnMute.innerHTML = `${icon}<span class="btn-label">${label}</span>`;
+  btnMute.setAttribute("aria-label", `${label} audio`);
   localStorage.setItem(AUDIO_MUTED_KEY, muted ? "true" : "false");
 }
 

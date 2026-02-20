@@ -2,6 +2,7 @@
  * Theme toggling, idle timeout, performance overlay, and latency stats display.
  */
 
+import { ICON_SUN, ICON_MOON } from "./icons";
 import type { ConnectionState } from "./ui-state";
 import {
   btnTheme, perfOverlay, remoteVideo,
@@ -29,10 +30,13 @@ export function isLightMode(): boolean {
      window.matchMedia("(prefers-color-scheme: light)").matches);
 }
 
-/** Update the theme toggle button label to reflect the current mode */
+/** Update the theme toggle button to reflect the current mode */
 export function updateThemeButton(): void {
-  btnTheme.textContent = isLightMode() ? "Dark" : "Light";
-  btnTheme.setAttribute("aria-label", isLightMode() ? "Switch to dark theme" : "Switch to light theme");
+  const light = isLightMode();
+  const label = light ? "Dark" : "Light";
+  const icon = light ? ICON_MOON : ICON_SUN;
+  btnTheme.innerHTML = `${icon}<span class="btn-label">${label}</span>`;
+  btnTheme.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to light theme");
 }
 
 /** Toggle between light and dark mode, persisting the choice */
