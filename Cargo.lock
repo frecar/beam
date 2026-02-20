@@ -208,7 +208,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beam-agent"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "beam-protocol"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "beam-server"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "axum",

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - 2026-02-20
+
+### Added
+- **Status bar icons**: SVG icons next to all toolbar button labels (Upload, Download, Capture, Mute/Unmute, Fullscreen, Theme, Disconnect, End Session). Dynamic buttons swap icons on state change.
+
+### Fixed
+- **Video stall on session reconnection**: Reconnecting to an existing session caused a 20-second timeout because the agent stayed in backgrounded mode (1fps, no keyframes). Server now sends a visibility notification on browser connect, agent forces an IDR keyframe, and the video relay requests a new keyframe if frames are dropped due to broadcast lag.
+- **Broadcast channel capacity**: Increased video frame relay buffer from 16 to 64 frames (~530ms at 120fps), preventing keyframe loss during startup burst.
+
 ## [0.2.8] - 2026-02-19
 
 ### Added
