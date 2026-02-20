@@ -252,8 +252,15 @@ export class BeamConnection {
     };
   }
 
+  private binaryMessageCount = 0;
+
   /** Parse a 24-byte binary frame header and dispatch to video/audio callback */
   private handleBinaryMessage(data: ArrayBuffer): void {
+    this.binaryMessageCount++;
+    if (this.binaryMessageCount <= 3) {
+      console.log(`[Beam] Binary message #${this.binaryMessageCount}: ${data.byteLength} bytes`);
+    }
+
     const result = parseFrameHeader(data);
     if (!result) {
       console.warn("Invalid binary frame:", data.byteLength, "bytes");

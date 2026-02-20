@@ -33,7 +33,7 @@ impl SignalingChannel {
     pub fn new() -> Self {
         let (to_agent, _) = broadcast::channel(64);
         let (to_browser, _) = broadcast::channel(64);
-        let (video_frames, _) = broadcast::channel(16);
+        let (video_frames, _) = broadcast::channel(64);
         Self {
             to_agent,
             to_browser,
@@ -92,6 +92,14 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
     tracing::info!(%session_id, "Kicking any existing browsers for this session");
     channel.browser_kick.notify_waiters();
 
+    // Notify agent that a browser is now connected — clears backgrounded mode
+    // and wakes the capture thread so the first frame is sent promptly.
+    let _ = channel
+        .to_agent
+        .send(AgentCommand::Input(InputEvent::VisibilityState {
+            visible: true,
+        }));
+
     let mut from_agent = channel.to_browser.subscribe();
     let mut from_agent_video = channel.video_frames.subscribe();
     // Register our own kick listener AFTER kicking the old browser
@@ -104,6 +112,7 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
     let mut last_pong = Instant::now();
 
     tracing::info!(%session_id, "Browser WebSocket connected");
+    let mut video_frames_relayed: u64 = 0;
 
     loop {
         tokio::select! {
@@ -149,13 +158,20 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
             result = from_agent_video.recv() => {
                 match result {
                     Ok(frame) => {
+                        video_frames_relayed += 1;
+                        if video_frames_relayed <= 3 {
+                            tracing::info!(%session_id, size = frame.len(), frame = video_frames_relayed, "Relaying binary frame to browser");
+                        }
                         if socket.send(Message::Binary(frame.to_vec().into())).await.is_err() {
                             tracing::debug!(%session_id, "Browser WebSocket binary send failed");
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::debug!(%session_id, skipped = n, "Browser video consumer lagged, frames dropped");
+                        tracing::warn!(%session_id, skipped = n, "Browser video consumer lagged — requesting keyframe");
+                        // Dropped frames likely included the IDR keyframe.
+                        // Request a new one so the browser decoder can recover.
+                        let _ = channel.to_agent.send(AgentCommand::Input(InputEvent::VisibilityState { visible: true }));
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -388,8 +404,8 @@ mod tests {
         let channel = SignalingChannel::new();
         let mut rx = channel.video_frames.subscribe();
 
-        // Channel capacity is 16; send 20 frames to trigger lag
-        for i in 0..20u8 {
+        // Channel capacity is 64; send 70 frames to trigger lag
+        for i in 0..70u8 {
             let _ = channel.video_frames.send(Bytes::from(vec![i]));
         }
 

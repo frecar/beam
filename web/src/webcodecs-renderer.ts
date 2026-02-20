@@ -28,6 +28,7 @@ export class WebCodecsRenderer {
   private lastFeedTimeMs = 0;
   private decodeTimeMs = 0;
   private needsKeyframe = true;
+  private videoFrameCount = 0;
   private audioFrameCount = 0;
 
   constructor(canvas: HTMLCanvasElement, containerElement: HTMLElement) {
@@ -111,6 +112,7 @@ export class WebCodecsRenderer {
 
   /** Configure or reconfigure the video decoder for the given resolution */
   private configureDecoder(width: number, height: number): void {
+    console.log(`[Beam] configureDecoder: ${width}x${height}`);
     if (this.decoder) {
       this.decoder.close();
       this.decoder = null;
@@ -129,6 +131,7 @@ export class WebCodecsRenderer {
         this.decodeTimeMs = performance.now() - this.lastFeedTimeMs;
 
         if (!this.firstFrameFired) {
+          console.log(`[Beam] First video frame decoded: ${frame.displayWidth}x${frame.displayHeight}`);
           this.firstFrameFired = true;
           this.firstFrameCallback?.();
         }
@@ -156,6 +159,12 @@ export class WebCodecsRenderer {
     timestampUs: bigint,
     payload: Uint8Array,
   ): void {
+    this.videoFrameCount++;
+    if (this.videoFrameCount <= 5) {
+      const isKf = (flags & 0x01) !== 0;
+      console.log(`[Beam] feedVideoFrame #${this.videoFrameCount}: ${width}x${height} flags=0x${flags.toString(16)} keyframe=${isKf} payload=${payload.byteLength} decoderState=${this.decoder?.state ?? "null"}`);
+    }
+
     // Reconfigure decoder if resolution changed
     if (width !== this.currentWidth || height !== this.currentHeight) {
       this.configureDecoder(width, height);

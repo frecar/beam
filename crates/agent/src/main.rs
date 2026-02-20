@@ -53,6 +53,7 @@ struct InputCallbackCtx {
     capture_wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     capture_cmd_tx: std::sync::mpsc::Sender<CaptureCommand>,
     tab_backgrounded: Arc<AtomicBool>,
+    force_keyframe: Arc<AtomicBool>,
     display: String,
     max_width: u32,
     max_height: u32,
@@ -72,6 +73,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
         capture_wake,
         capture_cmd_tx: _capture_cmd_tx,
         tab_backgrounded,
+        force_keyframe,
         display,
         max_width,
         max_height,
@@ -255,6 +257,8 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 debug!(visible, "Browser tab visibility changed");
                 tab_backgrounded.store(!visible, Ordering::Relaxed);
                 if visible {
+                    // Force keyframe so the browser decoder can start immediately
+                    force_keyframe.store(true, Ordering::Relaxed);
                     // Wake capture thread immediately to restore full framerate
                     let (lock, cvar) = &*capture_wake;
                     let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -501,6 +505,7 @@ async fn main() -> anyhow::Result<()> {
         capture_wake: Arc::clone(&capture_wake_for_input),
         capture_cmd_tx: capture_cmd_tx.clone(),
         tab_backgrounded: Arc::clone(&tab_backgrounded),
+        force_keyframe: Arc::clone(&force_keyframe),
         display: args.display.clone(),
         max_width: args.max_width,
         max_height: args.max_height,
