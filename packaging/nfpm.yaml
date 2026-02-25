@@ -85,7 +85,7 @@ contents:
   - dst: /var/lib/beam/
     type: dir
     file_info:
-      mode: 0750
+      mode: 0755
 
   - dst: /var/lib/beam/sessions/
     type: dir
@@ -95,7 +95,7 @@ contents:
   - dst: /var/log/beam/
     type: dir
     file_info:
-      mode: 0750
+      mode: 0755
 
 scripts:
   postinstall: packaging/scripts/postinstall.sh

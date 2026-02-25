@@ -30,6 +30,13 @@ pub fn build_tls_config(
             let key_pem_path = "/var/lib/beam/server-key.pem";
 
             std::fs::create_dir_all("/var/lib/beam").context("Failed to create /var/lib/beam")?;
+            // Override UMask=0077: agents need to traverse this directory
+            // to read the public cert after dropping root privileges.
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions("/var/lib/beam", std::fs::Permissions::from_mode(0o755))
+                    .context("Failed to set /var/lib/beam permissions")?;
+            }
 
             // Reuse existing self-signed cert+key if both files exist, are valid,
             // and haven't expired (check file age as a proxy for cert expiry).

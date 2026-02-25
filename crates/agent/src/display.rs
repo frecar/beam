@@ -826,6 +826,24 @@ pub fn clamp_resize_dimensions(
 /// the X display string (e.g. ":10"), so it can be called from the capture thread
 /// without owning a VirtualDisplay reference.
 pub fn set_display_resolution(x_display: &str, width: u32, height: u32) -> Result<()> {
+    // Wait for X display to be connectable (xrandr can talk to it).
+    // On arm64 (e.g. NVIDIA GB10), Xorg needs more than 500ms to fully
+    // initialize. Without this, xrandr fails with "Can't open display".
+    for attempt in 0..10 {
+        let probe = Command::new("xrandr")
+            .env("DISPLAY", x_display)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        match probe {
+            Ok(output) if output.status.success() => break,
+            _ if attempt < 9 => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            _ => bail!("X display {x_display} not ready after 2 seconds"),
+        }
+    }
+
     let mode_name = format!("{width}x{height}");
     let modeline = generate_modeline(width, height, 60);
 
