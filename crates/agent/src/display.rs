@@ -163,7 +163,14 @@ impl VirtualDisplay {
             // Pre-seed XFCE/GTK config to disable animations, compositor,
             // and menu delays — critical for responsive remote desktop.
             let xfce_config_dir = format!("/tmp/beam-xfce-{}", self.display_num);
+            // Remove stale config dir from previous session (may be owned by a
+            // different user, making it unwritable for the current session user).
+            let _ = fs::remove_dir_all(&xfce_config_dir);
             let _ = fs::create_dir_all(&xfce_config_dir);
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&xfce_config_dir, fs::Permissions::from_mode(0o700));
+            }
 
             let xfconf_dir = format!("{xfce_config_dir}/xfce4/xfconf/xfce-perchannel-xml");
             let _ = fs::create_dir_all(&xfconf_dir);
