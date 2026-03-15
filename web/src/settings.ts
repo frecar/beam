@@ -18,7 +18,7 @@ export const FORWARD_KEYS_KEY = "beam_forward_keys";
 export const SESSION_TIMEOUT_KEY = "beam_session_timeout";
 // --- Idle timeout ---
 export const IDLE_WARNING_BEFORE_SECS = 120; // Show warning 2 min before expiry
-export const IDLE_CHECK_INTERVAL_MS = 30_000; // Check every 30s
+export const IDLE_CHECK_INTERVAL_MS = 10_000; // Check every 10s (smooth countdown)
 
 // --- Theme (dark/light mode) ---
 
@@ -149,10 +149,24 @@ export function updateLatencyStatsFps(fps: number, decodeMs?: number): void {
 
 // --- Idle timeout warning ---
 
-export function showIdleWarning(idleWarningVisible: boolean): boolean {
-  if (idleWarningVisible) return idleWarningVisible;
+/** Format remaining seconds as "Xm Ys" */
+export function formatCountdown(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+export function showIdleWarning(idleWarningVisible: boolean, remainingSecs?: number): boolean {
   idleWarning.classList.add("visible");
-  console.warn("Idle timeout warning: session will expire soon due to inactivity");
+  if (remainingSecs !== undefined && remainingSecs > 0) {
+    idleWarning.textContent = `Session expires in ${formatCountdown(remainingSecs)}. Move mouse or press a key to stay connected.`;
+  } else {
+    idleWarning.textContent = "Session will expire due to inactivity. Move mouse or press a key to stay connected.";
+  }
+  if (!idleWarningVisible) {
+    console.warn("Idle timeout warning: session will expire soon due to inactivity");
+  }
   return true;
 }
 

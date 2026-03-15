@@ -566,7 +566,8 @@ function startIdleCheck(): void {
     const idleSecs = (Date.now() - lastActivity) / 1000;
     const warningThreshold = effectiveIdleTimeoutSecs - IDLE_WARNING_BEFORE_SECS;
     if (idleSecs >= warningThreshold) {
-      idleWarningVisible = showIdleWarning(idleWarningVisible);
+      const remaining = Math.max(0, effectiveIdleTimeoutSecs - idleSecs);
+      idleWarningVisible = showIdleWarning(idleWarningVisible, remaining);
     }
   }, IDLE_CHECK_INTERVAL_MS);
 }
