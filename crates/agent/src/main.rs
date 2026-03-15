@@ -856,8 +856,20 @@ async fn main() -> anyhow::Result<()> {
         })
         .context("Failed to spawn capture thread")?;
 
-    // Audio capture thread
-    let audio_handle = match AudioCapture::new(48000, 2, pulse_server.as_deref()) {
+    // Audio capture thread — retry up to 10 times (PulseAudio socket may exist but not be ready)
+    let audio_capture_result = {
+        let mut result = AudioCapture::new(48000, 2, pulse_server.as_deref());
+        for attempt in 1..10 {
+            if result.is_ok() {
+                break;
+            }
+            info!(attempt, "PulseAudio not ready, retrying in 500ms...");
+            std::thread::sleep(Duration::from_millis(500));
+            result = AudioCapture::new(48000, 2, pulse_server.as_deref());
+        }
+        result
+    };
+    let audio_handle = match audio_capture_result {
         Ok(mut audio_capture) => {
             let handle = std::thread::Builder::new()
                 .name("audio-capture".into())

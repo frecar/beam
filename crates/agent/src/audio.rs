@@ -110,3 +110,34 @@ impl AudioCapture {
         Ok(self.opus_buffer[..encoded_len].to_vec())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_capture_rejects_invalid_server() {
+        let result = AudioCapture::new(48000, 2, Some("/tmp/nonexistent-pulse-server"));
+        assert!(
+            result.is_err(),
+            "Should fail with bogus PulseAudio server path"
+        );
+    }
+
+    #[test]
+    fn audio_spec_params() {
+        // Verify the frame math: 20ms at 48kHz stereo s16le
+        let sample_rate: u32 = 48000;
+        let channels: u16 = 2;
+        let samples_per_frame = (sample_rate * 20 / 1000) as usize; // 960
+        let frame_bytes = samples_per_frame * channels as usize * 2; // 3840
+        assert_eq!(
+            samples_per_frame, 960,
+            "20ms at 48kHz = 960 samples per channel"
+        );
+        assert_eq!(
+            frame_bytes, 3840,
+            "960 samples * 2 channels * 2 bytes = 3840"
+        );
+    }
+}

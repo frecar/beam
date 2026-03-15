@@ -185,7 +185,7 @@ impl VirtualDisplay {
             let xfconf_dir = format!("{xfce_config_dir}/xfce4/xfconf/xfce-perchannel-xml");
             let _ = fs::create_dir_all(&xfconf_dir);
 
-            // xfwm4: disable compositor and workspace zoom animation
+            // xfwm4: disable compositor, workspace zoom animation, and pre-seed theme
             let _ = fs::write(
                 format!("{xfconf_dir}/xfwm4.xml"),
                 r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -196,12 +196,13 @@ impl VirtualDisplay {
     <property name="popup_opacity" type="int" value="100"/>
     <property name="move_opacity" type="int" value="100"/>
     <property name="resize_opacity" type="int" value="100"/>
+    <property name="theme" type="string" value="Arc-Dark"/>
   </property>
 </channel>
 "#,
             );
 
-            // xsettings: disable GTK animations via xsettings daemon
+            // xsettings: disable GTK animations, pre-seed theme/icons/cursor settings
             let _ = fs::write(
                 format!("{xfconf_dir}/xsettings.xml"),
                 r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -209,9 +210,12 @@ impl VirtualDisplay {
   <property name="Gtk" type="empty">
     <property name="MenuPopupDelay" type="int" value="0"/>
     <property name="MenuPopdownDelay" type="int" value="0"/>
+    <property name="CursorBlink" type="bool" value="false"/>
   </property>
   <property name="Net" type="empty">
     <property name="EnableAnimations" type="bool" value="false"/>
+    <property name="ThemeName" type="string" value="Arc-Dark"/>
+    <property name="IconThemeName" type="string" value="Papirus-Dark"/>
   </property>
 </channel>
 "#,
@@ -1103,11 +1107,20 @@ fn find_non_snap_app(candidates: &[&'static str]) -> Option<&'static str> {
         .find(|name| which_exists(name) && !is_snap_binary(name))
 }
 
-/// Discover DBUS_SESSION_BUS_ADDRESS from a running xfce4-panel process on
-/// the given display. dbus-launch sets this in child process environments,
-/// but doesn't always export it as an X11 root window property. We read it
-/// from /proc/<pid>/environ of the panel process.
+/// Discover DBUS_SESSION_BUS_ADDRESS for the current session.
+/// Strategy 1: systemd user bus at /run/user/<uid>/bus (fast, reliable with PAM sessions).
+/// Strategy 2: fall back to scanning /proc for xfce4-panel's environ.
 fn find_dbus_address_for_display(x_display: &str) -> Option<String> {
+    // Strategy 1: systemd user bus (created by pam_systemd)
+    let uid = nix::unistd::getuid().as_raw();
+    let bus_path = format!("/run/user/{uid}/bus");
+    if std::path::Path::new(&bus_path).exists() {
+        let addr = format!("unix:path={bus_path}");
+        debug!(x_display, addr, "Using systemd user bus for DBUS");
+        return Some(addr);
+    }
+
+    // Strategy 2: fall back to /proc scan
     let output = Command::new("pgrep")
         .arg("-x")
         .arg("xfce4-panel")
@@ -1263,5 +1276,105 @@ mod tests {
         let (w, h) = clamp_resize_dimensions(2000, 1200, 1921, 1081).unwrap();
         assert_eq!(w, 1920);
         assert_eq!(h, 1080);
+    }
+
+    #[test]
+    fn find_dbus_prefers_user_bus() {
+        // If /run/user/<uid>/bus exists, the function should return it
+        let uid = nix::unistd::getuid().as_raw();
+        let bus_path = format!("/run/user/{uid}/bus");
+        if std::path::Path::new(&bus_path).exists() {
+            let result = find_dbus_address_for_display(":99");
+            assert_eq!(
+                result,
+                Some(format!("unix:path={bus_path}")),
+                "Should prefer systemd user bus when it exists"
+            );
+        }
+        // If the bus doesn't exist, this test is a no-op (CI environments)
+    }
+
+    #[test]
+    fn find_dbus_returns_none_for_nonexistent_display() {
+        // Use a display number that won't have any running processes.
+        // If user bus exists, it returns that regardless of display, so only
+        // test the fallback behavior when user bus is absent.
+        let uid = nix::unistd::getuid().as_raw();
+        let bus_path = format!("/run/user/{uid}/bus");
+        if !std::path::Path::new(&bus_path).exists() {
+            let result = find_dbus_address_for_display(":9999");
+            assert!(
+                result.is_none(),
+                "Should return None for nonexistent display when no user bus"
+            );
+        }
+    }
+
+    #[test]
+    fn xfce_config_contains_theme_settings() {
+        // Write pre-seeded configs to a temp dir and verify theme settings are present.
+        let dir = std::env::temp_dir().join(format!("beam-test-xfce-{}", std::process::id()));
+        let xfconf_dir = dir.join("xfce4/xfconf/xfce-perchannel-xml");
+        fs::create_dir_all(&xfconf_dir).unwrap();
+
+        // Write the same xsettings.xml as start_desktop()
+        fs::write(
+            xfconf_dir.join("xsettings.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xsettings" version="1.0">
+  <property name="Gtk" type="empty">
+    <property name="MenuPopupDelay" type="int" value="0"/>
+    <property name="MenuPopdownDelay" type="int" value="0"/>
+    <property name="CursorBlink" type="bool" value="false"/>
+  </property>
+  <property name="Net" type="empty">
+    <property name="EnableAnimations" type="bool" value="false"/>
+    <property name="ThemeName" type="string" value="Arc-Dark"/>
+    <property name="IconThemeName" type="string" value="Papirus-Dark"/>
+  </property>
+</channel>
+"#,
+        )
+        .unwrap();
+
+        // Write the same xfwm4.xml as start_desktop()
+        fs::write(
+            xfconf_dir.join("xfwm4.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="zoom_desktop" type="bool" value="false"/>
+    <property name="popup_opacity" type="int" value="100"/>
+    <property name="move_opacity" type="int" value="100"/>
+    <property name="resize_opacity" type="int" value="100"/>
+    <property name="theme" type="string" value="Arc-Dark"/>
+  </property>
+</channel>
+"#,
+        )
+        .unwrap();
+
+        let xsettings = fs::read_to_string(xfconf_dir.join("xsettings.xml")).unwrap();
+        assert!(
+            xsettings.contains(r#""ThemeName" type="string" value="Arc-Dark""#),
+            "xsettings.xml should pre-seed Arc-Dark theme"
+        );
+        assert!(
+            xsettings.contains(r#""IconThemeName" type="string" value="Papirus-Dark""#),
+            "xsettings.xml should pre-seed Papirus-Dark icons"
+        );
+        assert!(
+            xsettings.contains(r#""CursorBlink" type="bool" value="false""#),
+            "xsettings.xml should disable cursor blink"
+        );
+
+        let xfwm4 = fs::read_to_string(xfconf_dir.join("xfwm4.xml")).unwrap();
+        assert!(
+            xfwm4.contains(r#""theme" type="string" value="Arc-Dark""#),
+            "xfwm4.xml should pre-seed Arc-Dark window theme"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

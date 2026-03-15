@@ -566,7 +566,8 @@ function startIdleCheck(): void {
     const idleSecs = (Date.now() - lastActivity) / 1000;
     const warningThreshold = effectiveIdleTimeoutSecs - IDLE_WARNING_BEFORE_SECS;
     if (idleSecs >= warningThreshold) {
-      idleWarningVisible = showIdleWarning(idleWarningVisible);
+      const remaining = Math.max(0, effectiveIdleTimeoutSecs - idleSecs);
+      idleWarningVisible = showIdleWarning(idleWarningVisible, remaining);
     }
   }, IDLE_CHECK_INTERVAL_MS);
 }
@@ -702,9 +703,13 @@ function toggleFullscreen(): void {
 /** Update the forward keys button to reflect current state */
 function updateForwardKeysButton(enabled: boolean): void {
   const label = enabled ? "Keys: Remote" : "Keys: Local";
+  const tooltip = enabled
+    ? "Keyboard shortcuts are sent to the remote desktop. Click to send them to your browser instead."
+    : "Keyboard shortcuts are handled by your browser. Click to forward them to the remote desktop.";
   btnForwardKeys.innerHTML = `${ICON_CAPTURE}<span class="btn-label">${label}</span>`;
   btnForwardKeys.classList.toggle("active", enabled);
   btnForwardKeys.setAttribute("aria-pressed", String(enabled));
+  btnForwardKeys.title = tooltip;
 }
 
 /** Toggle forwarding of browser shortcuts to the remote desktop */
@@ -904,6 +909,13 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
       });
       clipboardBridge.onHistoryChange(() => {
         renderClipboardHistory();
+      });
+      clipboardBridge.onClipboardError(() => {
+        ui?.showNotification(
+          "Clipboard sync failed — click the page to grant clipboard permission",
+          "warning",
+          5000,
+        );
       });
     }
     clipboardBridge.enable();
