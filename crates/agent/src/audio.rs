@@ -118,7 +118,10 @@ mod tests {
     #[test]
     fn audio_capture_rejects_invalid_server() {
         let result = AudioCapture::new(48000, 2, Some("/tmp/nonexistent-pulse-server"));
-        assert!(result.is_err(), "Should fail with bogus PulseAudio server path");
+        assert!(
+            result.is_err(),
+            "Should fail with bogus PulseAudio server path"
+        );
     }
 
     #[test]
@@ -128,7 +131,13 @@ mod tests {
         let channels: u16 = 2;
         let samples_per_frame = (sample_rate * 20 / 1000) as usize; // 960
         let frame_bytes = samples_per_frame * channels as usize * 2; // 3840
-        assert_eq!(samples_per_frame, 960, "20ms at 48kHz = 960 samples per channel");
-        assert_eq!(frame_bytes, 3840, "960 samples * 2 channels * 2 bytes = 3840");
+        assert_eq!(
+            samples_per_frame, 960,
+            "20ms at 48kHz = 960 samples per channel"
+        );
+        assert_eq!(
+            frame_bytes, 3840,
+            "960 samples * 2 channels * 2 bytes = 3840"
+        );
     }
 }
