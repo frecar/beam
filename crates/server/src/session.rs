@@ -591,7 +591,7 @@ impl SessionManager {
         // PAMName=beam triggers pam_systemd → logind session registration.
         // This is what makes FUSE, snap, and /run/user/<uid> work.
         cmd.args(["--property", "PAMName=beam"]);
-        cmd.args(["--property", "Type=exec"]);
+        cmd.args(["--property", "Type=simple"]);
         cmd.args(["--property", &format!("StandardOutput=append:{log_path}")]);
         cmd.args(["--property", &format!("StandardError=append:{log_path}")]);
 
@@ -607,6 +607,11 @@ impl SessionManager {
 
         // Auto-remove the unit when it stops (no leftover failed units)
         cmd.arg("--collect");
+
+        // Don't wait for the service to reach "active" state — PAM session
+        // setup (pam_systemd → logind D-Bus) can take seconds on LDAP-backed
+        // systems. The agent connects back via WebSocket when ready.
+        cmd.arg("--no-block");
 
         // -- Environment variables --
         // Agent token via env (CLI args are visible in /proc/<pid>/cmdline)
@@ -641,9 +646,9 @@ impl SessionManager {
             cmd.args(["--tls-cert", cert_path]);
         }
 
-        // Run systemd-run — it exits immediately after the service starts.
-        // Timeout covers D-Bus communication + PAM session setup.
-        let output = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output())
+        // Run systemd-run with --no-block — exits immediately after queuing
+        // the start job. The 10s timeout covers only the D-Bus call to PID 1.
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
             .await
             .map_err(|_| anyhow::anyhow!("systemd-run timed out starting agent (30s)"))?
             .with_context(|| format!("Failed to run systemd-run for display {display_str}"))?;
