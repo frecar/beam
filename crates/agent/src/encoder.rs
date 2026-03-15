@@ -11,6 +11,9 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncoderType {
     Nvidia,
+    /// CUDA-based NVENC (nvcudah264enc) — required for Blackwell GPUs (RTX 50xx)
+    /// where the legacy nvh264enc silently produces zero output.
+    NvidiaCuda,
     VaApi,
     Software,
 }
@@ -49,6 +52,7 @@ impl Encoder {
         // Other encoders: use BGRx with videoconvert for correct conversion.
         let format = match encoder_type {
             EncoderType::Nvidia => "BGRA",
+            // NvidiaCuda needs videoconvert (BGRA→NV12), so use BGRx as input
             _ => "BGRx",
         };
         let appsrc_elem = ElementFactory::make("appsrc")
@@ -181,6 +185,35 @@ impl Encoder {
                 .context("Failed to link NVIDIA pipeline")?;
                 info!(
                     "NVIDIA pipeline: appsrc(BGRA) → nvh264enc → capsfilter(main) → h264parse → appsink"
+                );
+            }
+            EncoderType::NvidiaCuda => {
+                let convert = ElementFactory::make("videoconvert")
+                    .build()
+                    .context("Failed to create videoconvert for CUDA encoder")?;
+                pipeline
+                    .add_many([
+                        appsrc.upcast_ref(),
+                        &convert,
+                        &encoder,
+                        &capsfilter,
+                        &parser,
+                        &parse_capsfilter,
+                        appsink.upcast_ref(),
+                    ])
+                    .context("Failed to add elements to NVIDIA CUDA pipeline")?;
+                gst::Element::link_many([
+                    appsrc.upcast_ref(),
+                    &convert,
+                    &encoder,
+                    &capsfilter,
+                    &parser,
+                    &parse_capsfilter,
+                    appsink.upcast_ref(),
+                ])
+                .context("Failed to link NVIDIA CUDA pipeline")?;
+                info!(
+                    "NVIDIA CUDA pipeline: appsrc(BGRx) → videoconvert → nvcudah264enc → capsfilter(main) → h264parse → appsink"
                 );
             }
             _ => {
@@ -354,9 +387,10 @@ fn detect_encoder(preferred: Option<&str>) -> anyhow::Result<(EncoderType, Strin
     if let Some(pref) = preferred {
         let enc_type = match pref {
             "nvh264enc" => EncoderType::Nvidia,
+            "nvcudah264enc" => EncoderType::NvidiaCuda,
             "vah264enc" => EncoderType::VaApi,
             "x264enc" => EncoderType::Software,
-            _ => bail!("Unknown encoder: {pref}. Use nvh264enc, vah264enc, or x264enc."),
+            _ => bail!("Unknown encoder: {pref}. Use nvh264enc, nvcudah264enc, vah264enc, or x264enc."),
         };
         if can_instantiate(pref) {
             info!(encoder = pref, "Using preferred encoder from config");
@@ -368,7 +402,11 @@ fn detect_encoder(preferred: Option<&str>) -> anyhow::Result<(EncoderType, Strin
         );
     }
 
+    // Prefer nvcudah264enc over nvh264enc: the CUDA-based encoder works on
+    // both legacy and Blackwell (RTX 50xx) GPUs, while nvh264enc silently
+    // produces zero output on Blackwell despite being instantiable.
     let candidates = [
+        (EncoderType::NvidiaCuda, "nvcudah264enc"),
         (EncoderType::Nvidia, "nvh264enc"),
         (EncoderType::VaApi, "vah264enc"),
         (EncoderType::Software, "x264enc"),
@@ -406,6 +444,17 @@ fn build_encoder_element(
             .property("vbv-buffer-size", bitrate / framerate.max(1)) // 1 frame buffer
             .build()
             .context("Failed to create nvh264enc")?,
+        EncoderType::NvidiaCuda => ElementFactory::make(name)
+            .property_from_str("preset", "low-latency-hq")
+            .property_from_str("rate-control", "cbr")
+            .property("bitrate", bitrate)
+            .property("gop-size", -1i32)
+            .property("zero-reorder-delay", true)
+            .property("rc-lookahead", 0u32)
+            .property("b-frames", 0u32)
+            .property("vbv-buffer-size", bitrate / framerate.max(1))
+            .build()
+            .context("Failed to create nvcudah264enc")?,
         EncoderType::VaApi => ElementFactory::make(name)
             .property_from_str("rate-control", "cbr")
             .property("bitrate", bitrate)
