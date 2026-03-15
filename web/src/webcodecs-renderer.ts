@@ -1,3 +1,5 @@
+import { extractCodecFromAnnexB } from "./h264";
+
 /**
  * WebCodecs-based video/audio renderer for the Beam remote desktop client.
  * Video frames arrive as H.264 Annex B payloads over WebSocket binary messages,
@@ -111,10 +113,11 @@ export class WebCodecsRenderer {
   }
 
   /** Configure or reconfigure the video decoder for the given resolution */
-  private configureDecoder(width: number, height: number): void {
-    console.log(`[Beam] configureDecoder: ${width}x${height}`);
+  private configureDecoder(width: number, height: number, codec?: string): void {
+    const codecStr = codec ?? "avc1.4d0033";
+    console.log(`[Beam] configureDecoder: ${width}x${height} codec=${codecStr}`);
     if (this.decoder) {
-      this.decoder.close();
+      try { this.decoder.close(); } catch { /* already closed */ }
       this.decoder = null;
     }
 
@@ -142,7 +145,7 @@ export class WebCodecsRenderer {
     });
 
     this.decoder.configure({
-      codec: "avc1.4d0033", // Main profile, Level 5.1
+      codec: codecStr,
       hardwareAcceleration: "prefer-hardware",
       optimizeForLatency: true,
     });
@@ -165,14 +168,22 @@ export class WebCodecsRenderer {
       console.log(`[Beam] feedVideoFrame #${this.videoFrameCount}: ${width}x${height} flags=0x${flags.toString(16)} keyframe=${isKf} payload=${payload.byteLength} decoderState=${this.decoder?.state ?? "null"}`);
     }
 
+    const isKeyframe = (flags & 0x01) !== 0;
+
     // Reconfigure decoder if resolution changed
     if (width !== this.currentWidth || height !== this.currentHeight) {
-      this.configureDecoder(width, height);
+      const codec = isKeyframe ? extractCodecFromAnnexB(payload) ?? undefined : undefined;
+      this.configureDecoder(width, height, codec);
+    }
+
+    // Recover from closed decoder (decode error) on next keyframe
+    if (this.decoder?.state === "closed" && isKeyframe) {
+      console.log("[Beam] Decoder closed, reconfiguring on keyframe");
+      const codec = extractCodecFromAnnexB(payload) ?? undefined;
+      this.configureDecoder(width, height, codec);
     }
 
     if (!this.decoder || this.decoder.state === "closed") return;
-
-    const isKeyframe = (flags & 0x01) !== 0;
 
     // If decoder not yet configured, skip
     if (this.decoder.state !== "configured") return;
