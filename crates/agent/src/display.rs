@@ -419,16 +419,21 @@ impl VirtualDisplay {
             // so we must set properties after the daemon is running.
             let display_for_xfconf = display.clone();
             std::thread::spawn(move || {
-                // Wait for xfconfd and xfce4-panel to initialize
-                std::thread::sleep(std::time::Duration::from_secs(3));
-
-                // Discover DBUS_SESSION_BUS_ADDRESS from the running panel.
-                // Without this, xfconf-query silently connects to a different
-                // (auto-launched) bus instead of the XFCE session's bus,
-                // making settings appear to succeed but have no effect.
-                let dbus_addr = find_dbus_address_for_display(&display_for_xfconf);
+                // Poll for xfce4-panel to start (it needs xfwm4, xfdesktop first).
+                // On fresh sessions with PAM/logind setup, XFCE can take 5-10s.
+                let mut dbus_addr = None;
+                for attempt in 1..=15 {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    dbus_addr = find_dbus_address_for_display(&display_for_xfconf);
+                    if dbus_addr.is_some() {
+                        debug!("Found DBUS session bus after {attempt}s");
+                        break;
+                    }
+                }
                 if dbus_addr.is_none() {
-                    warn!("Could not find DBUS session bus, xfconf settings may not apply");
+                    warn!(
+                        "Could not find DBUS session bus after 15s, xfconf settings may not apply"
+                    );
                 }
 
                 // Start gnome-keyring-daemon inside the D-Bus session so it
