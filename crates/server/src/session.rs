@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use beam_protocol::SessionInfo;
 use serde::{Deserialize, Serialize};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -22,10 +21,16 @@ struct PersistedSession {
     width: u32,
     height: u32,
     created_at: u64,
+    /// Legacy field: PID of the agent process (pre-systemd sessions).
+    /// Kept for backward compatibility during rolling upgrades.
+    #[serde(default)]
     agent_pid: u32,
     agent_token: String,
     #[serde(default)]
     release_token: String,
+    /// systemd transient service unit name (e.g., "beam-agent-<uuid>").
+    #[serde(default)]
+    systemd_unit: Option<String>,
 }
 
 /// Constant-time byte comparison to prevent timing side-channel attacks.
@@ -118,10 +123,9 @@ impl DisplayPool {
 
 struct ManagedSession {
     pub info: SessionInfo,
-    pub agent_process: Option<Child>,
-    /// PID of the agent process, stored separately so we can signal it
-    /// even after the Child handle has been taken by the monitor task.
-    pub agent_pid: Option<u32>,
+    /// Name of the systemd transient service managing this agent
+    /// (e.g., "beam-agent-<uuid>"). None for legacy pre-systemd sessions.
+    pub systemd_unit: Option<String>,
     /// Timestamp of last heartbeat/activity (Unix epoch seconds)
     pub last_activity: u64,
     /// Secret token the agent must present on WebSocket upgrade
@@ -132,7 +136,9 @@ struct ManagedSession {
     /// increments this; the spawned timer checks if the generation still matches.
     /// This avoids a race where overlapping grace periods share a single boolean.
     pub grace_generation: Arc<AtomicU64>,
-    /// Number of times the agent has been restarted after unexpected exits
+    /// Number of times the agent has been restarted after unexpected exits.
+    /// Managed by systemd (Restart=on-failure); kept for metrics/tests.
+    #[allow(dead_code)]
     pub restart_count: u32,
     /// Per-session idle timeout override in seconds. None = use global default.
     pub idle_timeout_override: Option<u64>,
@@ -211,8 +217,7 @@ impl SessionManager {
             // Reserve the slot immediately so concurrent requests see it
             let managed = ManagedSession {
                 info: info.clone(),
-                agent_process: None,
-                agent_pid: None,
+                systemd_unit: None,
                 last_activity: now,
                 agent_token: agent_token.clone(),
                 release_token: release_token.clone(),
@@ -243,24 +248,22 @@ impl SessionManager {
         // Keyring dir may be owned by a different user (mode 700); server runs as root
         let _ = std::fs::remove_dir_all(format!("/tmp/beam-keyring-{display_num}"));
 
-        // Spawn the agent process (outside the write lock to avoid holding it during spawn)
-        let agent_process = match self.spawn_agent(&info, server_url, &agent_token).await {
-            Ok(child) => child,
+        // Start the agent as a systemd transient service (outside the write lock)
+        let unit_name = match self.spawn_agent(&info, server_url, &agent_token).await {
+            Ok(unit) => unit,
             Err(e) => {
                 // Clean up the reserved slot on spawn failure
                 self.sessions.write().await.remove(&session_id);
                 self.display_pool.write().await.release(display_num);
-                return Err(e).context("Failed to spawn agent");
+                return Err(e).context("Failed to start agent service");
             }
         };
 
-        // Update the reserved slot with the agent process
-        let agent_pid = agent_process.id();
+        // Update the reserved slot with the systemd unit name
         {
             let mut sessions = self.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_id) {
-                session.agent_process = Some(agent_process);
-                session.agent_pid = agent_pid;
+                session.systemd_unit = Some(unit_name);
             }
         }
 
@@ -274,56 +277,52 @@ impl SessionManager {
         Ok(info)
     }
 
-    /// Destroy a session, gracefully stopping the agent process.
-    /// Waits for the agent to fully exit before releasing the display number
-    /// to prevent race conditions where a new session reuses the display
-    /// while the old Xorg is still shutting down.
+    /// Destroy a session, stopping the agent's systemd service.
+    /// systemd sends SIGTERM to all processes in the service's cgroup
+    /// (agent, Xorg, PulseAudio, desktop), waits TimeoutStopSec, then SIGKILL.
+    /// After the service stops, the display number is recycled.
     pub async fn destroy_session(&self, session_id: Uuid) -> Result<()> {
         let mut sessions = self.sessions.write().await;
-        if let Some(mut session) = sessions.remove(&session_id) {
+        if let Some(session) = sessions.remove(&session_id) {
             let display_num = session.info.display;
+            let unit = session.systemd_unit.clone();
 
-            // Always signal by stored PID (works even when monitor has taken the Child)
-            if let Some(pid) = session.agent_pid {
-                tracing::info!(%session_id, pid, "Sending SIGTERM to agent");
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid as i32),
-                    nix::sys::signal::Signal::SIGTERM,
-                );
-            }
-
-            // Drop the write lock before waiting (other operations shouldn't be blocked)
+            // Drop the write lock before blocking on systemctl
             drop(sessions);
 
-            // If we still own the Child handle, wait for graceful shutdown
-            if let Some(ref mut child) = session.agent_process {
-                match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
-                    Ok(Ok(status)) => {
-                        tracing::info!(%session_id, ?status, "Agent exited");
+            // Stop the systemd service (SIGTERM → TimeoutStopSec → SIGKILL)
+            if let Some(ref unit) = unit {
+                tracing::info!(%session_id, %unit, "Stopping agent service");
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    Command::new("systemctl").args(["stop", unit]).output(),
+                )
+                .await
+                {
+                    Ok(Ok(o)) if o.status.success() => {
+                        tracing::info!(%session_id, %unit, "Agent service stopped");
+                    }
+                    Ok(Ok(o)) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        // Unit may already be gone (--collect), that's fine
+                        tracing::debug!(%session_id, "systemctl stop {unit}: {stderr}");
                     }
                     Ok(Err(e)) => {
-                        tracing::warn!(%session_id, "Error waiting for agent: {e}");
+                        tracing::warn!(%session_id, "Failed to run systemctl: {e}");
                     }
                     Err(_) => {
-                        tracing::warn!(%session_id, "Agent did not exit in time, killing");
-                        let _ = child.kill().await;
-                    }
-                }
-            } else if let Some(pid) = session.agent_pid {
-                // Child handle was taken by monitor task — poll the PID to
-                // confirm exit so the display is fully cleaned up before reuse.
-                let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
-                for _ in 0..50 {
-                    // signal 0 checks if the process exists without signaling it
-                    match nix::sys::signal::kill(nix_pid, None) {
-                        Err(nix::errno::Errno::ESRCH) => break, // process gone
-                        _ => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                        tracing::warn!(%session_id, "systemctl stop timed out, sending SIGKILL");
+                        let _ = Command::new("systemctl")
+                            .args(["kill", "--signal=SIGKILL", unit])
+                            .output()
+                            .await;
                     }
                 }
             }
 
             // Wait for Xorg lock file cleanup before recycling the display number.
-            // The agent exits before Xorg, so the lock file may linger briefly.
+            // systemd's KillMode=control-group ensures all children are stopped,
+            // but the lock file removal may lag slightly.
             let lock_path = format!("/tmp/.X{display_num}-lock");
             for _ in 0..20 {
                 if !std::path::Path::new(&lock_path).exists() {
@@ -411,15 +410,6 @@ impl SessionManager {
             .unwrap_or(false)
     }
 
-    /// Take the agent child process for external monitoring.
-    /// Returns the Child if it hasn't been taken already.
-    pub async fn take_agent_child(&self, session_id: Uuid) -> Option<Child> {
-        let mut sessions = self.sessions.write().await;
-        sessions
-            .get_mut(&session_id)
-            .and_then(|s| s.agent_process.take())
-    }
-
     /// Find a session by username (returns the first match).
     pub async fn find_by_username(&self, username: &str) -> Option<SessionInfo> {
         let sessions = self.sessions.read().await;
@@ -472,6 +462,7 @@ impl SessionManager {
 
     /// Increment the restart count for a session and return the new count.
     /// Returns `None` if the session does not exist.
+    #[allow(dead_code)]
     pub async fn increment_restart_count(&self, session_id: Uuid) -> Option<u32> {
         let mut sessions = self.sessions.write().await;
         sessions.get_mut(&session_id).map(|s| {
@@ -487,23 +478,30 @@ impl SessionManager {
         sessions.get(&session_id).map(|s| s.restart_count)
     }
 
-    /// Respawn the agent for an existing session after a crash.
+    /// Respawn the agent for an existing session after permanent failure.
     ///
-    /// Generates a new agent token, spawns a new agent process, and updates
-    /// the session with the new process handle and PID. Returns the new
-    /// `Child` handle (already stored in the session) so the caller can
-    /// monitor it.
+    /// Stops any existing systemd unit, generates a new agent token,
+    /// starts a new systemd transient service, and updates the session.
     ///
     /// Returns `None` if the session does not exist.
+    #[allow(dead_code)]
     pub async fn respawn_agent(&self, session_id: Uuid, server_url: &str) -> Result<Option<()>> {
         // Read session info under a read lock first
-        let info = {
+        let (info, old_unit) = {
             let sessions = self.sessions.read().await;
             match sessions.get(&session_id) {
-                Some(s) => s.info.clone(),
+                Some(s) => (s.info.clone(), s.systemd_unit.clone()),
                 None => return Ok(None),
             }
         };
+
+        // Stop old systemd unit if still lingering
+        if let Some(ref unit) = old_unit {
+            let _ = Command::new("systemctl")
+                .args(["stop", unit])
+                .output()
+                .await;
+        }
 
         let new_token = generate_agent_token();
 
@@ -515,15 +513,13 @@ impl SessionManager {
         let _ = std::fs::remove_file(format!("/tmp/.X{display_num}-lock"));
         let _ = std::fs::remove_dir_all(format!("/tmp/beam-keyring-{display_num}"));
 
-        let child = self.spawn_agent(&info, server_url, &new_token).await?;
-        let new_pid = child.id();
+        let unit_name = self.spawn_agent(&info, server_url, &new_token).await?;
 
-        // Update the session with the new agent process and token
+        // Update the session with the new systemd unit and token
         {
             let mut sessions = self.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_id) {
-                session.agent_process = Some(child);
-                session.agent_pid = new_pid;
+                session.systemd_unit = Some(unit_name);
                 session.agent_token = new_token;
             }
         }
@@ -531,12 +527,23 @@ impl SessionManager {
         Ok(Some(()))
     }
 
+    /// Start the agent as a systemd transient service.
+    ///
+    /// Uses `systemd-run` to create a service unit that:
+    /// - Runs as the authenticated user (`User=`)
+    /// - Opens a PAM session (`PAMName=beam`) → registers with logind
+    /// - Auto-restarts on crash (`Restart=on-failure`)
+    /// - Kills all children on stop (`KillMode=control-group`)
+    /// - Is auto-collected when done (`--collect`)
+    ///
+    /// Returns the systemd unit name on success.
     async fn spawn_agent(
         &self,
         info: &SessionInfo,
         server_url: &str,
         agent_token: &str,
-    ) -> Result<Child> {
+    ) -> Result<String> {
+        let unit_name = format!("beam-agent-{}", info.id);
         let display_str = format!(":{}", info.display);
 
         // Try to find the agent binary in the same directory as the server,
@@ -546,133 +553,114 @@ impl SessionManager {
             .and_then(|p| p.parent().map(|parent| parent.join("beam-agent")))
             .filter(|p| p.exists())
             .unwrap_or_else(|| "beam-agent".into());
+        let agent_path_str = agent_path.to_string_lossy();
 
-        let mut cmd = Command::new(agent_path);
-        cmd.arg("--display")
-            .arg(&display_str)
-            .arg("--session-id")
-            .arg(info.id.to_string())
-            .arg("--server-url")
-            .arg(server_url)
-            .arg("--width")
-            .arg(info.width.to_string())
-            .arg("--height")
-            .arg(info.height.to_string())
-            .arg("--framerate")
-            .arg(self.video_config.framerate.to_string())
-            .arg("--bitrate")
-            .arg(self.video_config.bitrate.to_string())
-            .arg("--max-width")
-            .arg(self.video_config.max_width.to_string())
-            .arg("--max-height")
-            .arg(self.video_config.max_height.to_string());
-
-        // Pass encoder preference if configured
-        if let Some(ref encoder) = self.video_config.encoder {
-            cmd.arg("--encoder").arg(encoder);
-        }
-
-        // Pass agent authentication token via environment variable
-        // (CLI args are visible to all users via /proc/<pid>/cmdline)
-        cmd.env("BEAM_AGENT_TOKEN", agent_token);
-
-        // Pass TLS cert path for certificate pinning
-        if let Some(ref cert_path) = self.tls_cert_path {
-            cmd.arg("--tls-cert").arg(cert_path);
-        }
-
-        // Set agent log level to info (avoid inheriting server's debug level)
-        cmd.env("RUST_LOG", "info");
-
-        // Run agent as the authenticated user for security isolation.
-        // Look up the user's UID/GID and set HOME/USER/LOGNAME environment.
-        // If the user doesn't exist on the system, run as current user with a warning.
-        match lookup_user(&info.username) {
-            Some(user_info) => {
-                tracing::info!(
-                    username = %info.username,
-                    uid = user_info.uid,
-                    gid = user_info.gid,
-                    home = %user_info.home,
-                    "Running agent as user"
-                );
-                let uid = user_info.uid;
-                let gid = user_info.gid;
-                let username_c = std::ffi::CString::new(info.username.as_str())
-                    .unwrap_or_else(|_| std::ffi::CString::new("nobody").unwrap());
-
-                // SAFETY: pre_exec runs between fork and exec. initgroups sets
-                // supplementary groups (e.g. input, video, render) needed by the agent.
-                unsafe {
-                    cmd.pre_exec(move || {
-                        // Set supplementary groups from /etc/group
-                        if libc::initgroups(username_c.as_ptr(), gid) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        // setgid and setuid (order matters: gid first)
-                        if libc::setgid(gid) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        if libc::setuid(uid) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
-
-                cmd.env("HOME", &user_info.home);
-                cmd.env("USER", &info.username);
-                cmd.env("LOGNAME", &info.username);
-                cmd.env("DISPLAY", &display_str);
-
-                // PulseAudio needs XDG_RUNTIME_DIR
-                let runtime_dir = format!("/run/user/{}", user_info.uid);
-                // Ensure the directory exists (may not for non-login users)
-                let _ = std::fs::create_dir_all(&runtime_dir);
-                // Set ownership to the target user
-                unsafe {
-                    let c_path = std::ffi::CString::new(runtime_dir.as_str())
-                        .map_err(|e| anyhow::anyhow!("Invalid runtime dir path: {e}"))?;
-                    libc::chown(c_path.as_ptr(), user_info.uid, user_info.gid);
-                }
-                cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
-            }
-            None => {
-                tracing::warn!(
-                    username = %info.username,
-                    "User not found in system, running agent as current user"
-                );
-                cmd.env("DISPLAY", &display_str);
-            }
-        }
-
-        // Write agent logs to a dedicated file per session.
-        // IMPORTANT: Never use Stdio::piped() without reading the pipe -
-        // the 64KB pipe buffer fills up and blocks the agent.
+        // Ensure log directory exists (systemd opens the file as PID 1)
         let log_dir = "/var/log/beam";
         let _ = std::fs::create_dir_all(log_dir);
         let log_path = format!("{log_dir}/agent-{}.log", info.id);
-        let log_file = std::fs::File::create(&log_path)
-            .with_context(|| format!("Failed to create agent log at {log_path}"))?;
-        let log_file_clone = log_file
-            .try_clone()
-            .context("Failed to clone agent log file")?;
-        tracing::info!(%log_path, "Agent log file created");
 
-        let child = cmd
-            .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(log_file_clone))
-            .spawn()
-            .with_context(|| format!("Failed to spawn beam-agent for display {}", display_str))?;
+        // Look up user info for logging and XDG_RUNTIME_DIR
+        let user_info = lookup_user(&info.username);
+        if let Some(ref ui) = user_info {
+            tracing::info!(
+                username = %info.username,
+                uid = ui.uid,
+                gid = ui.gid,
+                home = %ui.home,
+                "Starting agent service as user"
+            );
+        } else {
+            tracing::warn!(
+                username = %info.username,
+                "User not found in system — systemd-run will fail"
+            );
+        }
+
+        // Build systemd-run command
+        let mut cmd = Command::new("systemd-run");
+
+        // -- systemd-run flags --
+        cmd.args(["--unit", &unit_name]);
+        cmd.args([
+            "--description",
+            &format!("Beam desktop for {} on {}", info.username, display_str),
+        ]);
+        cmd.args(["--uid", &info.username]);
+
+        // PAMName=beam triggers pam_systemd → logind session registration.
+        // This is what makes FUSE, snap, and /run/user/<uid> work.
+        cmd.args(["--property", "PAMName=beam"]);
+        cmd.args(["--property", "Type=exec"]);
+        cmd.args(["--property", &format!("StandardOutput=append:{log_path}")]);
+        cmd.args(["--property", &format!("StandardError=append:{log_path}")]);
+
+        // Crash recovery: systemd auto-restarts the agent on failure
+        cmd.args(["--property", "Restart=on-failure"]);
+        cmd.args(["--property", "RestartSec=2"]);
+        cmd.args(["--property", "StartLimitBurst=3"]);
+        cmd.args(["--property", "StartLimitIntervalSec=60"]);
+
+        // Graceful shutdown and cleanup
+        cmd.args(["--property", "TimeoutStopSec=10"]);
+        cmd.args(["--property", "KillMode=control-group"]);
+
+        // Auto-remove the unit when it stops (no leftover failed units)
+        cmd.arg("--collect");
+
+        // -- Environment variables --
+        // Agent token via env (CLI args are visible in /proc/<pid>/cmdline)
+        cmd.args(["--setenv", &format!("BEAM_AGENT_TOKEN={agent_token}")]);
+        cmd.args(["--setenv", &format!("DISPLAY={display_str}")]);
+        cmd.args(["--setenv", "RUST_LOG=info"]);
+
+        // XDG_RUNTIME_DIR — pam_systemd creates this, but set explicitly as fallback
+        if let Some(ref ui) = user_info {
+            cmd.args(["--setenv", &format!("XDG_RUNTIME_DIR=/run/user/{}", ui.uid)]);
+        }
+
+        // -- Separator --
+        cmd.arg("--");
+
+        // -- Agent binary and arguments --
+        cmd.arg(agent_path_str.as_ref());
+        cmd.args(["--display", &display_str]);
+        cmd.args(["--session-id", &info.id.to_string()]);
+        cmd.args(["--server-url", server_url]);
+        cmd.args(["--width", &info.width.to_string()]);
+        cmd.args(["--height", &info.height.to_string()]);
+        cmd.args(["--framerate", &self.video_config.framerate.to_string()]);
+        cmd.args(["--bitrate", &self.video_config.bitrate.to_string()]);
+        cmd.args(["--max-width", &self.video_config.max_width.to_string()]);
+        cmd.args(["--max-height", &self.video_config.max_height.to_string()]);
+
+        if let Some(ref encoder) = self.video_config.encoder {
+            cmd.args(["--encoder", encoder]);
+        }
+        if let Some(ref cert_path) = self.tls_cert_path {
+            cmd.args(["--tls-cert", cert_path]);
+        }
+
+        // Run systemd-run — it exits immediately after the service starts.
+        // Timeout covers D-Bus communication + PAM session setup.
+        let output = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output())
+            .await
+            .map_err(|_| anyhow::anyhow!("systemd-run timed out starting agent (30s)"))?
+            .with_context(|| format!("Failed to run systemd-run for display {display_str}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("systemd-run failed for {unit_name}: {stderr}");
+        }
 
         tracing::info!(
             session_id = %info.id,
             display = display_str,
-            pid = child.id().unwrap_or(0),
-            "Agent process spawned"
+            unit = %unit_name,
+            "Agent service started via systemd"
         );
 
-        Ok(child)
+        Ok(unit_name)
     }
 
     /// Save all active sessions to disk for graceful restart.
@@ -691,9 +679,10 @@ impl SessionManager {
         let sessions = self.sessions.read().await;
         let mut count = 0;
         for (id, managed) in sessions.iter() {
-            let Some(pid) = managed.agent_pid else {
+            // Only persist sessions that have a running agent
+            if managed.systemd_unit.is_none() {
                 continue;
-            };
+            }
             let persisted = PersistedSession {
                 session_id: *id,
                 username: managed.info.username.clone(),
@@ -701,9 +690,10 @@ impl SessionManager {
                 width: managed.info.width,
                 height: managed.info.height,
                 created_at: managed.info.created_at,
-                agent_pid: pid,
+                agent_pid: 0, // legacy field, not used for systemd sessions
                 agent_token: managed.agent_token.clone(),
                 release_token: managed.release_token.clone(),
+                systemd_unit: managed.systemd_unit.clone(),
             };
             let path = dir.join(format!("{id}.json"));
             let tmp_path = dir.join(format!("{id}.json.tmp"));
@@ -729,8 +719,9 @@ impl SessionManager {
     }
 
     /// Restore sessions from a previous graceful shutdown.
-    /// Verifies each agent is still alive. Returns (session_id, agent_pid) pairs.
-    pub async fn restore_sessions(&self) -> Vec<(Uuid, u32)> {
+    /// Checks each session's systemd unit (or legacy PID) to verify the agent
+    /// is still alive. Returns session IDs for sessions successfully restored.
+    pub async fn restore_sessions(&self) -> Vec<Uuid> {
         let dir = Path::new(SESSION_DIR);
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -768,12 +759,31 @@ impl SessionManager {
                 }
             };
 
-            // Verify agent is still alive
-            let nix_pid = nix::unistd::Pid::from_raw(persisted.agent_pid as i32);
-            if nix::sys::signal::kill(nix_pid, None).is_err() {
+            // Verify agent is still running — check systemd unit first, fall back to PID
+            let unit_name = persisted
+                .systemd_unit
+                .clone()
+                .unwrap_or_else(|| format!("beam-agent-{}", persisted.session_id));
+
+            let is_active = std::process::Command::new("systemctl")
+                .args(["is-active", "--quiet", &unit_name])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            // Legacy fallback: check PID for pre-systemd sessions
+            let is_alive = is_active
+                || (persisted.agent_pid > 0
+                    && nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(persisted.agent_pid as i32),
+                        None,
+                    )
+                    .is_ok());
+
+            if !is_alive {
                 tracing::info!(
                     session_id = %persisted.session_id,
-                    pid = persisted.agent_pid,
+                    unit = %unit_name,
                     "Agent no longer alive, skipping"
                 );
                 let _ = std::fs::remove_file(&path);
@@ -807,8 +817,11 @@ impl SessionManager {
 
             let managed = ManagedSession {
                 info,
-                agent_process: None, // orphaned — no Child handle
-                agent_pid: Some(persisted.agent_pid),
+                systemd_unit: if is_active {
+                    Some(unit_name.clone())
+                } else {
+                    None
+                },
                 last_activity: now,
                 agent_token: persisted.agent_token,
                 release_token,
@@ -819,13 +832,14 @@ impl SessionManager {
 
             let mut sessions = self.sessions.write().await;
             sessions.insert(persisted.session_id, managed);
-            restored.push((persisted.session_id, persisted.agent_pid));
+            restored.push(persisted.session_id);
 
             tracing::info!(
                 session_id = %persisted.session_id,
                 username = %persisted.username,
                 display = persisted.display,
-                pid = persisted.agent_pid,
+                unit = %unit_name,
+                active = is_active,
                 "Restored session from disk"
             );
 
@@ -833,6 +847,15 @@ impl SessionManager {
         }
 
         restored
+    }
+
+    /// Get the systemd unit name for a session.
+    #[allow(dead_code)]
+    pub async fn get_systemd_unit(&self, session_id: Uuid) -> Option<String> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .and_then(|s| s.systemd_unit.clone())
     }
 }
 
@@ -1039,8 +1062,7 @@ mod tests {
                         height: 1080,
                         created_at: 0,
                     },
-                    agent_process: None,
-                    agent_pid: None,
+                    systemd_unit: None,
                     last_activity: 0,
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
@@ -1097,8 +1119,7 @@ mod tests {
                         height: 1080,
                         created_at: 0,
                     },
-                    agent_process: None,
-                    agent_pid: None,
+                    systemd_unit: None,
                     last_activity: 0,
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
@@ -1134,8 +1155,7 @@ mod tests {
                             height: 1080,
                             created_at: 0,
                         },
-                        agent_process: None,
-                        agent_pid: None,
+                        systemd_unit: None,
                         last_activity: 0,
                         agent_token: "token".to_string(),
                         release_token: "release".to_string(),
@@ -1187,8 +1207,7 @@ mod tests {
                         height: 1080,
                         created_at: 0,
                     },
-                    agent_process: None,
-                    agent_pid: None,
+                    systemd_unit: None,
                     last_activity: now.saturating_sub(120),
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
@@ -1210,8 +1229,7 @@ mod tests {
                         height: 1080,
                         created_at: 0,
                     },
-                    agent_process: None,
-                    agent_pid: None,
+                    systemd_unit: None,
                     last_activity: now.saturating_sub(120),
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
@@ -1233,8 +1251,7 @@ mod tests {
                         height: 1080,
                         created_at: 0,
                     },
-                    agent_process: None,
-                    agent_pid: None,
+                    systemd_unit: None,
                     last_activity: now.saturating_sub(120),
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
@@ -1279,8 +1296,7 @@ mod tests {
                         height: 1080,
                         created_at: 0,
                     },
-                    agent_process: None,
-                    agent_pid: None,
+                    systemd_unit: None,
                     last_activity: 0,
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),
@@ -1313,8 +1329,7 @@ mod tests {
                         height: 1080,
                         created_at: 0,
                     },
-                    agent_process: None,
-                    agent_pid: None,
+                    systemd_unit: None,
                     last_activity: 0,
                     agent_token: "token".to_string(),
                     release_token: "release".to_string(),

@@ -1,0 +1,14 @@
+# Beam Remote Desktop PAM config
+#
+# Minimal: auth + account + session. pam_systemd (included via
+# common-session on Ubuntu/Debian) registers each desktop session
+# with systemd-logind, which is required for FUSE mounts, snap apps,
+# and proper /run/user/<uid> management.
+#
+# No pam_loginuid — the server process is multi-user; each agent
+# runs in its own systemd transient service with the correct UID.
+# No common-password — Beam doesn't do password changes.
+
+@include common-auth
+@include common-account
+@include common-session

@@ -390,7 +390,9 @@ fn detect_encoder(preferred: Option<&str>) -> anyhow::Result<(EncoderType, Strin
             "nvcudah264enc" => EncoderType::NvidiaCuda,
             "vah264enc" => EncoderType::VaApi,
             "x264enc" => EncoderType::Software,
-            _ => bail!("Unknown encoder: {pref}. Use nvh264enc, nvcudah264enc, vah264enc, or x264enc."),
+            _ => bail!(
+                "Unknown encoder: {pref}. Use nvh264enc, nvcudah264enc, vah264enc, or x264enc."
+            ),
         };
         if can_instantiate(pref) {
             info!(encoder = pref, "Using preferred encoder from config");

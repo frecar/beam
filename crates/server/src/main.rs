@@ -106,6 +106,14 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Validate PAM config exists (required for systemd-logind session registration)
+    if !std::path::Path::new("/etc/pam.d/beam").exists() {
+        tracing::warn!(
+            "PAM config /etc/pam.d/beam not found — agent sessions will fail to start. \
+             Install the beam package or copy packaging/pam.d/beam to /etc/pam.d/beam."
+        );
+    }
+
     // Validate web root exists so we don't silently serve 404
     if !std::path::Path::new(&config.server.web_root).is_dir() {
         tracing::warn!(
@@ -191,9 +199,9 @@ async fn main() -> Result<()> {
 
     // Restore sessions from previous graceful shutdown
     let restored = state.session_manager.restore_sessions().await;
-    for (session_id, pid) in &restored {
+    for session_id in &restored {
         signaling::get_or_create_channel(&state.channels, *session_id).await;
-        web::spawn_orphan_agent_monitor(Arc::clone(&state), *session_id, *pid).await;
+        web::spawn_agent_monitor(Arc::clone(&state), *session_id).await;
     }
     if !restored.is_empty() {
         tracing::info!(

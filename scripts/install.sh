@@ -132,6 +132,12 @@ EOF
 udevadm control --reload-rules
 udevadm trigger
 
+# Install PAM config (required for systemd-logind session registration)
+log "Installing PAM configuration..."
+if [ ! -f /etc/pam.d/beam ]; then
+    install -m 644 packaging/pam.d/beam /etc/pam.d/beam
+fi
+
 # Validate installation
 log "Validating installation..."
 if ! "$INSTALL_DIR/beam-server" --help >/dev/null 2>&1; then
