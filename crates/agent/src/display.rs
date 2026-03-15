@@ -229,6 +229,52 @@ impl VirtualDisplay {
 "#,
             );
 
+            // Pre-seed panel config: use Whisker Menu (plugin-1) if available,
+            // so the panel loads it on first start without needing a restart.
+            // Also disables panel lock to allow user customization.
+            let panel_plugin_1 = if which_exists("xfce4-popup-whiskermenu") {
+                "whiskermenu"
+            } else {
+                "applicationsmenu"
+            };
+            let _ = fs::write(
+                format!("{xfconf_dir}/xfce4-panel.xml"),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-panel" version="1.0">
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="panel-1" type="empty">
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+        <value type="int" value="4"/>
+        <value type="int" value="5"/>
+        <value type="int" value="6"/>
+      </property>
+      <property name="position" type="string" value="p=6;x=0;y=0"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="28"/>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="{plugin_1}"/>
+    <property name="plugin-2" type="string" value="tasklist"/>
+    <property name="plugin-3" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-4" type="string" value="systray"/>
+    <property name="plugin-5" type="string" value="clock"/>
+    <property name="plugin-6" type="string" value="actions"/>
+  </property>
+</channel>
+"#,
+                    plugin_1 = panel_plugin_1
+                ),
+            );
+
             // Keyboard shortcuts: Alt+F2 for app finder search
             let _ = fs::write(
                 format!("{xfconf_dir}/xfce4-keyboard-shortcuts.xml"),
@@ -495,9 +541,7 @@ impl VirtualDisplay {
                     }
                 }
 
-                let has_whiskermenu = which_exists("xfce4-popup-whiskermenu");
-
-                let mut settings: Vec<(&str, &str, &str, &str)> = vec![
+                let settings: Vec<(&str, &str, &str, &str)> = vec![
                     // Disable compositor (biggest latency offender)
                     ("xfwm4", "/general/use_compositing", "bool", "false"),
                     // Disable workspace zoom animation
@@ -541,15 +585,8 @@ impl VirtualDisplay {
                     ),
                 ];
 
-                // Replace default Applications Menu with Whisker Menu if installed.
-                // Whisker Menu uses a two-pane layout (categories + apps)
-                // instead of cascading GtkMenu submenus, completely
-                // bypassing the 225ms hardcoded MENU_POPUP_DELAY in GTK3.
-                if has_whiskermenu {
-                    settings.push(("xfce4-panel", "/plugins/plugin-1", "string", "whiskermenu"));
-                } else {
-                    info!("Whisker Menu not installed, keeping default applicationsmenu");
-                }
+                // Whisker Menu is pre-seeded in xfce4-panel.xml (no runtime
+                // plugin swap or panel restart needed).
 
                 for (channel, prop, typ, value) in settings {
                     let mut cmd = Command::new("xfconf-query");
@@ -572,30 +609,7 @@ impl VirtualDisplay {
                     }
                 }
 
-                // Restart the panel only if we swapped to Whisker Menu.
-                // The plugin type change via xfconf only takes effect after
-                // the panel reloads its plugin instances.
-                if has_whiskermenu {
-                    let mut cmd = Command::new("xfce4-panel");
-                    cmd.env("DISPLAY", &display_for_xfconf).arg("--restart");
-                    if let Some(ref addr) = dbus_addr {
-                        cmd.env("DBUS_SESSION_BUS_ADDRESS", addr);
-                    }
-                    match cmd.output() {
-                        Ok(output) if output.status.success() => {
-                            info!("Panel restarted with Whisker Menu");
-                        }
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            warn!("Panel restart failed: {stderr}");
-                        }
-                        Err(e) => {
-                            warn!("Failed to restart panel: {e}");
-                        }
-                    }
-                }
-
-                info!("XFCE settings applied (compositor off, animations off, whisker menu)");
+                info!("XFCE settings applied (compositor off, animations off, theme)");
             });
 
             return Ok(());

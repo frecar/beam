@@ -161,7 +161,7 @@ export async function performLogin(
       // Save timeout selection for next login
       localStorage.setItem(SESSION_TIMEOUT_KEY, sessionTimeoutSelect.value);
 
-      updateLoadingStatus("Starting session...");
+      updateLoadingStatus("Starting desktop...");
       return data;
     } catch (err) {
       if (attempt < MAX_RETRIES && (!(err instanceof Error) || !err.message.includes("Invalid credentials"))) {

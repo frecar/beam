@@ -35,7 +35,7 @@ import {
   mobileKeyboardInput, sipCopyStatsBtn,
   btnMute, btnForwardKeys, btnTheme,
   setStatus as setStatusUI,
-  showLoading, hideLoading, showLoadingError,
+  showLoading, hideLoading, showLoadingError, updateLoadingStatus,
   showDesktop as showDesktopUI, showLogin as showLoginUI,
   showReconnectOverlay, hideReconnectOverlay,
   reconnectDesc,
@@ -764,8 +764,10 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   }
 
   setStatus("connecting", "Connecting...");
+  updateLoadingStatus("Waiting for desktop...");
 
-  // Timeout: if no video frame arrives within 20 seconds, show error
+  // Timeout: if no video frame arrives within 30 seconds, show error.
+  // Fresh sessions with systemd PAM + Xorg + desktop startup can take 10-15s.
   if (connectionTimeout) clearTimeout(connectionTimeout);
   connectionTimeout = setTimeout(() => {
     if (!renderer?.hasStream()) {
@@ -775,7 +777,7 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
       setStatus("error", "Connection timeout");
     }
     connectionTimeout = null;
-  }, 20_000);
+  }, 30_000);
 
   connection = new BeamConnection(sessionId, token);
   tokenManager.setConnection(connection);
