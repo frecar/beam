@@ -5,6 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Stop all agent sessions before starting (clean slate after upgrade/restart).
+# Agent sessions are systemd transient services that persist independently.
+ExecStartPre=-/bin/sh -c 'systemctl stop beam-agent-*.service 2>/dev/null; rm -f /tmp/.X*-lock'
 ExecStart=/usr/local/bin/beam-server --config /etc/beam/beam.toml
 Restart=always
 RestartSec=5
@@ -18,8 +21,8 @@ LimitNOFILE=65536
 # - /run/user access (PulseAudio, D-Bus)
 ProtectSystem=full
 ProtectHome=no
-# NoNewPrivileges must be off: the server uses setuid/setgid to spawn
-# agent processes as authenticated users (same pattern as GDM/LightDM).
+# NoNewPrivileges must be off: systemd-run creates transient services
+# that need to setuid/setgid to run agents as authenticated users.
 NoNewPrivileges=no
 # PrivateTmp must be off: agents use /tmp for X11 sockets and PulseAudio.
 PrivateTmp=no
