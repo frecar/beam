@@ -20,8 +20,18 @@
 - CI check: `make ci`
 
 ## Deployment
-- Install to system: `sudo make install`
-- Deploy and restart: `make build-release && sudo make deploy`
+
+**CRITICAL: NEVER deploy by SSHing into hosts and running manual builds.** Hosts consume .deb packages via APT — they should not have build toolchains. Manual deploys cause path mismatches and wasted debugging time.
+
+**Production deployment** (the ONLY correct way):
+1. `make release VERSION=X.Y.Z` — runs CI, tags, pushes
+2. Wait for GitHub Actions to build `.deb` and publish to APT repo
+3. Deploy via Ansible: `cd /home/frecar/code/asgard && ansible-playbook -i inventory playbooks/beam.yml`
+4. Verify: check service health on each host
+
+**Development only** (local testing on your own machine):
+- Install from source: `sudo make install`
+- Quick deploy after local build: `make build-release && sudo make deploy`
 - Uninstall: `sudo make uninstall`
 
 ## Configuration
@@ -72,11 +82,22 @@ git commit -m "release: vX.Y.Z"
 
 # 4. Release (runs full CI, tags, pushes -- all automatic)
 make release VERSION=X.Y.Z
+
+# 5. Monitor GitHub Actions: https://github.com/frecar/beam/actions
+#    Wait for the release workflow to complete (builds .deb, publishes to APT)
+
+# 6. Deploy to production via Ansible
+cd /home/frecar/code/asgard
+ansible-playbook -i inventory playbooks/beam.yml
+
+# 7. Verify deployment on each host (service health, logs, version)
 ```
 
 `make release` validates version sync, runs the full CI suite (fmt, clippy, tests, tsc, vite build), creates the git tag, and pushes both the commit and tag. CI then builds the `.deb` and publishes to the APT repo and GitHub Releases.
 
 **IMPORTANT**: Always use `make release` to tag and push -- never tag manually. This ensures CI passes before a tag is created.
+
+**CRITICAL**: NEVER skip steps 5-7. The release is not done until Ansible has deployed to production and you've verified the service is healthy. Do NOT SSH into hosts and build/deploy manually — that bypasses the entire pipeline.
 
 ### APT Repository
 - Hosted on `gh-pages` branch, served via `raw.githubusercontent.com` (avoids GitHub Pages CDN caching)

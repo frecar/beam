@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-03-16
+
+### Changed
+- **Release documentation**: CLAUDE.md now documents the full release pipeline including Ansible deployment steps and explicitly prohibits manual SSH deploys
+
+## [0.3.7] - 2026-03-16
+
+### Added
+- **Clipboard error toast**: Shows a debounced warning (max once per 10s) when browser clipboard write fails due to permissions, with guidance to click the page
+- **Forward keys tooltip**: Dynamic tooltip on the Keys button explaining the current mode and what clicking does
+- **Idle timeout countdown**: Warning banner now shows "Session expires in Xm Ys" with 10s update interval instead of a static message
+- **New tests**: 5 Rust tests (audio params, theme XML, DBUS discovery) + 6 TypeScript tests (clipboard bridge, countdown format)
+
+### Fixed
+- **Audio on fresh sessions**: PulseAudio retry loop (10 attempts, 500ms apart) — socket exists but isn't ready immediately after session start
+- **Theme flash on login**: Pre-seed Arc-Dark theme, Papirus-Dark icons, and cursor blink in XFCE XML configs so desktop renders correctly from first frame
+- **Slow DBUS discovery**: Try systemd user bus (`/run/user/<uid>/bus`) first before falling back to fragile /proc scan, eliminating 5-15s delays
+
 ## [0.2.9] - 2026-02-20
 
 ### Added
