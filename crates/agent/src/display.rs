@@ -275,6 +275,26 @@ impl VirtualDisplay {
                 ),
             );
 
+            // Desktop wallpaper: XFCE shapes SVG (clean, lightweight)
+            let _ = fs::write(
+                format!("{xfconf_dir}/xfce4-desktop.xml"),
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-desktop" version="1.0">
+  <property name="backdrop" type="empty">
+    <property name="screen0" type="empty">
+      <property name="monitorDUMMY0" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-shapes.svg"/>
+          <property name="image-style" type="int" value="5"/>
+          <property name="color-style" type="int" value="0"/>
+        </property>
+      </property>
+    </property>
+  </property>
+</channel>
+"#,
+            );
+
             // Keyboard shortcuts: Alt+F2 for app finder search
             let _ = fs::write(
                 format!("{xfconf_dir}/xfce4-keyboard-shortcuts.xml"),
