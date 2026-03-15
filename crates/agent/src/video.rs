@@ -31,9 +31,23 @@ pub(crate) async fn run_video_send_loop(
     while let Some(data) = encoded_rx.recv().await {
         let is_idr = h264::h264_contains_idr(&data);
 
-        // Gate on first IDR frame — browser decoder needs a keyframe to initialize
+        // Gate on first IDR frame — browser decoder needs a keyframe to initialize.
+        // Also require minimum IDR size: during desktop startup (blank screen),
+        // nvh264enc produces tiny IDRs (~500 bytes) that Chrome's hardware
+        // VideoDecoder rejects with EncodingError. Wait for real desktop content
+        // which produces IDRs of at least 1KB.
+        const MIN_IDR_SIZE: usize = 1024;
         if waiting_for_idr {
-            if !is_idr {
+            if !is_idr || (is_idr && data.len() < MIN_IDR_SIZE) {
+                if is_idr && data.len() < MIN_IDR_SIZE {
+                    debug!(
+                        size = data.len(),
+                        min = MIN_IDR_SIZE,
+                        "Skipping undersized IDR (desktop likely still blank)"
+                    );
+                    // Force another keyframe soon
+                    force_keyframe.store(true, Ordering::Relaxed);
+                }
                 if idr_wait_start.elapsed() > Duration::from_millis(500) {
                     idr_wait_attempts += 1;
                     if idr_wait_attempts > 5 {
