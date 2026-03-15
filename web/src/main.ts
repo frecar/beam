@@ -701,7 +701,7 @@ function toggleFullscreen(): void {
 
 /** Update the forward keys button to reflect current state */
 function updateForwardKeysButton(enabled: boolean): void {
-  const label = enabled ? "Capturing" : "Capture";
+  const label = enabled ? "Keys: Remote" : "Keys: Local";
   btnForwardKeys.innerHTML = `${ICON_CAPTURE}<span class="btn-label">${label}</span>`;
   btnForwardKeys.classList.toggle("active", enabled);
   btnForwardKeys.setAttribute("aria-pressed", String(enabled));

@@ -128,6 +128,16 @@ impl VirtualDisplay {
             warn!("Failed to set initial resolution {width}x{height}: {e}");
         }
 
+        // Ensure the X server uses `evdev` XKB rules. The agent injects keys
+        // via XTEST using evdev scancodes + 8, which only produces correct
+        // keysyms under the `evdev` ruleset. Some distros default to `base`
+        // rules where the keycode→keysym mapping differs (e.g., keycode 111
+        // = Print instead of Up), causing incorrect key injection.
+        let _ = Command::new("setxkbmap")
+            .env("DISPLAY", &display_str)
+            .args(["-rules", "evdev", "-model", "pc105", "-layout", "us"])
+            .output();
+
         // Only delete temp configs on drop, not the static package config
         let cleanup_config = if config_path.starts_with("/tmp/") {
             Some(config_path)
@@ -504,6 +514,26 @@ impl VirtualDisplay {
                     ("xsettings", "/Net/IconThemeName", "string", "Papirus-Dark"),
                     // Match window manager theme
                     ("xfwm4", "/general/theme", "string", "Arc-Dark"),
+                    // Disable screenshooter shortcuts (beam has its own screenshot,
+                    // and xfce4-screenshooter may not be installed)
+                    (
+                        "xfce4-keyboard-shortcuts",
+                        "/commands/custom/Print",
+                        "string",
+                        "",
+                    ),
+                    (
+                        "xfce4-keyboard-shortcuts",
+                        "/commands/custom/<Alt>Print",
+                        "string",
+                        "",
+                    ),
+                    (
+                        "xfce4-keyboard-shortcuts",
+                        "/commands/custom/<Shift>Print",
+                        "string",
+                        "",
+                    ),
                 ];
 
                 // Replace default Applications Menu with Whisker Menu if installed.
