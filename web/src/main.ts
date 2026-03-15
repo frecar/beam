@@ -702,9 +702,13 @@ function toggleFullscreen(): void {
 /** Update the forward keys button to reflect current state */
 function updateForwardKeysButton(enabled: boolean): void {
   const label = enabled ? "Keys: Remote" : "Keys: Local";
+  const tooltip = enabled
+    ? "Keyboard shortcuts are sent to the remote desktop. Click to send them to your browser instead."
+    : "Keyboard shortcuts are handled by your browser. Click to forward them to the remote desktop.";
   btnForwardKeys.innerHTML = `${ICON_CAPTURE}<span class="btn-label">${label}</span>`;
   btnForwardKeys.classList.toggle("active", enabled);
   btnForwardKeys.setAttribute("aria-pressed", String(enabled));
+  btnForwardKeys.title = tooltip;
 }
 
 /** Toggle forwarding of browser shortcuts to the remote desktop */
