@@ -905,6 +905,13 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
       clipboardBridge.onHistoryChange(() => {
         renderClipboardHistory();
       });
+      clipboardBridge.onClipboardError(() => {
+        ui?.showNotification(
+          "Clipboard sync failed — click the page to grant clipboard permission",
+          "warning",
+          5000,
+        );
+      });
     }
     clipboardBridge.enable();
   });

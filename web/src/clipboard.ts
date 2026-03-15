@@ -21,10 +21,17 @@ const HISTORY_PREVIEW_LENGTH = 100;
  * - On paste: reads local clipboard and sends text to remote
  * - On remote clipboard event: writes to local clipboard
  */
+/** Callback for clipboard write errors (permission denied) */
+export type ClipboardErrorCallback = () => void;
+
+const CLIPBOARD_ERROR_DEBOUNCE_MS = 10_000;
+
 export class ClipboardBridge {
   private sendClipboard: (event: InputEvent) => void;
   private onPaste = this.handlePaste.bind(this);
   private syncCallback: ClipboardSyncCallback | null = null;
+  private errorCallback: ClipboardErrorCallback | null = null;
+  private lastErrorNotification = 0;
   private history: ClipboardHistoryEntry[] = [];
   private historyCallback: (() => void) | null = null;
 
@@ -69,6 +76,19 @@ export class ClipboardBridge {
     this.syncCallback = callback;
   }
 
+  /** Register a callback that fires when clipboard write fails (debounced) */
+  onClipboardError(callback: ClipboardErrorCallback): void {
+    this.errorCallback = callback;
+  }
+
+  private notifyError(): void {
+    const now = Date.now();
+    if (now - this.lastErrorNotification >= CLIPBOARD_ERROR_DEBOUNCE_MS) {
+      this.lastErrorNotification = now;
+      this.errorCallback?.();
+    }
+  }
+
   /** Build a short preview string (max 40 chars, single line) */
   private buildPreview(text: string): string {
     const firstLine = text.split("\n")[0].trim();
@@ -91,7 +111,7 @@ export class ClipboardBridge {
       this.addHistory("received", text);
     }
     navigator.clipboard.writeText(text).catch(() => {
-      // Clipboard write permission denied — ignore silently
+      this.notifyError();
     });
   }
 
