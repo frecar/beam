@@ -38,7 +38,7 @@ pub(crate) async fn run_video_send_loop(
         // which produces IDRs of at least 1KB.
         const MIN_IDR_SIZE: usize = 1024;
         if waiting_for_idr {
-            if !is_idr || (is_idr && data.len() < MIN_IDR_SIZE) {
+            if !is_idr || data.len() < MIN_IDR_SIZE {
                 if is_idr && data.len() < MIN_IDR_SIZE {
                     debug!(
                         size = data.len(),

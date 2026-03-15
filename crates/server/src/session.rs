@@ -136,7 +136,9 @@ struct ManagedSession {
     /// increments this; the spawned timer checks if the generation still matches.
     /// This avoids a race where overlapping grace periods share a single boolean.
     pub grace_generation: Arc<AtomicU64>,
-    /// Number of times the agent has been restarted after unexpected exits
+    /// Number of times the agent has been restarted after unexpected exits.
+    /// Managed by systemd (Restart=on-failure); kept for metrics/tests.
+    #[allow(dead_code)]
     pub restart_count: u32,
     /// Per-session idle timeout override in seconds. None = use global default.
     pub idle_timeout_override: Option<u64>,
@@ -460,6 +462,7 @@ impl SessionManager {
 
     /// Increment the restart count for a session and return the new count.
     /// Returns `None` if the session does not exist.
+    #[allow(dead_code)]
     pub async fn increment_restart_count(&self, session_id: Uuid) -> Option<u32> {
         let mut sessions = self.sessions.write().await;
         sessions.get_mut(&session_id).map(|s| {
@@ -481,6 +484,7 @@ impl SessionManager {
     /// starts a new systemd transient service, and updates the session.
     ///
     /// Returns `None` if the session does not exist.
+    #[allow(dead_code)]
     pub async fn respawn_agent(&self, session_id: Uuid, server_url: &str) -> Result<Option<()>> {
         // Read session info under a read lock first
         let (info, old_unit) = {
@@ -846,6 +850,7 @@ impl SessionManager {
     }
 
     /// Get the systemd unit name for a session.
+    #[allow(dead_code)]
     pub async fn get_systemd_unit(&self, session_id: Uuid) -> Option<String> {
         let sessions = self.sessions.read().await;
         sessions
