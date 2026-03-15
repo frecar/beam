@@ -185,7 +185,7 @@ impl VirtualDisplay {
             let xfconf_dir = format!("{xfce_config_dir}/xfce4/xfconf/xfce-perchannel-xml");
             let _ = fs::create_dir_all(&xfconf_dir);
 
-            // xfwm4: disable compositor and workspace zoom animation
+            // xfwm4: disable compositor, workspace zoom animation, and pre-seed theme
             let _ = fs::write(
                 format!("{xfconf_dir}/xfwm4.xml"),
                 r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -196,12 +196,13 @@ impl VirtualDisplay {
     <property name="popup_opacity" type="int" value="100"/>
     <property name="move_opacity" type="int" value="100"/>
     <property name="resize_opacity" type="int" value="100"/>
+    <property name="theme" type="string" value="Arc-Dark"/>
   </property>
 </channel>
 "#,
             );
 
-            // xsettings: disable GTK animations via xsettings daemon
+            // xsettings: disable GTK animations, pre-seed theme/icons/cursor settings
             let _ = fs::write(
                 format!("{xfconf_dir}/xsettings.xml"),
                 r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -209,9 +210,12 @@ impl VirtualDisplay {
   <property name="Gtk" type="empty">
     <property name="MenuPopupDelay" type="int" value="0"/>
     <property name="MenuPopdownDelay" type="int" value="0"/>
+    <property name="CursorBlink" type="bool" value="false"/>
   </property>
   <property name="Net" type="empty">
     <property name="EnableAnimations" type="bool" value="false"/>
+    <property name="ThemeName" type="string" value="Arc-Dark"/>
+    <property name="IconThemeName" type="string" value="Papirus-Dark"/>
   </property>
 </channel>
 "#,
@@ -1263,5 +1267,73 @@ mod tests {
         let (w, h) = clamp_resize_dimensions(2000, 1200, 1921, 1081).unwrap();
         assert_eq!(w, 1920);
         assert_eq!(h, 1080);
+    }
+
+    #[test]
+    fn xfce_config_contains_theme_settings() {
+        // Write pre-seeded configs to a temp dir and verify theme settings are present.
+        let dir = std::env::temp_dir().join(format!("beam-test-xfce-{}", std::process::id()));
+        let xfconf_dir = dir.join("xfce4/xfconf/xfce-perchannel-xml");
+        fs::create_dir_all(&xfconf_dir).unwrap();
+
+        // Write the same xsettings.xml as start_desktop()
+        fs::write(
+            xfconf_dir.join("xsettings.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xsettings" version="1.0">
+  <property name="Gtk" type="empty">
+    <property name="MenuPopupDelay" type="int" value="0"/>
+    <property name="MenuPopdownDelay" type="int" value="0"/>
+    <property name="CursorBlink" type="bool" value="false"/>
+  </property>
+  <property name="Net" type="empty">
+    <property name="EnableAnimations" type="bool" value="false"/>
+    <property name="ThemeName" type="string" value="Arc-Dark"/>
+    <property name="IconThemeName" type="string" value="Papirus-Dark"/>
+  </property>
+</channel>
+"#,
+        )
+        .unwrap();
+
+        // Write the same xfwm4.xml as start_desktop()
+        fs::write(
+            xfconf_dir.join("xfwm4.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="zoom_desktop" type="bool" value="false"/>
+    <property name="popup_opacity" type="int" value="100"/>
+    <property name="move_opacity" type="int" value="100"/>
+    <property name="resize_opacity" type="int" value="100"/>
+    <property name="theme" type="string" value="Arc-Dark"/>
+  </property>
+</channel>
+"#,
+        )
+        .unwrap();
+
+        let xsettings = fs::read_to_string(xfconf_dir.join("xsettings.xml")).unwrap();
+        assert!(
+            xsettings.contains(r#""ThemeName" type="string" value="Arc-Dark""#),
+            "xsettings.xml should pre-seed Arc-Dark theme"
+        );
+        assert!(
+            xsettings.contains(r#""IconThemeName" type="string" value="Papirus-Dark""#),
+            "xsettings.xml should pre-seed Papirus-Dark icons"
+        );
+        assert!(
+            xsettings.contains(r#""CursorBlink" type="bool" value="false""#),
+            "xsettings.xml should disable cursor blink"
+        );
+
+        let xfwm4 = fs::read_to_string(xfconf_dir.join("xfwm4.xml")).unwrap();
+        assert!(
+            xfwm4.contains(r#""theme" type="string" value="Arc-Dark""#),
+            "xfwm4.xml should pre-seed Arc-Dark window theme"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
