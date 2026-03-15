@@ -261,7 +261,6 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "jsonwebtoken",
- "libc",
  "nix",
  "pam",
  "pem",
