@@ -245,7 +245,7 @@ impl VirtualDisplay {
                  gtk-cursor-blink=false\n",
             );
 
-            // GTK3 CSS: kill ALL CSS transitions (Greybird theme has 46 × 200ms
+            // GTK3 CSS: kill ALL CSS transitions (GTK themes use 200ms+
             // transitions on buttons, menus, entries, hover states etc.).
             // gtk-enable-animations only affects GtkAnimation objects, NOT CSS
             // transitions — this override is required for instant menu hover.
@@ -498,8 +498,12 @@ impl VirtualDisplay {
                     ("xsettings", "/Gtk/MenuPopdownDelay", "int", "0"),
                     // Disable cursor blink (saves encode bandwidth)
                     ("xsettings", "/Gtk/CursorBlink", "bool", "false"),
-                    // Force Greybird theme (consistent, well-tested with our CSS override)
-                    ("xsettings", "/Net/ThemeName", "string", "Greybird"),
+                    // Arc-Dark: modern flat dark theme, well-maintained
+                    ("xsettings", "/Net/ThemeName", "string", "Arc-Dark"),
+                    // Papirus-Dark: comprehensive modern icon theme
+                    ("xsettings", "/Net/IconThemeName", "string", "Papirus-Dark"),
+                    // Match window manager theme
+                    ("xfwm4", "/general/theme", "string", "Arc-Dark"),
                 ];
 
                 // Replace default Applications Menu with Whisker Menu if installed.

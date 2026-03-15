@@ -588,14 +588,8 @@ impl SessionManager {
         // This is what makes FUSE, snap, and /run/user/<uid> work.
         cmd.args(["--property", "PAMName=beam"]);
         cmd.args(["--property", "Type=exec"]);
-        cmd.args([
-            "--property",
-            &format!("StandardOutput=append:{log_path}"),
-        ]);
-        cmd.args([
-            "--property",
-            &format!("StandardError=append:{log_path}"),
-        ]);
+        cmd.args(["--property", &format!("StandardOutput=append:{log_path}")]);
+        cmd.args(["--property", &format!("StandardError=append:{log_path}")]);
 
         // Crash recovery: systemd auto-restarts the agent on failure
         cmd.args(["--property", "Restart=on-failure"]);
@@ -618,10 +612,7 @@ impl SessionManager {
 
         // XDG_RUNTIME_DIR — pam_systemd creates this, but set explicitly as fallback
         if let Some(ref ui) = user_info {
-            cmd.args([
-                "--setenv",
-                &format!("XDG_RUNTIME_DIR=/run/user/{}", ui.uid),
-            ]);
+            cmd.args(["--setenv", &format!("XDG_RUNTIME_DIR=/run/user/{}", ui.uid)]);
         }
 
         // -- Separator --
@@ -648,13 +639,10 @@ impl SessionManager {
 
         // Run systemd-run — it exits immediately after the service starts.
         // Timeout covers D-Bus communication + PAM session setup.
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            cmd.output(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("systemd-run timed out starting agent (30s)"))?
-        .with_context(|| format!("Failed to run systemd-run for display {display_str}"))?;
+        let output = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output())
+            .await
+            .map_err(|_| anyhow::anyhow!("systemd-run timed out starting agent (30s)"))?
+            .with_context(|| format!("Failed to run systemd-run for display {display_str}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -825,7 +813,11 @@ impl SessionManager {
 
             let managed = ManagedSession {
                 info,
-                systemd_unit: if is_active { Some(unit_name.clone()) } else { None },
+                systemd_unit: if is_active {
+                    Some(unit_name.clone())
+                } else {
+                    None
+                },
                 last_activity: now,
                 agent_token: persisted.agent_token,
                 release_token,
