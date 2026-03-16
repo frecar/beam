@@ -463,4 +463,105 @@ mod tests {
         let received = rx.recv().await.unwrap();
         assert_eq!(received, msg);
     }
+
+    #[tokio::test]
+    async fn browser_connect_sends_visibility_to_agent() {
+        // Simulates the browser connect flow: server sends VisibilityState{visible:true}
+        // to the agent via the to_agent broadcast channel.
+        let channel = SignalingChannel::new();
+        let mut rx = channel.to_agent.subscribe();
+
+        // This is what handle_browser_ws does on connect
+        let receivers = channel
+            .to_agent
+            .send(AgentCommand::Input(InputEvent::VisibilityState {
+                visible: true,
+            }))
+            .unwrap_or(0);
+
+        assert_eq!(receivers, 1, "Should have exactly one subscriber");
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            AgentCommand::Input(InputEvent::VisibilityState { visible }) => {
+                assert!(visible, "Should be visible=true for reconnect");
+            }
+            _ => panic!("Expected VisibilityState, got {:?}", received),
+        }
+    }
+
+    #[tokio::test]
+    async fn visibility_notification_returns_zero_without_subscribers() {
+        // When the agent is not connected, the broadcast has no subscribers.
+        // The server should detect this (receivers == 0).
+        let channel = SignalingChannel::new();
+        // Don't subscribe — simulates agent not connected
+
+        let receivers = channel
+            .to_agent
+            .send(AgentCommand::Input(InputEvent::VisibilityState {
+                visible: true,
+            }))
+            .unwrap_or(0);
+
+        assert_eq!(
+            receivers, 0,
+            "Should be zero receivers when agent not connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn visibility_notification_reaches_multiple_subscribers() {
+        // Even though only one agent handler subscribes in practice,
+        // verify broadcast semantics work correctly.
+        let channel = SignalingChannel::new();
+        let mut rx1 = channel.to_agent.subscribe();
+        let mut rx2 = channel.to_agent.subscribe();
+
+        let receivers = channel
+            .to_agent
+            .send(AgentCommand::Input(InputEvent::VisibilityState {
+                visible: true,
+            }))
+            .unwrap_or(0);
+
+        assert_eq!(receivers, 2);
+        assert!(matches!(
+            rx1.recv().await.unwrap(),
+            AgentCommand::Input(InputEvent::VisibilityState { visible: true })
+        ));
+        assert!(matches!(
+            rx2.recv().await.unwrap(),
+            AgentCommand::Input(InputEvent::VisibilityState { visible: true })
+        ));
+    }
+
+    #[tokio::test]
+    async fn channel_reuse_preserves_agent_subscription() {
+        // When browser reconnects, the channel is reused (not recreated).
+        // The agent's subscription on to_agent must still work.
+        let registry = new_channel_registry();
+        let id = Uuid::new_v4();
+
+        let ch1 = get_or_create_channel(&registry, id).await;
+        let mut agent_rx = ch1.to_agent.subscribe();
+
+        // Second browser connect reuses the same channel
+        let ch2 = get_or_create_channel(&registry, id).await;
+        assert!(Arc::ptr_eq(&ch1, &ch2));
+
+        // Send visibility notification via the reused channel
+        ch2.to_agent
+            .send(AgentCommand::Input(InputEvent::VisibilityState {
+                visible: true,
+            }))
+            .unwrap();
+
+        // Agent should receive it
+        let received = agent_rx.recv().await.unwrap();
+        assert!(matches!(
+            received,
+            AgentCommand::Input(InputEvent::VisibilityState { visible: true })
+        ));
+    }
 }

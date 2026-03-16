@@ -330,6 +330,38 @@ mod tests {
     }
 
     #[test]
+    fn agent_command_visibility_state_roundtrip() {
+        // This is the exact message the server sends to the agent on browser reconnect.
+        // The agent uses it to trigger encoder reset + keyframe gating.
+        let cmd = AgentCommand::Input(InputEvent::VisibilityState { visible: true });
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"input""#));
+        assert!(json.contains(r#""t":"vs""#));
+        assert!(json.contains(r#""visible":true"#));
+
+        let parsed: AgentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentCommand::Input(InputEvent::VisibilityState { visible }) => {
+                assert!(visible);
+            }
+            _ => panic!("Expected Input(VisibilityState), got {parsed:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_command_visibility_false_roundtrip() {
+        let cmd = AgentCommand::Input(InputEvent::VisibilityState { visible: false });
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: AgentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentCommand::Input(InputEvent::VisibilityState { visible }) => {
+                assert!(!visible);
+            }
+            _ => panic!("Expected Input(VisibilityState)"),
+        }
+    }
+
+    #[test]
     fn auth_request_password_redacted_in_debug() {
         let req = AuthRequest {
             username: "admin".to_string(),
