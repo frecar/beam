@@ -7,12 +7,18 @@ use tracing::{debug, info, warn};
 /// Minimal PulseAudio config for virtual desktop sessions.
 /// Creates a null sink (virtual audio output) with a monitor source
 /// that the agent can capture from.
-const PA_CONFIG: &str = "\
+/// Generate a PulseAudio config that binds to a display-specific socket path.
+/// This avoids conflicts with any existing user-level PulseAudio instance.
+fn pa_config(runtime_dir: &str) -> String {
+    format!(
+        "\
 load-module module-null-sink sink_name=beam sink_properties=device.description=Beam
 set-default-sink beam
-load-module module-native-protocol-unix
+load-module module-native-protocol-unix socket={runtime_dir}/native auth-anonymous=1
 load-module module-always-sink
-";
+"
+    )
+}
 
 /// Manages a virtual X display using the dummy video driver.
 pub struct VirtualDisplay {
@@ -767,9 +773,10 @@ impl VirtualDisplay {
         fs::create_dir_all(&runtime_dir)
             .with_context(|| format!("Failed to create PulseAudio dir: {runtime_dir}"))?;
 
-        // Write a minimal PulseAudio config for virtual sessions
+        // Write a minimal PulseAudio config for virtual sessions.
+        // Explicit socket path avoids conflict with user's existing PulseAudio.
         let pa_config_path = format!("/tmp/beam-pulse-{}.pa", self.display_num);
-        fs::write(&pa_config_path, PA_CONFIG)
+        fs::write(&pa_config_path, pa_config(&runtime_dir))
             .with_context(|| format!("Failed to write PA config to {pa_config_path}"))?;
 
         let child = Command::new("pulseaudio")
