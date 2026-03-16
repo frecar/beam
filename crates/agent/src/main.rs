@@ -856,52 +856,56 @@ async fn main() -> anyhow::Result<()> {
         })
         .context("Failed to spawn capture thread")?;
 
-    // Audio capture thread — retry up to 10 times (PulseAudio socket may exist but not be ready)
-    let audio_capture_result = {
-        let mut result = AudioCapture::new(48000, 2, pulse_server.as_deref());
-        for attempt in 1..10 {
-            if result.is_ok() {
-                break;
-            }
-            info!(attempt, "PulseAudio not ready, retrying in 500ms...");
-            std::thread::sleep(Duration::from_millis(500));
-            result = AudioCapture::new(48000, 2, pulse_server.as_deref());
-        }
-        result
-    };
-    let audio_handle = match audio_capture_result {
-        Ok(mut audio_capture) => {
-            let handle = std::thread::Builder::new()
-                .name("audio-capture".into())
-                .spawn(move || {
-                    info!("Audio capture thread started");
-                    loop {
-                        if shutdown_for_audio.load(Ordering::Relaxed) {
-                            info!("Audio thread shutting down");
+    // Audio capture thread — retries PulseAudio connection in background (non-blocking)
+    let pulse_server_clone = pulse_server.clone();
+    let audio_handle = std::thread::Builder::new()
+        .name("audio-capture".into())
+        .spawn(move || {
+            // Retry PulseAudio connection up to 10 times (500ms apart, 5s total)
+            let mut audio_capture = None;
+            for attempt in 0..10 {
+                if shutdown_for_audio.load(Ordering::Relaxed) {
+                    return;
+                }
+                match AudioCapture::new(48000, 2, pulse_server_clone.as_deref()) {
+                    Ok(capture) => {
+                        info!("Audio capture initialized");
+                        audio_capture = Some(capture);
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt == 9 {
+                            warn!("Audio capture unavailable after 10 attempts: {e:#}. Continuing without audio.");
                             return;
                         }
-                        match audio_capture.capture_and_encode() {
-                            Ok(opus_data) => {
-                                if audio_tx.blocking_send(opus_data).is_err() {
-                                    info!("Audio channel closed, stopping audio capture");
-                                    return;
-                                }
-                            }
-                            Err(e) => {
-                                error!("Audio capture error: {e:#}");
-                                return;
-                            }
+                        info!(attempt = attempt + 1, "PulseAudio not ready, retrying in 500ms...");
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                }
+            }
+            let Some(mut audio_capture) = audio_capture else { return };
+            info!("Audio capture thread started");
+            loop {
+                if shutdown_for_audio.load(Ordering::Relaxed) {
+                    info!("Audio thread shutting down");
+                    return;
+                }
+                match audio_capture.capture_and_encode() {
+                    Ok(opus_data) => {
+                        if audio_tx.blocking_send(opus_data).is_err() {
+                            info!("Audio channel closed, stopping audio capture");
+                            return;
                         }
                     }
-                })
-                .context("Failed to spawn audio capture thread")?;
-            Some(handle)
-        }
-        Err(e) => {
-            warn!("Audio capture unavailable: {e:#}. Continuing without audio.");
-            None
-        }
-    };
+                    Err(e) => {
+                        error!("Audio capture error: {e:#}");
+                        return;
+                    }
+                }
+            }
+        })
+        .context("Failed to spawn audio capture thread")?;
+    let audio_handle = Some(audio_handle);
 
     // Set up SIGTERM handler
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
