@@ -249,4 +249,130 @@ mod tests {
         let map = build_cursor_map();
         assert_eq!(map.get("some_custom_cursor_xyz"), None);
     }
+
+    #[test]
+    fn cursor_map_all_resize_directions() {
+        let map = build_cursor_map();
+        // Cardinal directions
+        assert_eq!(map.get("top_side"), Some(&"n-resize"));
+        assert_eq!(map.get("bottom_side"), Some(&"s-resize"));
+        assert_eq!(map.get("left_side"), Some(&"w-resize"));
+        assert_eq!(map.get("right_side"), Some(&"e-resize"));
+        // Diagonal corners
+        assert_eq!(map.get("top_left_corner"), Some(&"nw-resize"));
+        assert_eq!(map.get("top_right_corner"), Some(&"ne-resize"));
+        assert_eq!(map.get("bottom_left_corner"), Some(&"sw-resize"));
+        assert_eq!(map.get("bottom_right_corner"), Some(&"se-resize"));
+    }
+
+    #[test]
+    fn cursor_map_css_named_cursors() {
+        let map = build_cursor_map();
+        // CSS standard cursor names should map to themselves
+        assert_eq!(map.get("ew-resize"), Some(&"ew-resize"));
+        assert_eq!(map.get("ns-resize"), Some(&"ns-resize"));
+        assert_eq!(map.get("nw-resize"), Some(&"nw-resize"));
+        assert_eq!(map.get("ne-resize"), Some(&"ne-resize"));
+        assert_eq!(map.get("sw-resize"), Some(&"sw-resize"));
+        assert_eq!(map.get("se-resize"), Some(&"se-resize"));
+        assert_eq!(map.get("n-resize"), Some(&"n-resize"));
+        assert_eq!(map.get("s-resize"), Some(&"s-resize"));
+        assert_eq!(map.get("w-resize"), Some(&"w-resize"));
+        assert_eq!(map.get("e-resize"), Some(&"e-resize"));
+    }
+
+    #[test]
+    fn cursor_map_grab_variants() {
+        let map = build_cursor_map();
+        assert_eq!(map.get("grab"), Some(&"grab"));
+        assert_eq!(map.get("openhand"), Some(&"grab"));
+        assert_eq!(map.get("closedhand"), Some(&"grabbing"));
+        assert_eq!(map.get("grabbing"), Some(&"grabbing"));
+        assert_eq!(map.get("dnd-move"), Some(&"grabbing"));
+        assert_eq!(map.get("dnd-copy"), Some(&"grabbing"));
+        assert_eq!(map.get("dnd-link"), Some(&"grabbing"));
+    }
+
+    #[test]
+    fn cursor_map_text_and_pointer_variants() {
+        let map = build_cursor_map();
+        // All text cursor aliases
+        assert_eq!(map.get("xterm"), Some(&"text"));
+        assert_eq!(map.get("text"), Some(&"text"));
+        assert_eq!(map.get("ibeam"), Some(&"text"));
+        // All pointer/hand aliases
+        assert_eq!(map.get("hand1"), Some(&"pointer"));
+        assert_eq!(map.get("hand2"), Some(&"pointer"));
+        assert_eq!(map.get("pointer"), Some(&"pointer"));
+        assert_eq!(map.get("pointing_hand"), Some(&"pointer"));
+    }
+
+    #[test]
+    fn cursor_map_special_cursors() {
+        let map = build_cursor_map();
+        assert_eq!(map.get("context-menu"), Some(&"context-menu"));
+        assert_eq!(map.get("plus"), Some(&"cell"));
+        assert_eq!(map.get("cell"), Some(&"cell"));
+        assert_eq!(map.get("crosshair"), Some(&"crosshair"));
+        assert_eq!(map.get("cross"), Some(&"crosshair"));
+        assert_eq!(map.get("tcross"), Some(&"crosshair"));
+    }
+
+    #[test]
+    fn cursor_map_not_allowed_variants() {
+        let map = build_cursor_map();
+        assert_eq!(map.get("not-allowed"), Some(&"not-allowed"));
+        assert_eq!(map.get("crossed_circle"), Some(&"not-allowed"));
+        assert_eq!(map.get("X_cursor"), Some(&"not-allowed"));
+        assert_eq!(map.get("forbidden"), Some(&"not-allowed"));
+        assert_eq!(map.get("no-drop"), Some(&"not-allowed"));
+    }
+
+    #[test]
+    fn cursor_map_default_aliases() {
+        let map = build_cursor_map();
+        for name in ["left_ptr", "default", "arrow", "top_left_arrow"] {
+            assert_eq!(
+                map.get(name),
+                Some(&"default"),
+                "{name} should map to 'default'"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_map_all_values_are_valid_css() {
+        let map = build_cursor_map();
+        let valid_css = [
+            "default",
+            "text",
+            "pointer",
+            "wait",
+            "progress",
+            "crosshair",
+            "ew-resize",
+            "ns-resize",
+            "nw-resize",
+            "ne-resize",
+            "sw-resize",
+            "se-resize",
+            "n-resize",
+            "s-resize",
+            "w-resize",
+            "e-resize",
+            "move",
+            "not-allowed",
+            "help",
+            "grab",
+            "grabbing",
+            "context-menu",
+            "cell",
+        ];
+        for (x11_name, css_name) in &map {
+            assert!(
+                valid_css.contains(css_name),
+                "X11 cursor '{x11_name}' maps to '{css_name}' which is not a valid CSS cursor"
+            );
+        }
+    }
 }

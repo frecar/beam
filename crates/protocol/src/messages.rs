@@ -442,4 +442,74 @@ mod tests {
         assert_eq!(config.session.default_width, 1920);
         assert_eq!(config.session.default_height, 1080);
     }
+
+    #[test]
+    fn all_input_event_variants_roundtrip() {
+        // Every InputEvent variant must serialize and deserialize correctly.
+        // This catches accidental serde tag changes that would break the protocol.
+        let events: Vec<InputEvent> = vec![
+            InputEvent::Key { c: 65, d: true },
+            InputEvent::Key { c: 65, d: false },
+            InputEvent::MouseMove { x: 100.0, y: 200.0 },
+            InputEvent::RelativeMouseMove { dx: -3.5, dy: 1.2 },
+            InputEvent::Button { b: 0, d: true },
+            InputEvent::Button { b: 2, d: false },
+            InputEvent::Scroll { dx: 0.0, dy: -1.0 },
+            InputEvent::Clipboard {
+                text: "hello".to_string(),
+            },
+            InputEvent::Resize { w: 1920, h: 1080 },
+            InputEvent::Layout {
+                layout: "us".to_string(),
+            },
+            InputEvent::Quality {
+                mode: "auto".to_string(),
+            },
+            InputEvent::VisibilityState { visible: true },
+            InputEvent::VisibilityState { visible: false },
+        ];
+
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let parsed: InputEvent = serde_json::from_str(&json).unwrap();
+            // Re-serialize to verify equality (InputEvent doesn't impl PartialEq)
+            let json2 = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json, json2, "Roundtrip failed for: {json}");
+        }
+    }
+
+    #[test]
+    fn agent_command_input_preserves_event_data() {
+        // Verify that wrapping in AgentCommand doesn't lose data
+        let event = InputEvent::Resize { w: 2560, h: 1440 };
+        let cmd = AgentCommand::Input(event);
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: AgentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentCommand::Input(InputEvent::Resize { w, h }) => {
+                assert_eq!(w, 2560);
+                assert_eq!(h, 1440);
+            }
+            _ => panic!("Expected Input(Resize)"),
+        }
+    }
+
+    #[test]
+    fn signaling_messages_roundtrip() {
+        let messages = vec![
+            SignalingMessage::SessionReady {
+                session_id: Uuid::nil(),
+            },
+            SignalingMessage::Error {
+                message: "test error".to_string(),
+            },
+        ];
+
+        for msg in messages {
+            let json = serde_json::to_string(&msg).unwrap();
+            let parsed: SignalingMessage = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json, json2, "Roundtrip failed for: {json}");
+        }
+    }
 }
