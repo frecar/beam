@@ -53,7 +53,6 @@ struct InputCallbackCtx {
     capture_wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     capture_cmd_tx: std::sync::mpsc::Sender<CaptureCommand>,
     tab_backgrounded: Arc<AtomicBool>,
-    force_keyframe: Arc<AtomicBool>,
     video_needs_keyframe: Arc<AtomicBool>,
     display: String,
     max_width: u32,
@@ -72,9 +71,8 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
         clipboard_read_tx,
         download_request_tx,
         capture_wake,
-        capture_cmd_tx: _capture_cmd_tx,
+        capture_cmd_tx,
         tab_backgrounded,
-        force_keyframe,
         video_needs_keyframe,
         display,
         max_width,
@@ -259,13 +257,15 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 info!(visible, "Browser tab visibility changed");
                 tab_backgrounded.store(!visible, Ordering::Relaxed);
                 if visible {
-                    // Force keyframe so the browser decoder can start immediately.
-                    // Two flags: force_keyframe tells the capture thread to produce
-                    // an IDR, video_needs_keyframe tells the video send loop to
-                    // drop P-frames until that IDR arrives.
-                    info!("Requesting keyframe for browser reconnect");
-                    force_keyframe.store(true, Ordering::Relaxed);
+                    // Reset encoder pipeline to guarantee a fresh IDR frame.
+                    // GStreamer's ForceKeyUnit event is unreliable with nvcudah264enc
+                    // (it logs "Forced IDR" but the encoded frame isn't actually an
+                    // IDR). Pipeline recreation always starts with a real IDR.
+                    // video_needs_keyframe gates the video send loop to drop stale
+                    // P-frames until the IDR from the new pipeline arrives.
+                    info!("Resetting encoder for browser reconnect");
                     video_needs_keyframe.store(true, Ordering::Relaxed);
+                    let _ = capture_cmd_tx.send(CaptureCommand::ResetEncoder);
                     // Wake capture thread immediately to restore full framerate
                     let (lock, cvar) = &*capture_wake;
                     let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -521,7 +521,6 @@ async fn main() -> anyhow::Result<()> {
         capture_wake: Arc::clone(&capture_wake_for_input),
         capture_cmd_tx: capture_cmd_tx.clone(),
         tab_backgrounded: Arc::clone(&tab_backgrounded),
-        force_keyframe: Arc::clone(&force_keyframe),
         video_needs_keyframe: Arc::clone(&video_needs_keyframe),
         display: args.display.clone(),
         max_width: args.max_width,
