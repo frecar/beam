@@ -92,13 +92,21 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
     tracing::info!(%session_id, "Kicking any existing browsers for this session");
     channel.browser_kick.notify_waiters();
 
-    // Notify agent that a browser is now connected — clears backgrounded mode
-    // and wakes the capture thread so the first frame is sent promptly.
-    let _ = channel
+    // Notify agent that a browser is now connected — clears backgrounded mode,
+    // forces a keyframe, and wakes the capture thread so the first frame is
+    // sent promptly. The agent uses this to reset the encoder so the browser's
+    // decoder can start decoding immediately (it needs a keyframe/IDR).
+    let receivers = channel
         .to_agent
         .send(AgentCommand::Input(InputEvent::VisibilityState {
             visible: true,
-        }));
+        }))
+        .unwrap_or(0);
+    if receivers == 0 {
+        tracing::warn!(%session_id, "No agent receivers for visibility notification — keyframe may not be sent");
+    } else {
+        tracing::info!(%session_id, receivers, "Sent visibility notification to agent for keyframe");
+    }
 
     let mut from_agent = channel.to_browser.subscribe();
     let mut from_agent_video = channel.video_frames.subscribe();

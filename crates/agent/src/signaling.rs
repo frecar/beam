@@ -137,6 +137,13 @@ async fn connect_and_handle(
 
     loop {
         tokio::select! {
+            // Biased: prioritize incoming server messages (input events,
+            // visibility changes, shutdown) over outgoing video/audio frames.
+            // Without this, the outbox arm fires at 120fps and can starve
+            // incoming messages — causing missed keyframe requests on
+            // browser reconnect.
+            biased;
+
             // Incoming messages from server
             msg = ws_rx.next() => {
                 match msg {

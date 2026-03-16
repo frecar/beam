@@ -254,10 +254,11 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 // Quality selector removed — bitrate/framerate set by config
             }
             InputEvent::VisibilityState { visible } => {
-                debug!(visible, "Browser tab visibility changed");
+                info!(visible, "Browser tab visibility changed");
                 tab_backgrounded.store(!visible, Ordering::Relaxed);
                 if visible {
                     // Force keyframe so the browser decoder can start immediately
+                    info!("Requesting keyframe for browser reconnect");
                     force_keyframe.store(true, Ordering::Relaxed);
                     // Wake capture thread immediately to restore full framerate
                     let (lock, cvar) = &*capture_wake;
