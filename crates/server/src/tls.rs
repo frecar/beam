@@ -224,3 +224,105 @@ fn generate_self_signed() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer
 pub fn make_acceptor(config: ServerConfig) -> tokio_rustls::TlsAcceptor {
     tokio_rustls::TlsAcceptor::from(Arc::new(config))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    #[test]
+    fn generate_self_signed_produces_valid_cert() {
+        init_crypto();
+        let (certs, key) = generate_self_signed().unwrap();
+        assert_eq!(certs.len(), 1, "Should produce exactly one certificate");
+        assert!(!certs[0].is_empty(), "Certificate DER should not be empty");
+        match &key {
+            PrivateKeyDer::Pkcs8(k) => {
+                assert!(!k.secret_pkcs8_der().is_empty(), "Key should not be empty");
+            }
+            _ => panic!("Expected PKCS8 key"),
+        }
+    }
+
+    #[test]
+    fn self_signed_cert_builds_valid_tls_config() {
+        init_crypto();
+        let (certs, key) = generate_self_signed().unwrap();
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key);
+        assert!(
+            config.is_ok(),
+            "Self-signed cert should produce valid TLS config"
+        );
+    }
+
+    #[test]
+    fn load_certs_roundtrip_via_temp_files() {
+        init_crypto();
+        let (certs, key) = generate_self_signed().unwrap();
+
+        // Write cert PEM
+        let dir = std::env::temp_dir().join(format!("beam-tls-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+
+        let cert_pem = pem::encode(&pem::Pem::new("CERTIFICATE", certs[0].to_vec()));
+        std::fs::write(&cert_path, &cert_pem).unwrap();
+
+        let key_bytes = match &key {
+            PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der(),
+            _ => unreachable!(),
+        };
+        let key_pem = pem::encode(&pem::Pem::new("PRIVATE KEY", key_bytes.to_vec()));
+        std::fs::write(&key_path, &key_pem).unwrap();
+
+        // Load back
+        let (loaded_certs, _loaded_key) =
+            load_certs_from_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded_certs.len(), 1);
+        assert_eq!(
+            loaded_certs[0], certs[0],
+            "Loaded cert should match original"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_certs_fails_on_missing_file() {
+        let result = load_certs_from_files("/nonexistent/cert.pem", "/nonexistent/key.pem");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_certs_fails_on_invalid_pem() {
+        let dir = std::env::temp_dir().join(format!("beam-tls-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, "not a real PEM").unwrap();
+        std::fs::write(&key_path, "also not PEM").unwrap();
+
+        let result = load_certs_from_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn make_acceptor_from_self_signed() {
+        init_crypto();
+        let (certs, key) = generate_self_signed().unwrap();
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap();
+        let _acceptor = make_acceptor(config);
+        // Just verify it doesn't panic
+    }
+}

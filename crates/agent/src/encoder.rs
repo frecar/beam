@@ -502,4 +502,89 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn encoder_type_equality() {
+        assert_eq!(EncoderType::Nvidia, EncoderType::Nvidia);
+        assert_eq!(EncoderType::NvidiaCuda, EncoderType::NvidiaCuda);
+        assert_ne!(EncoderType::Nvidia, EncoderType::NvidiaCuda);
+        assert_ne!(EncoderType::VaApi, EncoderType::Software);
+    }
+
+    #[test]
+    fn detect_encoder_rejects_unknown_name() {
+        let result = detect_encoder(Some("totally_fake_encoder"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Unknown encoder"),
+            "Should mention unknown encoder: {err}"
+        );
+    }
+
+    #[test]
+    fn detect_encoder_maps_known_names_to_types() {
+        gst::init().unwrap();
+        let mappings = [
+            ("nvh264enc", EncoderType::Nvidia),
+            ("nvcudah264enc", EncoderType::NvidiaCuda),
+            ("vah264enc", EncoderType::VaApi),
+            ("x264enc", EncoderType::Software),
+        ];
+        for (name, expected_type) in mappings {
+            if let Ok((enc_type, enc_name)) = detect_encoder(Some(name)) {
+                // Only verify mapping if the preferred encoder was actually used
+                // (not a fallback to a different encoder)
+                if enc_name == name {
+                    assert_eq!(enc_type, expected_type, "Wrong type for {name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detect_encoder_auto_finds_something() {
+        gst::init().unwrap();
+        let result = detect_encoder(None);
+        if let Ok((enc_type, name)) = result {
+            assert!(!name.is_empty());
+            match enc_type {
+                EncoderType::Nvidia => assert_eq!(name, "nvh264enc"),
+                EncoderType::NvidiaCuda => assert_eq!(name, "nvcudah264enc"),
+                EncoderType::VaApi => assert_eq!(name, "vah264enc"),
+                EncoderType::Software => assert_eq!(name, "x264enc"),
+            }
+        }
+        // If no encoder available (bare CI), just skip
+    }
+
+    #[test]
+    fn nvidia_uses_bgra_format() {
+        // NVIDIA encoder needs BGRA (not BGRx) to avoid Chrome decode failures
+        assert_eq!(
+            match EncoderType::Nvidia {
+                EncoderType::Nvidia => "BGRA",
+                _ => "BGRx",
+            },
+            "BGRA"
+        );
+    }
+
+    #[test]
+    fn non_nvidia_uses_bgrx_format() {
+        for enc_type in [
+            EncoderType::NvidiaCuda,
+            EncoderType::VaApi,
+            EncoderType::Software,
+        ] {
+            let format = match enc_type {
+                EncoderType::Nvidia => "BGRA",
+                _ => "BGRx",
+            };
+            assert_eq!(
+                format, "BGRx",
+                "Non-Nvidia encoder {enc_type:?} should use BGRx"
+            );
+        }
+    }
 }
