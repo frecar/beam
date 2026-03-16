@@ -27,9 +27,30 @@ pub(crate) async fn run_video_send_loop(
     let mut encoder_reset_count: u32 = 0;
     const MAX_ENCODER_RESETS: u32 = 3;
     let capture_start = Instant::now();
+    // Track whether we need to gate on the next IDR (browser reconnect).
+    // Set when force_keyframe goes high, cleared when IDR arrives.
+    let mut needs_idr_gate = false;
 
     while let Some(data) = encoded_rx.recv().await {
         let is_idr = h264::h264_contains_idr(&data);
+
+        // Detect force_keyframe transitions (browser reconnect / tab foreground).
+        // When set, drop P-frames until the forced IDR arrives so the browser
+        // decoder gets a clean keyframe as its first frame after reconnecting.
+        if force_keyframe.load(Ordering::Relaxed) && !waiting_for_idr {
+            if !needs_idr_gate {
+                needs_idr_gate = true;
+                info!("Gating video stream until reconnect IDR arrives");
+            }
+        }
+        if needs_idr_gate {
+            if is_idr {
+                needs_idr_gate = false;
+                info!(size = data.len(), "Reconnect IDR received, resuming stream");
+            } else {
+                continue; // Drop P-frame while waiting for forced IDR
+            }
+        }
 
         // Gate on first IDR frame — browser decoder needs a keyframe to initialize.
         // Also require minimum IDR size: during desktop startup (blank screen),
