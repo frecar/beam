@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.12] - 2026-03-16
+
+### Fixed
+- **PulseAudio fails when user has existing instance**: Beam's PulseAudio detected the user's running instance via D-Bus (`org.PulseAudio1` name conflict) and XDG_RUNTIME_DIR PID file. Now fully isolated: override XDG_RUNTIME_DIR, remove DBUS_SESSION_BUS_ADDRESS, skip default.pa, explicit socket path.
+
 ## [0.3.11] - 2026-03-16
 
 ### Fixed
