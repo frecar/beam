@@ -3,7 +3,7 @@ members = ["crates/server", "crates/agent", "crates/protocol"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.12"
+version = "0.3.13"
 edition = "2024"
 license = "MIT"
 authors = ["Beam Contributors"]
