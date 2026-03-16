@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.11] - 2026-03-16
+
+### Fixed
+- **No audio when user has existing PulseAudio**: Beam's PulseAudio failed to bind its socket because module-native-protocol-unix defaulted to the user's existing socket path. Now specifies explicit socket path per display.
+
 ## [0.3.10] - 2026-03-16
 
 ### Fixed
