@@ -897,6 +897,8 @@ async fn main() -> anyhow::Result<()> {
             let Some(mut audio_capture) = audio_capture else {
                 return;
             };
+            // Discard any buffered silence from PulseAudio startup to avoid audio/video desync
+            audio_capture.flush();
             info!("Audio capture thread started");
             loop {
                 if shutdown_for_audio.load(Ordering::Relaxed) {

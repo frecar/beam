@@ -91,6 +91,12 @@ impl AudioCapture {
         })
     }
 
+    /// Discard any buffered audio data from PulseAudio.
+    /// Call after connecting to avoid playing back stale silence.
+    pub fn flush(&mut self) {
+        let _ = self.simple.flush();
+    }
+
     /// Read 20ms of PCM audio from PulseAudio and encode to Opus.
     pub fn capture_and_encode(&mut self) -> anyhow::Result<Vec<u8>> {
         self.simple
