@@ -782,9 +782,18 @@ impl VirtualDisplay {
         let child = Command::new("pulseaudio")
             .arg("--daemonize=no")
             .arg("--exit-idle-time=-1")
+            .arg("-n") // Skip default.pa — only load modules from our -F script
             .arg("-F")
             .arg(&pa_config_path)
+            // Fully isolate from user's existing PulseAudio instance:
+            // - PULSE_RUNTIME_PATH: where our socket + pid file go
+            // - PULSE_STATE_PATH: where state database goes
+            // - XDG_RUNTIME_DIR: prevents discovery of existing PA via /run/user/<uid>/pulse/
+            // - Remove DBUS_SESSION_BUS_ADDRESS: prevents "D-Bus name already taken" conflict
             .env("PULSE_RUNTIME_PATH", &runtime_dir)
+            .env("PULSE_STATE_PATH", &runtime_dir)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
