@@ -864,29 +864,39 @@ async fn main() -> anyhow::Result<()> {
     let audio_handle = std::thread::Builder::new()
         .name("audio-capture".into())
         .spawn(move || {
-            // Retry PulseAudio connection up to 10 times (500ms apart, 5s total)
+            // Retry PulseAudio connection with backoff: 500ms for first 20 attempts (10s),
+            // then 2s indefinitely. PulseAudio can take 10-15s on some hosts.
             let mut audio_capture = None;
-            for attempt in 0..10 {
+            for attempt in 0u32.. {
                 if shutdown_for_audio.load(Ordering::Relaxed) {
                     return;
                 }
                 match AudioCapture::new(48000, 2, pulse_server_clone.as_deref()) {
                     Ok(capture) => {
-                        info!("Audio capture initialized");
+                        info!(attempt, "Audio capture initialized");
                         audio_capture = Some(capture);
                         break;
                     }
                     Err(e) => {
-                        if attempt == 9 {
-                            warn!("Audio capture unavailable after 10 attempts: {e:#}. Continuing without audio.");
+                        let delay = if attempt < 20 { 500 } else { 2000 };
+                        if attempt < 20 || attempt % 10 == 0 {
+                            info!(
+                                attempt = attempt + 1,
+                                delay_ms = delay,
+                                "PulseAudio not ready, retrying..."
+                            );
+                        }
+                        if attempt > 60 {
+                            warn!("Audio capture unavailable after 60 attempts: {e:#}. Giving up.");
                             return;
                         }
-                        info!(attempt = attempt + 1, "PulseAudio not ready, retrying in 500ms...");
-                        std::thread::sleep(Duration::from_millis(500));
+                        std::thread::sleep(Duration::from_millis(delay));
                     }
                 }
             }
-            let Some(mut audio_capture) = audio_capture else { return };
+            let Some(mut audio_capture) = audio_capture else {
+                return;
+            };
             info!("Audio capture thread started");
             loop {
                 if shutdown_for_audio.load(Ordering::Relaxed) {

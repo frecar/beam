@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.10] - 2026-03-16
+
+### Fixed
+- **Agent crash when audio unavailable**: Audio thread dropping its channel sender caused the main select loop to exit, killing the session after ~5s. Keep channel alive so video continues without audio.
+- **Audio gives up too early**: Increased PulseAudio retries from 10 (5s) to 60 attempts with backoff (500ms for first 20, then 2s). PulseAudio can take 10-15s on some hosts.
+
 ## [0.3.9] - 2026-03-16
 
 ### Fixed
