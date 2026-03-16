@@ -421,8 +421,11 @@ async fn main() -> anyhow::Result<()> {
     // Channel for encoded video frames: capture thread -> async write loop
     let (encoded_tx, mut encoded_rx) = mpsc::channel::<Vec<u8>>(2);
 
-    // Channel for encoded audio frames: audio thread -> async write loop
+    // Channel for encoded audio frames: audio thread -> async write loop.
+    // Keep _audio_tx_keepalive so the channel stays open even if the audio
+    // thread gives up (prevents the select! loop from exiting prematurely).
     let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(8);
+    let _audio_tx_keepalive = audio_tx.clone();
 
     // Shared WebSocket outbox: video, audio, clipboard, cursor, file download all send here.
     // The signaling loop drains this and writes to the actual WS connection.
