@@ -54,6 +54,7 @@ struct InputCallbackCtx {
     capture_cmd_tx: std::sync::mpsc::Sender<CaptureCommand>,
     tab_backgrounded: Arc<AtomicBool>,
     force_keyframe: Arc<AtomicBool>,
+    video_needs_keyframe: Arc<AtomicBool>,
     display: String,
     max_width: u32,
     max_height: u32,
@@ -74,6 +75,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
         capture_cmd_tx: _capture_cmd_tx,
         tab_backgrounded,
         force_keyframe,
+        video_needs_keyframe,
         display,
         max_width,
         max_height,
@@ -257,9 +259,13 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 info!(visible, "Browser tab visibility changed");
                 tab_backgrounded.store(!visible, Ordering::Relaxed);
                 if visible {
-                    // Force keyframe so the browser decoder can start immediately
+                    // Force keyframe so the browser decoder can start immediately.
+                    // Two flags: force_keyframe tells the capture thread to produce
+                    // an IDR, video_needs_keyframe tells the video send loop to
+                    // drop P-frames until that IDR arrives.
                     info!("Requesting keyframe for browser reconnect");
                     force_keyframe.store(true, Ordering::Relaxed);
+                    video_needs_keyframe.store(true, Ordering::Relaxed);
                     // Wake capture thread immediately to restore full framerate
                     let (lock, cvar) = &*capture_wake;
                     let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -457,6 +463,12 @@ async fn main() -> anyhow::Result<()> {
     // cleared by capture thread each frame.
     let force_keyframe = Arc::new(AtomicBool::new(false));
 
+    // Video-side IDR gate: set from input callback (on reconnect), cleared
+    // by the video send loop when the IDR frame arrives. Separate from
+    // force_keyframe because the capture thread clears that one immediately
+    // (via swap) before the video send loop can see it.
+    let video_needs_keyframe = Arc::new(AtomicBool::new(false));
+
     // Command channel for non-latency-critical capture thread operations
     let (capture_cmd_tx, capture_cmd_rx) = std::sync::mpsc::channel::<CaptureCommand>();
 
@@ -510,6 +522,7 @@ async fn main() -> anyhow::Result<()> {
         capture_cmd_tx: capture_cmd_tx.clone(),
         tab_backgrounded: Arc::clone(&tab_backgrounded),
         force_keyframe: Arc::clone(&force_keyframe),
+        video_needs_keyframe: Arc::clone(&video_needs_keyframe),
         display: args.display.clone(),
         max_width: args.max_width,
         max_height: args.max_height,
@@ -953,6 +966,7 @@ async fn main() -> anyhow::Result<()> {
             &mut encoded_rx,
             &ws_outbox_tx,
             &force_keyframe,
+            &video_needs_keyframe,
             &cmd_tx_for_video,
             &input_width,
             &input_height,

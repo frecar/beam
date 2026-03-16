@@ -16,6 +16,7 @@ pub(crate) async fn run_video_send_loop(
     encoded_rx: &mut mpsc::Receiver<Vec<u8>>,
     ws_tx: &WsSender,
     force_keyframe: &Arc<AtomicBool>,
+    video_needs_keyframe: &Arc<AtomicBool>,
     capture_cmd_tx: &std::sync::mpsc::Sender<CaptureCommand>,
     capture_width: &Arc<std::sync::atomic::AtomicU32>,
     capture_height: &Arc<std::sync::atomic::AtomicU32>,
@@ -27,23 +28,19 @@ pub(crate) async fn run_video_send_loop(
     let mut encoder_reset_count: u32 = 0;
     const MAX_ENCODER_RESETS: u32 = 3;
     let capture_start = Instant::now();
-    // Track whether we need to gate on the next IDR (browser reconnect).
-    // Set when force_keyframe goes high, cleared when IDR arrives.
-    let mut needs_idr_gate = false;
 
     while let Some(data) = encoded_rx.recv().await {
         let is_idr = h264::h264_contains_idr(&data);
 
-        // Detect force_keyframe transitions (browser reconnect / tab foreground).
-        // When set, drop P-frames until the forced IDR arrives so the browser
-        // decoder gets a clean keyframe as its first frame after reconnecting.
-        if force_keyframe.load(Ordering::Relaxed) && !waiting_for_idr && !needs_idr_gate {
-            needs_idr_gate = true;
-            info!("Gating video stream until reconnect IDR arrives");
-        }
-        if needs_idr_gate {
+        // On browser reconnect / tab foreground, the input callback sets
+        // video_needs_keyframe. Drop P-frames until the forced IDR arrives
+        // so the reconnecting browser's decoder gets a clean keyframe as
+        // its first frame. This flag is separate from force_keyframe (which
+        // the capture thread clears immediately via swap), so there's no
+        // race between the capture thread and this async loop.
+        if video_needs_keyframe.load(Ordering::Relaxed) && !waiting_for_idr {
             if is_idr {
-                needs_idr_gate = false;
+                video_needs_keyframe.store(false, Ordering::Relaxed);
                 info!(size = data.len(), "Reconnect IDR received, resuming stream");
             } else {
                 continue; // Drop P-frame while waiting for forced IDR
