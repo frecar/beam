@@ -37,11 +37,9 @@ pub(crate) async fn run_video_send_loop(
         // Detect force_keyframe transitions (browser reconnect / tab foreground).
         // When set, drop P-frames until the forced IDR arrives so the browser
         // decoder gets a clean keyframe as its first frame after reconnecting.
-        if force_keyframe.load(Ordering::Relaxed) && !waiting_for_idr {
-            if !needs_idr_gate {
-                needs_idr_gate = true;
-                info!("Gating video stream until reconnect IDR arrives");
-            }
+        if force_keyframe.load(Ordering::Relaxed) && !waiting_for_idr && !needs_idr_gate {
+            needs_idr_gate = true;
+            info!("Gating video stream until reconnect IDR arrives");
         }
         if needs_idr_gate {
             if is_idr {
