@@ -176,8 +176,7 @@ impl VirtualDisplay {
 
         // Prefer XFCE4: full desktop with panels, file manager, app menu.
         if which_exists("xfce4-session") {
-            let (xfce_config_dir, is_first_session) =
-                ensure_persistent_config(self.display_num);
+            let (xfce_config_dir, is_first_session) = ensure_persistent_config(self.display_num);
 
             // Detect default browser/terminal (every session, needed for env vars).
             let detected_browser = find_non_snap_app(&[
@@ -999,8 +998,7 @@ fn try_persistent_config_in(home: &str) -> Result<(String, bool)> {
     }
 
     // First session: create directory structure and seed defaults
-    fs::create_dir_all(&config_dir)
-        .with_context(|| format!("Failed to create {config_dir}"))?;
+    fs::create_dir_all(&config_dir).with_context(|| format!("Failed to create {config_dir}"))?;
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700))
@@ -1212,8 +1210,7 @@ fn seed_default_config(config_dir: &str) {
         "chromium",
         "epiphany-browser",
     ]);
-    let detected_terminal =
-        find_non_snap_app(&["xfce4-terminal", "gnome-terminal", "xterm"]);
+    let detected_terminal = find_non_snap_app(&["xfce4-terminal", "gnome-terminal", "xterm"]);
 
     let mut helpers_rc = String::from("[Default]\n");
     if let Some(term) = detected_terminal {
@@ -1413,7 +1410,10 @@ mod tests {
         // Verify xfconf XML files exist
         let xfconf = dir.join("xfce4/xfconf/xfce-perchannel-xml");
         assert!(xfconf.join("xfwm4.xml").exists(), "xfwm4.xml missing");
-        assert!(xfconf.join("xsettings.xml").exists(), "xsettings.xml missing");
+        assert!(
+            xfconf.join("xsettings.xml").exists(),
+            "xsettings.xml missing"
+        );
         assert!(
             xfconf.join("xfce4-session.xml").exists(),
             "xfce4-session.xml missing"
@@ -1432,7 +1432,10 @@ mod tests {
         );
 
         // Verify GTK3 config
-        assert!(dir.join("gtk-3.0/settings.ini").exists(), "GTK settings missing");
+        assert!(
+            dir.join("gtk-3.0/settings.ini").exists(),
+            "GTK settings missing"
+        );
         assert!(dir.join("gtk-3.0/gtk.css").exists(), "GTK CSS missing");
 
         // Verify autostart masks
@@ -1486,7 +1489,10 @@ mod tests {
 
         // Verify sentinel and version
         assert!(beam_dir.join(".initialized").exists(), "Sentinel missing");
-        assert!(beam_dir.join(".config-version").exists(), "Version file missing");
+        assert!(
+            beam_dir.join(".config-version").exists(),
+            "Version file missing"
+        );
         assert_eq!(
             fs::read_to_string(beam_dir.join(".config-version")).unwrap(),
             "1"
@@ -1514,12 +1520,16 @@ mod tests {
         assert!(is_first);
 
         // Modify a config file to verify it's not overwritten
-        let xfwm4_path = dir.join(".local/share/beam/config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml");
+        let xfwm4_path =
+            dir.join(".local/share/beam/config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml");
         fs::write(&xfwm4_path, "user-customized").unwrap();
 
         // Second call: should skip seeding
         let (_, is_first) = try_persistent_config_in(home).unwrap();
-        assert!(!is_first, "Second call should report is_first_session=false");
+        assert!(
+            !is_first,
+            "Second call should report is_first_session=false"
+        );
 
         // Verify user's customization was preserved
         let content = fs::read_to_string(&xfwm4_path).unwrap();
@@ -1606,10 +1616,7 @@ mod tests {
             let path = autostart.join(entry);
             assert!(path.exists(), "{entry} should be masked");
             let content = fs::read_to_string(&path).unwrap();
-            assert!(
-                content.contains("Hidden=true"),
-                "{entry} should be hidden"
-            );
+            assert!(content.contains("Hidden=true"), "{entry} should be hidden");
         }
 
         let _ = fs::remove_dir_all(&dir);
@@ -1623,10 +1630,8 @@ mod tests {
 
         seed_default_config(dir_str);
 
-        let xfwm4 = fs::read_to_string(
-            dir.join("xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"),
-        )
-        .unwrap();
+        let xfwm4 =
+            fs::read_to_string(dir.join("xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml")).unwrap();
         assert!(
             xfwm4.contains(r#""use_compositing" type="bool" value="false""#),
             "Compositor should be disabled by default"
@@ -1651,10 +1656,9 @@ mod tests {
 
         seed_default_config(dir_str);
 
-        let panel = fs::read_to_string(
-            dir.join("xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"),
-        )
-        .unwrap();
+        let panel =
+            fs::read_to_string(dir.join("xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"))
+                .unwrap();
         assert!(
             panel.contains("tasklist"),
             "Panel should have tasklist plugin"
