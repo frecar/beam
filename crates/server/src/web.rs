@@ -488,7 +488,13 @@ async fn login(
     }
 
     // No existing session — create a new one
-    let server_url = format!("wss://127.0.0.1:{}", state.config.server.port);
+    let agent_host = state
+        .config
+        .server
+        .hostname
+        .as_deref()
+        .unwrap_or("127.0.0.1");
+    let server_url = format!("wss://{}:{}", agent_host, state.config.server.port);
     let max_sessions = state.config.session.max_sessions as usize;
 
     let session = match state

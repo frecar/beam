@@ -21,6 +21,10 @@ pub struct ServerConfig {
     /// HTTPS port
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Public hostname (e.g., "l40s.home.carlsen.io"). When set with a custom
+    /// TLS cert, the agent connects via wss://hostname:port instead of
+    /// wss://127.0.0.1:port, avoiding TLS hostname mismatch errors.
+    pub hostname: Option<String>,
     /// Path to TLS certificate (auto-generated if absent)
     pub tls_cert: Option<String>,
     /// Path to TLS key (auto-generated if absent)
@@ -96,6 +100,7 @@ impl Default for ServerConfig {
         Self {
             bind: default_bind(),
             port: default_port(),
+            hostname: None,
             tls_cert: None,
             tls_key: None,
             jwt_secret: None,
@@ -342,6 +347,7 @@ mod tests {
         // Server defaults
         assert_eq!(config.server.bind, "0.0.0.0");
         assert_eq!(config.server.port, 8444);
+        assert!(config.server.hostname.is_none());
         assert!(config.server.tls_cert.is_none());
         assert!(config.server.tls_key.is_none());
         assert!(config.server.jwt_secret.is_none());
@@ -437,6 +443,7 @@ max_height = 0
 [server]
 bind = "127.0.0.1"
 port = 9444
+hostname = "beam.example.com"
 tls_cert = "/etc/beam/cert.pem"
 tls_key = "/etc/beam/key.pem"
 jwt_secret = "supersecret"
@@ -469,6 +476,7 @@ idle_timeout = 7200
         // Server
         assert_eq!(config.server.bind, "127.0.0.1");
         assert_eq!(config.server.port, 9444);
+        assert_eq!(config.server.hostname.as_deref(), Some("beam.example.com"));
         assert_eq!(
             config.server.tls_cert.as_deref(),
             Some("/etc/beam/cert.pem")
@@ -507,6 +515,7 @@ idle_timeout = 7200
         let server = ServerConfig::default();
         assert_eq!(server.bind, from_toml.server.bind);
         assert_eq!(server.port, from_toml.server.port);
+        assert_eq!(server.hostname, from_toml.server.hostname);
         assert_eq!(server.tls_cert, from_toml.server.tls_cert);
         assert_eq!(server.tls_key, from_toml.server.tls_key);
         assert_eq!(server.jwt_secret, from_toml.server.jwt_secret);
