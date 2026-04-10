@@ -17,6 +17,8 @@ pub(crate) struct Args {
     pub encoder: Option<String>,
     pub max_width: u32,
     pub max_height: u32,
+    pub gpu_driver: String,
+    pub display_start: u32,
 }
 
 pub(crate) fn parse_args() -> anyhow::Result<Args> {
@@ -32,6 +34,8 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
     let mut encoder: Option<String> = None;
     let mut max_width: u32 = 3840;
     let mut max_height: u32 = 2160;
+    let mut gpu_driver = "auto".to_string();
+    let mut display_start: u32 = 10;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -68,6 +72,10 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
                 );
                 println!("    --max-width <PIXELS>         Maximum resize width [default: 3840]");
                 println!("    --max-height <PIXELS>        Maximum resize height [default: 2160]");
+                println!(
+                    "    --gpu-driver <MODE>          GPU driver: auto, nvidia, dummy [default: auto]"
+                );
+                println!("    --display-start <N>          Starting display number [default: 10]");
                 println!("    -V, --version                Print version and exit");
                 println!("    -h, --help                   Print this help and exit");
                 std::process::exit(0);
@@ -150,6 +158,18 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
                     .parse()
                     .context("Invalid --max-height value")?;
             }
+            "--gpu-driver" => {
+                i += 1;
+                gpu_driver = args.get(i).context("Missing --gpu-driver value")?.clone();
+            }
+            "--display-start" => {
+                i += 1;
+                display_start = args
+                    .get(i)
+                    .context("Missing --display-start value")?
+                    .parse()
+                    .context("Invalid --display-start value")?;
+            }
             other => anyhow::bail!("Unknown argument: {other}"),
         }
         i += 1;
@@ -173,5 +193,7 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
         encoder,
         max_width,
         max_height,
+        gpu_driver,
+        display_start,
     })
 }

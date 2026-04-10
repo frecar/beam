@@ -89,6 +89,10 @@ pub struct SessionManager {
     tls_cert_path: Option<String>,
     /// Video/audio config to pass to agents
     video_config: beam_protocol::VideoConfig,
+    /// GPU driver mode to pass to agents: "auto", "nvidia", "dummy"
+    gpu_driver: String,
+    /// Starting display number (for DFP output allocation)
+    display_start: u32,
 }
 
 struct DisplayPool {
@@ -151,6 +155,7 @@ impl SessionManager {
         default_height: u32,
         tls_cert_path: Option<String>,
         video_config: beam_protocol::VideoConfig,
+        gpu_driver: String,
     ) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
@@ -159,6 +164,8 @@ impl SessionManager {
             display_pool: RwLock::new(DisplayPool::new(display_start)),
             tls_cert_path,
             video_config,
+            gpu_driver,
+            display_start,
         }
     }
 
@@ -247,6 +254,8 @@ impl SessionManager {
         let _ = std::fs::remove_file(format!("/tmp/.X{display_num}-lock"));
         // Keyring dir may be owned by a different user (mode 700); server runs as root
         let _ = std::fs::remove_dir_all(format!("/tmp/beam-keyring-{display_num}"));
+        // EDID file from GPU-accelerated display sessions
+        let _ = std::fs::remove_file(format!("/tmp/beam-edid-{display_num}.bin"));
 
         // Start the agent as a systemd transient service (outside the write lock)
         let unit_name = match self.spawn_agent(&info, server_url, &agent_token).await {
@@ -512,6 +521,7 @@ impl SessionManager {
         let _ = std::fs::remove_dir_all(format!("/tmp/beam-pulse-{display_num}"));
         let _ = std::fs::remove_file(format!("/tmp/.X{display_num}-lock"));
         let _ = std::fs::remove_dir_all(format!("/tmp/beam-keyring-{display_num}"));
+        let _ = std::fs::remove_file(format!("/tmp/beam-edid-{display_num}.bin"));
 
         let unit_name = self.spawn_agent(&info, server_url, &new_token).await?;
 
@@ -645,6 +655,8 @@ impl SessionManager {
         if let Some(ref cert_path) = self.tls_cert_path {
             cmd.args(["--tls-cert", cert_path]);
         }
+        cmd.args(["--gpu-driver", &self.gpu_driver]);
+        cmd.args(["--display-start", &self.display_start.to_string()]);
 
         // Run systemd-run with --no-block — exits immediately after queuing
         // the start job. The 10s timeout covers only the D-Bus call to PID 1.
@@ -937,8 +949,14 @@ mod tests {
 
     #[tokio::test]
     async fn verify_agent_token_rejects_wrong_token() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id = Uuid::new_v4();
         // Non-existent session should reject
         assert!(!manager.verify_agent_token(id, "fake-token").await);
@@ -969,8 +987,14 @@ mod tests {
 
     #[tokio::test]
     async fn verify_release_token_rejects_wrong_token() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id = Uuid::new_v4();
         // Non-existent session should reject
         assert!(!manager.verify_release_token(id, "fake-token").await);
@@ -1049,8 +1073,14 @@ mod tests {
 
     #[tokio::test]
     async fn increment_restart_count_returns_new_count() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id = Uuid::new_v4();
 
         // Insert a session manually
@@ -1090,24 +1120,42 @@ mod tests {
 
     #[tokio::test]
     async fn increment_restart_count_nonexistent_session() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id = Uuid::new_v4();
         assert_eq!(manager.increment_restart_count(id).await, None);
     }
 
     #[tokio::test]
     async fn get_restart_count_nonexistent_session() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id = Uuid::new_v4();
         assert_eq!(manager.get_restart_count(id).await, None);
     }
 
     #[tokio::test]
     async fn restart_count_starts_at_zero() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id = Uuid::new_v4();
 
         // Insert a session
@@ -1140,8 +1188,14 @@ mod tests {
 
     #[tokio::test]
     async fn restart_count_independent_per_session() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
 
@@ -1185,8 +1239,14 @@ mod tests {
 
     #[tokio::test]
     async fn stale_sessions_uses_per_session_timeout() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1284,8 +1344,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_idle_timeout_returns_override_when_set() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id = Uuid::new_v4();
 
         {
@@ -1317,8 +1383,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_idle_timeout_returns_global_when_no_override() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id = Uuid::new_v4();
 
         {
@@ -1350,8 +1422,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_idle_timeout_nonexistent_returns_global() {
-        let manager =
-            SessionManager::new(100, 1920, 1080, None, beam_protocol::VideoConfig::default());
+        let manager = SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
         let id = Uuid::new_v4();
         assert_eq!(manager.get_idle_timeout(id, 3600).await, 3600);
     }

@@ -1,0 +1,19 @@
+# Test config for NVIDIA GPU display support
+# Run from l40s: cd ~/code/beam && ./target/release/beam-server --config config/beam-test-nvidia.toml
+
+[server]
+port = 9444
+web_root = "/home/frecar/code/beam/web/dist"
+
+[video]
+bitrate = 50000
+framerate = 60
+# encoder auto-detected (nvcudah264enc on NVIDIA)
+
+[audio]
+enabled = true
+
+[session]
+display_start = 20
+max_sessions = 4
+gpu_driver = "auto"
