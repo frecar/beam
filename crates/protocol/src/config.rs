@@ -93,6 +93,9 @@ pub struct SessionConfig {
     /// Idle timeout in seconds (0 = disabled)
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout: u64,
+    /// GPU driver for virtual displays: "auto" (default), "nvidia", "dummy"
+    #[serde(default = "default_gpu_driver")]
+    pub gpu_driver: String,
 }
 
 impl Default for ServerConfig {
@@ -142,6 +145,7 @@ impl Default for SessionConfig {
             display_start: default_display_start(),
             max_sessions: default_max_sessions(),
             idle_timeout: default_idle_timeout(),
+            gpu_driver: default_gpu_driver(),
         }
     }
 }
@@ -235,6 +239,16 @@ impl BeamConfig {
                  Display :0 is typically the local console."
                     .to_string(),
             );
+        }
+
+        // --- GPU driver ---
+        let valid_gpu_drivers = ["auto", "nvidia", "dummy"];
+        if !valid_gpu_drivers.contains(&self.session.gpu_driver.as_str()) {
+            issues.push(format!(
+                "WARNING: session.gpu_driver '{}' is not recognized. \
+                 Valid values: auto, nvidia, dummy. Defaulting to auto.",
+                self.session.gpu_driver
+            ));
         }
 
         // --- Max sessions ---
@@ -334,6 +348,9 @@ fn default_max_sessions() -> u32 {
 fn default_idle_timeout() -> u64 {
     3600 // 1 hour
 }
+fn default_gpu_driver() -> String {
+    "auto".to_string()
+}
 
 #[cfg(test)]
 mod tests {
@@ -373,6 +390,7 @@ mod tests {
         assert_eq!(config.session.display_start, 10);
         assert_eq!(config.session.max_sessions, 8);
         assert_eq!(config.session.idle_timeout, 3600);
+        assert_eq!(config.session.gpu_driver, "auto");
     }
 
     #[test]
@@ -544,6 +562,7 @@ idle_timeout = 7200
         assert_eq!(session.display_start, from_toml.session.display_start);
         assert_eq!(session.max_sessions, from_toml.session.max_sessions);
         assert_eq!(session.idle_timeout, from_toml.session.idle_timeout);
+        assert_eq!(session.gpu_driver, from_toml.session.gpu_driver);
     }
 
     // --- Validation tests ---
@@ -760,6 +779,29 @@ idle_timeout = 7200
         let mut config = valid_config();
         config.session.display_start = 1;
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_gpu_driver_invalid_warns() {
+        let mut config = valid_config();
+        config.session.gpu_driver = "invalid".to_string();
+        let issues = validate_issues(&config);
+        assert!(
+            issues.iter().any(|i| i.contains("gpu_driver")),
+            "invalid gpu_driver should produce warning"
+        );
+    }
+
+    #[test]
+    fn validate_gpu_driver_valid_values() {
+        for driver in &["auto", "nvidia", "dummy"] {
+            let mut config = valid_config();
+            config.session.gpu_driver = driver.to_string();
+            assert!(
+                config.validate().is_ok(),
+                "gpu_driver={driver} should be valid"
+            );
+        }
     }
 
     #[test]

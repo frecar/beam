@@ -46,13 +46,14 @@ impl Encoder {
 
         // appsrc: raw frames from X11 capture.
         // X11 depth-24 TrueColor captures as 4 bytes/pixel (byte 3 is padding).
-        // NVIDIA: use BGRA — nvh264enc accepts it directly and does GPU color
-        //   conversion. Using BGRx with videoconvert produces valid H.264 but
-        //   Chrome refuses to decode (black screen).
+        // NVIDIA (both nvh264enc and nvcudah264enc): use BGRA.
+        //   capture_frame() fills the 4th byte to 0xFF (X11 depth-24 padding → alpha).
+        //   Using BGRx with videoconvert produces valid H.264 but Chrome's VideoDecoder
+        //   refuses to decode it (black screen / EncodingError). BGRA avoids this.
+        //   nvcudah264enc can't accept BGRA directly, so videoconvert handles BGRA→NV12.
         // Other encoders: use BGRx with videoconvert for correct conversion.
         let format = match encoder_type {
-            EncoderType::Nvidia => "BGRA",
-            // NvidiaCuda needs videoconvert (BGRA→NV12), so use BGRx as input
+            EncoderType::Nvidia | EncoderType::NvidiaCuda => "BGRA",
             _ => "BGRx",
         };
         let appsrc_elem = ElementFactory::make("appsrc")
@@ -213,7 +214,7 @@ impl Encoder {
                 ])
                 .context("Failed to link NVIDIA CUDA pipeline")?;
                 info!(
-                    "NVIDIA CUDA pipeline: appsrc(BGRx) → videoconvert → nvcudah264enc → capsfilter(main) → h264parse → appsink"
+                    "NVIDIA CUDA pipeline: appsrc(BGRA) → videoconvert → nvcudah264enc → capsfilter(main) → h264parse → appsink"
                 );
             }
             _ => {

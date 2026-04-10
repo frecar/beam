@@ -180,6 +180,7 @@ async fn main() -> Result<()> {
         config.session.default_height,
         Some(tls_cert_path),
         config.video.clone(),
+        config.session.gpu_driver.clone(),
     );
 
     // Build app state and router

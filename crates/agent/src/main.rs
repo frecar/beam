@@ -8,6 +8,7 @@ mod display;
 mod encoder;
 mod file_transfer_task;
 mod filetransfer;
+mod gpu;
 mod h264;
 mod input;
 mod signaling;
@@ -357,7 +358,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => {
             warn!(display = %args.display, "Display not available ({e:#}), starting virtual display");
-            match display::VirtualDisplay::start(display_num, args.width, args.height) {
+            match display::VirtualDisplay::start(
+                display_num,
+                args.width,
+                args.height,
+                &args.gpu_driver,
+                args.display_start,
+            ) {
                 Ok(mut vd) => {
                     info!(display = %args.display, "Virtual display started");
 
@@ -386,6 +393,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+    };
+
+    // Get the xrandr output name for resize operations.
+    // Virtual displays know their output name; existing displays detect it.
+    let output_name = match &virtual_display {
+        Some(vd) => vd.output_name().to_string(),
+        None => "DUMMY0".to_string(),
     };
 
     // Create screen capture (now the display should be available)
@@ -539,6 +553,7 @@ async fn main() -> anyhow::Result<()> {
     const ENCODER_RESET_COOLDOWN: Duration = Duration::from_secs(5);
 
     let display_for_capture = args.display.clone();
+    let output_name_for_capture = output_name.clone();
     let kf_flag_for_capture = Arc::clone(&force_keyframe);
     let capture_wake_for_thread = Arc::clone(&capture_wake);
     let input_width_for_capture = Arc::clone(&input_width);
@@ -596,7 +611,10 @@ async fn main() -> anyhow::Result<()> {
                             info!(width, height, "Processing resize request");
 
                             if let Err(e) = display::set_display_resolution(
-                                &display_for_capture, width, height,
+                                &display_for_capture,
+                                width,
+                                height,
+                                &output_name_for_capture,
                             ) {
                                 warn!("xrandr resize failed: {e:#}");
                                 continue;

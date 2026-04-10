@@ -20,34 +20,72 @@ load-module module-always-sink
     )
 }
 
-/// Manages a virtual X display using the dummy video driver.
+/// Manages a virtual X display using either the dummy or nvidia video driver.
 pub struct VirtualDisplay {
     display_num: u32,
+    /// xrandr output name (e.g. "DUMMY0" for dummy driver, "DFP-1" for nvidia)
+    output_name: String,
     xorg_child: Option<Child>,
     desktop_child: Option<Child>,
     pulse_child: Option<Child>,
     cursor_child: Option<Child>,
     /// Temp config path to clean up on drop (None for package-installed static config)
     cleanup_config: Option<String>,
+    /// Temp EDID file to clean up on drop (nvidia only)
+    cleanup_edid: Option<String>,
 }
 
 impl VirtualDisplay {
     /// Create and start a new virtual X display on the given display number.
-    pub fn start(display_num: u32, width: u32, height: u32) -> Result<Self> {
-        let config_path = String::from("/etc/X11/beam-xorg.conf");
+    ///
+    /// `gpu_driver` controls the Xorg driver: "auto" (detect), "nvidia" (force), "dummy" (force).
+    /// `display_start` is needed for multi-GPU DFP output allocation.
+    pub fn start(
+        display_num: u32,
+        width: u32,
+        height: u32,
+        gpu_driver: &str,
+        display_start: u32,
+    ) -> Result<Self> {
+        let gpu_config = crate::gpu::detect_gpu(gpu_driver, display_num, display_start);
 
-        // Use the static config installed by the package. When running from
-        // source/dev, generate a temporary config in /tmp as fallback.
-        if !std::path::Path::new(&config_path).exists() {
-            let tmp_config_path = format!("/tmp/beam-xorg-{display_num}.conf");
-            let _ = fs::remove_file(&tmp_config_path);
-            let config = generate_xorg_config(width, height);
-            fs::write(&tmp_config_path, &config)
-                .with_context(|| format!("Failed to write Xorg config to {tmp_config_path}"))?;
-            return Self::start_with_config(display_num, width, height, tmp_config_path);
-        }
+        let (config_path, cleanup_edid) = if gpu_config.driver == "nvidia" {
+            // NVIDIA: generate config dynamically (needs BusID, DFP, EDID path).
+            // Config and EDID must be in /etc/X11/beam/ so the Xorg setuid wrapper
+            // can use them (elevated privileges require configs in /etc/X11/).
+            let beam_conf_dir = "/etc/X11/beam";
+            let _ = fs::create_dir_all(beam_conf_dir);
 
-        Self::start_with_config(display_num, width, height, config_path)
+            let bus_id = gpu_config.bus_id.as_deref().unwrap_or("PCI:0:0:0");
+            let dfp_output = gpu_config.dfp_output.as_deref().unwrap_or("DFP-1");
+            let edid_path = format!("{beam_conf_dir}/beam-edid-{display_num}.bin");
+            crate::gpu::write_edid_file_to(&edid_path)?;
+            let config = generate_nvidia_xorg_config(bus_id, dfp_output, &edid_path);
+            let config_path = format!("{beam_conf_dir}/beam-xorg-{display_num}.conf");
+            let _ = fs::remove_file(&config_path);
+            fs::write(&config_path, &config)
+                .with_context(|| format!("Failed to write nvidia Xorg config to {config_path}"))?;
+            info!(
+                bus_id,
+                dfp_output, config_path, "Using NVIDIA GPU driver for display :{display_num}"
+            );
+            (config_path, Some(edid_path))
+        } else {
+            // Dummy driver: use static package config or generate temp config
+            let static_config = String::from("/etc/X11/beam-xorg.conf");
+            if std::path::Path::new(&static_config).exists() {
+                (static_config, None)
+            } else {
+                let tmp_config_path = format!("/tmp/beam-xorg-{display_num}.conf");
+                let _ = fs::remove_file(&tmp_config_path);
+                let config = generate_xorg_config(width, height);
+                fs::write(&tmp_config_path, &config)
+                    .with_context(|| format!("Failed to write Xorg config to {tmp_config_path}"))?;
+                (tmp_config_path, None)
+            }
+        };
+
+        Self::start_with_config(display_num, width, height, config_path, cleanup_edid)
     }
 
     fn start_with_config(
@@ -55,6 +93,7 @@ impl VirtualDisplay {
         width: u32,
         height: u32,
         config_path: String,
+        cleanup_edid: Option<String>,
     ) -> Result<Self> {
         let display_str = format!(":{display_num}");
 
@@ -65,11 +104,14 @@ impl VirtualDisplay {
         // Dev/source installs: config in /tmp, use Xorg binary directly with
         // absolute path (no elevated privilege restrictions).
         let (xorg_bin, config_arg): (&str, &str) = if config_path.starts_with("/etc/X11/") {
-            // Relative path required when Xorg runs with elevated privileges
-            let filename = config_path.rsplit('/').next().unwrap_or(&config_path);
-            // We need to store the filename for the lifetime of the arg
-            // Use "Xorg" which resolves to the wrapper
-            ("Xorg", filename)
+            // Relative path required when Xorg runs with elevated privileges.
+            // Strip the /etc/X11/ prefix to get the relative path (e.g.
+            // "/etc/X11/beam-xorg.conf" -> "beam-xorg.conf", or
+            // "/etc/X11/beam/beam-xorg-20.conf" -> "beam/beam-xorg-20.conf").
+            let relative = config_path
+                .strip_prefix("/etc/X11/")
+                .unwrap_or(&config_path);
+            ("Xorg", relative)
         } else {
             // Dev mode: use direct binary with absolute path
             if std::path::Path::new("/usr/lib/xorg/Xorg").exists() {
@@ -126,10 +168,14 @@ impl VirtualDisplay {
             bail!("Xorg failed to start on :{display_num}");
         }
 
+        // Detect the xrandr output name (e.g. "DUMMY0" or "DFP-1")
+        let output_name = detect_xrandr_output(&display_str);
+        info!(display = display_num, output_name, "Detected xrandr output");
+
         // When using the static package config (no per-session modeline),
         // set the requested resolution via xrandr after Xorg starts.
         if config_path == "/etc/X11/beam-xorg.conf"
-            && let Err(e) = set_display_resolution(&display_str, width, height)
+            && let Err(e) = set_display_resolution(&display_str, width, height, &output_name)
         {
             warn!("Failed to set initial resolution {width}x{height}: {e}");
         }
@@ -153,18 +199,30 @@ impl VirtualDisplay {
 
         Ok(Self {
             display_num,
+            output_name,
             xorg_child: Some(child),
             desktop_child: None,
             pulse_child: None,
             cursor_child: None,
             cleanup_config,
+            cleanup_edid,
         })
+    }
+
+    /// Get the xrandr output name (e.g. "DUMMY0" or "DFP-1").
+    pub fn output_name(&self) -> &str {
+        &self.output_name
     }
 
     /// Change the resolution of the virtual display using xrandr.
     #[allow(dead_code)]
     pub fn set_resolution(&self, width: u32, height: u32) -> Result<()> {
-        set_display_resolution(&format!(":{}", self.display_num), width, height)
+        set_display_resolution(
+            &format!(":{}", self.display_num),
+            width,
+            height,
+            &self.output_name,
+        )
     }
 
     /// Start a desktop environment on this display.
@@ -662,6 +720,9 @@ impl Drop for VirtualDisplay {
         if let Some(ref path) = self.cleanup_config {
             let _ = fs::remove_file(path);
         }
+        if let Some(ref path) = self.cleanup_edid {
+            let _ = fs::remove_file(path);
+        }
         // Clean up ephemeral per-session directories.
         // NOTE: XFCE config and keyring data are NOT cleaned up — they persist
         // at ~/.local/share/beam/ across sessions.
@@ -705,7 +766,12 @@ pub fn clamp_resize_dimensions(
 /// Change display resolution using xrandr. Standalone function that only needs
 /// the X display string (e.g. ":10"), so it can be called from the capture thread
 /// without owning a VirtualDisplay reference.
-pub fn set_display_resolution(x_display: &str, width: u32, height: u32) -> Result<()> {
+pub fn set_display_resolution(
+    x_display: &str,
+    width: u32,
+    height: u32,
+    output_name: &str,
+) -> Result<()> {
     // Wait for X display to be connectable (xrandr can talk to it).
     // On arm64 (e.g. NVIDIA GB10), Xorg needs more than 500ms to fully
     // initialize. Without this, xrandr fails with "Can't open display".
@@ -746,20 +812,20 @@ pub fn set_display_resolution(x_display: &str, width: u32, height: u32) -> Resul
     // Add mode to the output (may already be added)
     let addmode_output = Command::new("xrandr")
         .env("DISPLAY", x_display)
-        .args(["--addmode", "DUMMY0", &mode_name])
+        .args(["--addmode", output_name, &mode_name])
         .output()
         .context("Failed to run xrandr --addmode")?;
     if !addmode_output.status.success() {
         let stderr = String::from_utf8_lossy(&addmode_output.stderr);
         if !stderr.contains("already exists") {
-            warn!("xrandr --addmode DUMMY0 {mode_name} failed: {stderr}");
+            warn!("xrandr --addmode {output_name} {mode_name} failed: {stderr}");
         }
     }
 
     // Switch to the new mode
     let output = Command::new("xrandr")
         .env("DISPLAY", x_display)
-        .args(["--output", "DUMMY0", "--mode", &mode_name])
+        .args(["--output", output_name, "--mode", &mode_name])
         .output()
         .context("Failed to run xrandr --output")?;
 
@@ -773,6 +839,96 @@ pub fn set_display_resolution(x_display: &str, width: u32, height: u32) -> Resul
         width, height, "Display resolution changed via xrandr"
     );
     Ok(())
+}
+
+/// Detect the xrandr output name for a display.
+/// Parses `xrandr --query` and returns the first connected output name.
+/// Falls back to "DUMMY0" if detection fails.
+fn detect_xrandr_output(x_display: &str) -> String {
+    // Wait for xrandr to be ready (same retry logic as set_display_resolution)
+    for attempt in 0..10 {
+        let result = Command::new("xrandr")
+            .env("DISPLAY", x_display)
+            .arg("--query")
+            .output();
+
+        match result {
+            Ok(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                // Parse lines like "DUMMY0 connected primary 1920x1080+0+0"
+                // or "DFP-1 connected 1920x1080+0+0"
+                for line in stdout.lines() {
+                    if line.contains(" connected")
+                        && let Some(name) = line.split_whitespace().next()
+                    {
+                        return name.to_string();
+                    }
+                }
+                warn!(
+                    x_display,
+                    "No connected output found in xrandr, using DUMMY0"
+                );
+                return "DUMMY0".to_string();
+            }
+            _ if attempt < 9 => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            _ => break,
+        }
+    }
+    warn!(
+        x_display,
+        "xrandr not ready after 2s, assuming DUMMY0 output"
+    );
+    "DUMMY0".to_string()
+}
+
+/// Generate an Xorg config for the NVIDIA proprietary driver.
+/// Uses ConnectedMonitor + CustomEDID for headless virtual display.
+fn generate_nvidia_xorg_config(bus_id: &str, dfp_output: &str, edid_path: &str) -> String {
+    format!(
+        r#"# Beam Virtual Display - NVIDIA GPU-accelerated
+# Generated dynamically by beam-agent
+
+Section "Device"
+    Identifier  "Beam NVIDIA GPU"
+    Driver      "nvidia"
+    BusID       "{bus_id}"
+    Option      "ConnectedMonitor" "{dfp_output}"
+    Option      "CustomEDID" "{dfp_output}:{edid_path}"
+    Option      "AllowEmptyInitialConfiguration" "True"
+EndSection
+
+Section "Monitor"
+    Identifier  "Beam Monitor"
+    HorizSync   1-200
+    VertRefresh 1-200
+EndSection
+
+Section "Screen"
+    Identifier  "Beam Screen"
+    Device      "Beam NVIDIA GPU"
+    Monitor     "Beam Monitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth   24
+    EndSubSection
+EndSection
+
+Section "ServerFlags"
+    Option "AutoAddDevices" "false"
+    Option "AutoEnableDevices" "false"
+    Option "AutoAddGPU" "false"
+    Option "DontVTSwitch" "true"
+EndSection
+
+Section "ServerLayout"
+    Identifier  "Beam Layout"
+    Screen      "Beam Screen"
+    Option "AutoAddDevices" "false"
+EndSection
+"#
+    )
 }
 
 fn generate_xorg_config(width: u32, height: u32) -> String {
