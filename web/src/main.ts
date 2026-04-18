@@ -4,7 +4,7 @@ import type { DownloadMessage } from './filetransfer';
 import { FileDownloader, FileUploader } from './filetransfer';
 import { ICON_CAPTURE, ICON_MUTE, ICON_UNMUTE } from './icons';
 import { InputHandler } from './input';
-import { clearRateLimitTimer,performLogin } from './login';
+import { clearRateLimitTimer, performLogin } from './login';
 import { clearSession, loadSession, sendReleaseBeacon, TokenManager } from './session';
 import {
   AUDIO_MUTED_KEY,
