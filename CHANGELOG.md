@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.22] - 2026-04-18
+
+### Changed
+- Bumped Rust dependencies (workspace-wide refresh).
+- Bumped GStreamer crates 0.24 → 0.25 (system GStreamer 1.24 stays compatible via the `v1_24` feature flag).
+- Bumped axum-extra 0.10 → 0.12.6 to pull in upstream fixes; matches the existing axum 0.8 peer.
+
+### Build / dev
+- Bumped Vite 6 → 8 and TypeScript 5.7 → 6.0 in `web/`.
+- Added eslint 10 + prettier 3 lint stack to `web/` (vanilla TS — no React rules). CI now runs `npx eslint src` and `npx prettier --check src` alongside the existing `tsc --noEmit` and `vitest run`.
+
 ## [0.3.13] - 2026-03-16
 
 ### Fixed
