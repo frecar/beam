@@ -1,7 +1,7 @@
-import type { InputEvent } from "./connection";
+import type { InputEvent } from './connection';
 
 /** Direction of a clipboard sync event */
-export type ClipboardSyncDirection = "sent" | "received";
+export type ClipboardSyncDirection = 'sent' | 'received';
 
 /** Callback signature for clipboard sync notifications */
 export type ClipboardSyncCallback = (direction: ClipboardSyncDirection, preview: string) => void;
@@ -57,9 +57,9 @@ export class ClipboardBridge {
 
   /** Truncate text for display preview */
   static truncatePreview(text: string): string {
-    const singleLine = text.replace(/\n/g, " ").trim();
+    const singleLine = text.replace(/\n/g, ' ').trim();
     if (singleLine.length <= HISTORY_PREVIEW_LENGTH) return singleLine;
-    return singleLine.substring(0, HISTORY_PREVIEW_LENGTH - 3) + "...";
+    return `${singleLine.substring(0, HISTORY_PREVIEW_LENGTH - 3)}...`;
   }
 
   /** Add an entry to the history ring buffer */
@@ -91,24 +91,24 @@ export class ClipboardBridge {
 
   /** Build a short preview string (max 40 chars, single line) */
   private buildPreview(text: string): string {
-    const firstLine = text.split("\n")[0].trim();
+    const firstLine = text.split('\n')[0].trim();
     if (firstLine.length <= 40) return firstLine;
-    return firstLine.substring(0, 37) + "...";
+    return `${firstLine.substring(0, 37)}...`;
   }
 
   enable(): void {
-    document.addEventListener("paste", this.onPaste);
+    document.addEventListener('paste', this.onPaste);
   }
 
   disable(): void {
-    document.removeEventListener("paste", this.onPaste);
+    document.removeEventListener('paste', this.onPaste);
   }
 
   /** Called when the remote sends clipboard text */
   handleRemoteClipboard(text: string): void {
     if (text) {
-      this.syncCallback?.("received", this.buildPreview(text));
-      this.addHistory("received", text);
+      this.syncCallback?.('received', this.buildPreview(text));
+      this.addHistory('received', text);
     }
     navigator.clipboard.writeText(text).catch(() => {
       this.notifyError();
@@ -128,9 +128,9 @@ export class ClipboardBridge {
     try {
       const text = await navigator.clipboard.readText();
       if (text && text.length <= MAX_CLIPBOARD_BYTES) {
-        this.sendClipboard({ t: "cp", text });
-        this.syncCallback?.("sent", this.buildPreview(text));
-        this.addHistory("sent", text);
+        this.sendClipboard({ t: 'cp', text });
+        this.syncCallback?.('sent', this.buildPreview(text));
+        this.addHistory('sent', text);
       }
     } catch {
       // Clipboard read permission denied or not focused — ignore silently.
@@ -140,12 +140,12 @@ export class ClipboardBridge {
 
   private handlePaste(e: ClipboardEvent): void {
     const MAX_CLIPBOARD_BYTES = 1_048_576; // 1 MB
-    const text = e.clipboardData?.getData("text");
+    const text = e.clipboardData?.getData('text');
     if (text && text.length <= MAX_CLIPBOARD_BYTES) {
       e.preventDefault();
-      this.sendClipboard({ t: "c", text });
-      this.syncCallback?.("sent", this.buildPreview(text));
-      this.addHistory("sent", text);
+      this.sendClipboard({ t: 'c', text });
+      this.syncCallback?.('sent', this.buildPreview(text));
+      this.addHistory('sent', text);
     }
   }
 }

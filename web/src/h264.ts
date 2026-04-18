@@ -10,12 +10,7 @@
 export function extractCodecFromAnnexB(payload: Uint8Array): string | null {
   for (let i = 0; i + 4 < payload.length; i++) {
     let nalStart = -1;
-    if (
-      payload[i] === 0 &&
-      payload[i + 1] === 0 &&
-      payload[i + 2] === 0 &&
-      payload[i + 3] === 1
-    ) {
+    if (payload[i] === 0 && payload[i + 1] === 0 && payload[i + 2] === 0 && payload[i + 3] === 1) {
       nalStart = i + 4;
     } else if (payload[i] === 0 && payload[i + 1] === 0 && payload[i + 2] === 1) {
       nalStart = i + 3;
@@ -27,7 +22,7 @@ export function extractCodecFromAnnexB(payload: Uint8Array): string | null {
         const profile = payload[nalStart + 1];
         const compat = payload[nalStart + 2];
         const level = payload[nalStart + 3];
-        return `avc1.${profile.toString(16).padStart(2, "0")}${compat.toString(16).padStart(2, "0")}${level.toString(16).padStart(2, "0")}`;
+        return `avc1.${profile.toString(16).padStart(2, '0')}${compat.toString(16).padStart(2, '0')}${level.toString(16).padStart(2, '0')}`;
       }
     }
   }

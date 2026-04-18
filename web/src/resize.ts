@@ -7,7 +7,10 @@ export function roundToEven(n: number): number {
  *  Returns false for the first resize (old dimensions are 0) and for
  *  changes smaller than 10% in both dimensions. */
 export function isSignificantResize(
-  oldW: number, oldH: number, newW: number, newH: number,
+  oldW: number,
+  oldH: number,
+  newW: number,
+  newH: number
 ): boolean {
   if (oldW === 0 || oldH === 0) return false; // First resize, never significant
   const dw = Math.abs(newW - oldW) / oldW;

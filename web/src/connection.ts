@@ -34,7 +34,7 @@ export interface FrameHeader {
  * Returns null if the buffer is too short, has bad magic, or is truncated.
  */
 export function parseFrameHeader(
-  data: ArrayBuffer,
+  data: ArrayBuffer
 ): { header: FrameHeader; payload: Uint8Array } | null {
   if (data.byteLength < FRAME_HEADER_SIZE) {
     return null;
@@ -66,31 +66,29 @@ export function parseFrameHeader(
  * Compact wire format matching the Rust InputEvent enum (serde tag = "t").
  */
 export type InputEvent =
-  | { t: "k"; c: number; d: boolean }
-  | { t: "m"; x: number; y: number }
-  | { t: "rm"; dx: number; dy: number }
-  | { t: "b"; b: number; d: boolean }
-  | { t: "s"; dx: number; dy: number }
-  | { t: "c"; text: string }
-  | { t: "cp"; text: string }
-  | { t: "r"; w: number; h: number }
-  | { t: "l"; layout: string }
-  | { t: "q"; mode: string }
-  | { t: "vs"; visible: boolean }
-  | { t: "cur"; css: string }
-  | { t: "fs"; id: string; name: string; size: number }
-  | { t: "fc"; id: string; data: string }
-  | { t: "fd"; id: string }
-  | { t: "fdr"; path: string }
-  | { t: "fds"; id: string; name: string; size: number }
-  | { t: "fdc"; id: string; data: string }
-  | { t: "fdd"; id: string }
-  | { t: "fde"; id: string; error: string };
+  | { t: 'k'; c: number; d: boolean }
+  | { t: 'm'; x: number; y: number }
+  | { t: 'rm'; dx: number; dy: number }
+  | { t: 'b'; b: number; d: boolean }
+  | { t: 's'; dx: number; dy: number }
+  | { t: 'c'; text: string }
+  | { t: 'cp'; text: string }
+  | { t: 'r'; w: number; h: number }
+  | { t: 'l'; layout: string }
+  | { t: 'q'; mode: string }
+  | { t: 'vs'; visible: boolean }
+  | { t: 'cur'; css: string }
+  | { t: 'fs'; id: string; name: string; size: number }
+  | { t: 'fc'; id: string; data: string }
+  | { t: 'fd'; id: string }
+  | { t: 'fdr'; path: string }
+  | { t: 'fds'; id: string; name: string; size: number }
+  | { t: 'fdc'; id: string; data: string }
+  | { t: 'fdd'; id: string }
+  | { t: 'fde'; id: string; error: string };
 
 /** Signaling/control messages received as JSON text from the server */
-type ServerMessage =
-  | { type: "session_ready" }
-  | { type: "error"; message: string };
+type ServerMessage = { type: 'session_ready' } | { type: 'error'; message: string };
 
 type VoidCallback = () => void;
 type VideoFrameCallback = (
@@ -98,7 +96,7 @@ type VideoFrameCallback = (
   width: number,
   height: number,
   timestampUs: bigint,
-  payload: Uint8Array,
+  payload: Uint8Array
 ) => void;
 type AudioFrameCallback = (timestampUs: bigint, payload: Uint8Array) => void;
 
@@ -208,11 +206,11 @@ export class BeamConnection {
   private async establishConnection(): Promise<void> {
     this.cleanup();
 
-    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${location.host}/api/sessions/${this.sessionId}/ws?token=${encodeURIComponent(this.token)}`;
 
     this.ws = new WebSocket(wsUrl);
-    this.ws.binaryType = "arraybuffer";
+    this.ws.binaryType = 'arraybuffer';
 
     let wsOpened = false;
 
@@ -225,19 +223,19 @@ export class BeamConnection {
     this.ws.onmessage = (event: MessageEvent) => {
       if (event.data instanceof ArrayBuffer) {
         this.handleBinaryMessage(event.data);
-      } else if (typeof event.data === "string") {
+      } else if (typeof event.data === 'string') {
         this.handleTextMessage(event.data);
       }
     };
 
     this.ws.onclose = (event: CloseEvent) => {
       console.log(
-        `WebSocket closed: code=${event.code} reason=${event.reason} clean=${event.wasClean} intentional=${this.intentionalDisconnect}`,
+        `WebSocket closed: code=${event.code} reason=${event.reason} clean=${event.wasClean} intentional=${this.intentionalDisconnect}`
       );
       setTimeout(() => {
         if (!this.intentionalDisconnect) {
           if (!wsOpened && event.code === 1006) {
-            console.error("WebSocket rejected (likely auth failure), not retrying");
+            console.error('WebSocket rejected (likely auth failure), not retrying');
             this.reconnectFailedCallback?.();
             return;
           }
@@ -263,7 +261,7 @@ export class BeamConnection {
 
     const result = parseFrameHeader(data);
     if (!result) {
-      console.warn("Invalid binary frame:", data.byteLength, "bytes");
+      console.warn('Invalid binary frame:', data.byteLength, 'bytes');
       return;
     }
 
@@ -273,7 +271,13 @@ export class BeamConnection {
     if (isAudio) {
       this.audioFrameCallback?.(header.timestampUs, payload);
     } else {
-      this.videoFrameCallback?.(header.flags, header.width, header.height, header.timestampUs, payload);
+      this.videoFrameCallback?.(
+        header.flags,
+        header.width,
+        header.height,
+        header.timestampUs,
+        payload
+      );
     }
   }
 
@@ -283,28 +287,28 @@ export class BeamConnection {
     try {
       msg = JSON.parse(data);
     } catch {
-      console.warn("Failed to parse text message:", data);
+      console.warn('Failed to parse text message:', data);
       return;
     }
 
     // Server signaling messages
-    if (msg.type === "error") {
-      const serverMsg = msg as ServerMessage & { type: "error" };
-      if (serverMsg.message === "replaced") {
-        console.log("Session taken over by another tab");
+    if (msg.type === 'error') {
+      const serverMsg = msg as ServerMessage & { type: 'error' };
+      if (serverMsg.message === 'replaced') {
+        console.log('Session taken over by another tab');
         this.intentionalDisconnect = true;
         this.cleanup();
         this.replacedCallback?.();
         return;
       }
-      if (serverMsg.message === "agent_exited") {
-        console.error("Agent process exited unexpectedly");
+      if (serverMsg.message === 'agent_exited') {
+        console.error('Agent process exited unexpectedly');
         this.intentionalDisconnect = true;
         this.cleanup();
         this.agentExitedCallback?.();
         return;
       }
-      console.error("Server error:", serverMsg.message);
+      console.error('Server error:', serverMsg.message);
       return;
     }
 
@@ -326,7 +330,7 @@ export class BeamConnection {
 
     const baseDelay = Math.min(
       BASE_RECONNECT_DELAY_MS * Math.pow(2, this.reconnectAttempt),
-      MAX_RECONNECT_DELAY_MS,
+      MAX_RECONNECT_DELAY_MS
     );
     const jitter = Math.random() * baseDelay * 0.3;
     const delay = Math.round(baseDelay + jitter);
@@ -334,7 +338,7 @@ export class BeamConnection {
     this.reconnectAttempt++;
 
     console.log(
-      `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})...`,
+      `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})...`
     );
     this.reconnectingCallback?.(this.reconnectAttempt, MAX_RECONNECT_ATTEMPTS);
 

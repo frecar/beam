@@ -3,7 +3,7 @@
  * token refresh, login/logout API calls, and release beacon.
  */
 
-import type { BeamConnection } from "./connection";
+import type { BeamConnection } from './connection';
 
 /** Shape of the login API response */
 export interface LoginResponse {
@@ -18,7 +18,7 @@ interface StoredSession extends LoginResponse {
   saved_at: number;
 }
 
-const SESSION_KEY = "beam_session";
+const SESSION_KEY = 'beam_session';
 const SESSION_MAX_AGE_MS = 3600_000; // 1 hour -- matches server reaper
 
 export function saveSession(data: LoginResponse): void {
@@ -49,7 +49,7 @@ export function clearSession(): void {
 /** Parse JWT exp claim without verification */
 export function parseJwtExp(token: string): number | null {
   try {
-    const payload = token.split(".")[1];
+    const payload = token.split('.')[1];
     const decoded = JSON.parse(atob(payload)) as { exp?: number };
     return decoded.exp ?? null;
   } catch {
@@ -61,10 +61,7 @@ export function parseJwtExp(token: string): number | null {
  *  Uses navigator.sendBeacon() which reliably fires during tab close. */
 export function sendReleaseBeacon(sessionId: string | null, releaseToken: string | null): void {
   if (sessionId && releaseToken) {
-    navigator.sendBeacon(
-      `/api/sessions/${sessionId}/release`,
-      releaseToken,
-    );
+    navigator.sendBeacon(`/api/sessions/${sessionId}/release`, releaseToken);
   }
 }
 
@@ -131,8 +128,8 @@ export class TokenManager {
   async refreshToken(): Promise<boolean> {
     if (!this.currentToken) return false;
     try {
-      const resp = await fetch("/api/auth/refresh", {
-        method: "POST",
+      const resp = await fetch('/api/auth/refresh', {
+        method: 'POST',
         headers: { Authorization: `Bearer ${this.currentToken}` },
       });
       if (!resp.ok) return false;
@@ -140,10 +137,10 @@ export class TokenManager {
       this.setToken(data.token);
       this.connection?.updateToken(data.token);
       this.scheduleTokenRefresh();
-      console.log("Token refreshed");
+      console.log('Token refreshed');
       return true;
     } catch {
-      console.warn("Token refresh failed");
+      console.warn('Token refresh failed');
       return false;
     }
   }

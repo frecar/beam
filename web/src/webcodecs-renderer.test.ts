@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { WebCodecsRenderer } from "./webcodecs-renderer";
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { WebCodecsRenderer } from './webcodecs-renderer';
 
 // =========================================================================
 // Mock browser APIs
@@ -11,14 +12,14 @@ let decoderCloseCalls: number;
 let outputCallback: ((frame: any) => void) | null;
 
 class MockVideoDecoder {
-  state = "unconfigured";
+  state = 'unconfigured';
 
   constructor({ output }: any) {
     outputCallback = output;
   }
 
   configure(_config: any) {
-    this.state = "configured";
+    this.state = 'configured';
     decoderConfigureCalls.push(_config);
   }
 
@@ -31,7 +32,7 @@ class MockVideoDecoder {
   }
 
   close() {
-    this.state = "closed";
+    this.state = 'closed';
     decoderCloseCalls++;
   }
 }
@@ -40,7 +41,7 @@ let decodedAudioChunks: any[];
 let audioDecoderConfigured: boolean;
 
 class MockAudioDecoder {
-  state = "unconfigured";
+  state = 'unconfigured';
   private audioOutputCallback: ((data: any) => void) | null = null;
 
   constructor({ output }: any) {
@@ -49,7 +50,7 @@ class MockAudioDecoder {
   }
 
   configure(_config: any) {
-    this.state = "configured";
+    this.state = 'configured';
     audioDecoderConfigured = true;
   }
 
@@ -66,7 +67,7 @@ class MockAudioDecoder {
   }
 
   close() {
-    this.state = "closed";
+    this.state = 'closed';
   }
 }
 
@@ -114,7 +115,7 @@ function createMockContainer(): HTMLElement {
 // Tests
 // =========================================================================
 
-describe("WebCodecsRenderer", () => {
+describe('WebCodecsRenderer', () => {
   let renderer: WebCodecsRenderer;
   let canvas: HTMLCanvasElement;
   let container: HTMLElement;
@@ -127,37 +128,46 @@ describe("WebCodecsRenderer", () => {
     audioDecoderConfigured = false;
     outputCallback = null;
 
-    vi.stubGlobal("VideoDecoder", MockVideoDecoder);
-    vi.stubGlobal("AudioDecoder", MockAudioDecoder);
-    vi.stubGlobal("EncodedVideoChunk", MockEncodedVideoChunk);
-    vi.stubGlobal("EncodedAudioChunk", MockEncodedAudioChunk);
-    vi.stubGlobal("AudioContext", class {
-      state = "running";
-      currentTime = 0;
-      sampleRate = 48000;
-      createBuffer(_channels: number, frames: number, rate: number) {
-        return {
-          duration: frames / rate,
-          getChannelData: () => new Float32Array(frames),
-        };
+    vi.stubGlobal('VideoDecoder', MockVideoDecoder);
+    vi.stubGlobal('AudioDecoder', MockAudioDecoder);
+    vi.stubGlobal('EncodedVideoChunk', MockEncodedVideoChunk);
+    vi.stubGlobal('EncodedAudioChunk', MockEncodedAudioChunk);
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        state = 'running';
+        currentTime = 0;
+        sampleRate = 48000;
+        createBuffer(_channels: number, frames: number, rate: number) {
+          return {
+            duration: frames / rate,
+            getChannelData: () => new Float32Array(frames),
+          };
+        }
+        createBufferSource() {
+          return {
+            buffer: null,
+            connect: vi.fn(),
+            start: vi.fn(),
+          };
+        }
+        get destination() {
+          return {};
+        }
+        suspend() {
+          this.state = 'suspended';
+        }
+        resume() {
+          this.state = 'running';
+        }
+        close() {}
       }
-      createBufferSource() {
-        return {
-          buffer: null,
-          connect: vi.fn(),
-          start: vi.fn(),
-        };
-      }
-      get destination() { return {}; }
-      suspend() { this.state = "suspended"; }
-      resume() { this.state = "running"; }
-      close() {}
-    });
-    vi.stubGlobal("localStorage", {
+    );
+    vi.stubGlobal('localStorage', {
       getItem: () => null,
       setItem: vi.fn(),
     });
-    vi.stubGlobal("performance", {
+    vi.stubGlobal('performance', {
       now: () => 0,
     });
 
@@ -171,7 +181,7 @@ describe("WebCodecsRenderer", () => {
     vi.unstubAllGlobals();
   });
 
-  it("drops P-frames before first keyframe", () => {
+  it('drops P-frames before first keyframe', () => {
     const payload = new Uint8Array([1, 2, 3]);
     renderer.feedVideoFrame(0x00, 1920, 1080, 0n, payload); // P-frame
 
@@ -180,25 +190,25 @@ describe("WebCodecsRenderer", () => {
     expect(decodedVideoChunks).toHaveLength(0);
   });
 
-  it("accepts keyframe when needsKeyframe=true", () => {
+  it('accepts keyframe when needsKeyframe=true', () => {
     const payload = new Uint8Array([1, 2, 3]);
     renderer.feedVideoFrame(0x01, 1920, 1080, 0n, payload); // keyframe
 
     expect(decodedVideoChunks).toHaveLength(1);
-    expect(decodedVideoChunks[0].type).toBe("key");
+    expect(decodedVideoChunks[0].type).toBe('key');
   });
 
-  it("accepts P-frame after keyframe", () => {
+  it('accepts P-frame after keyframe', () => {
     const payload = new Uint8Array([1, 2, 3]);
     renderer.feedVideoFrame(0x01, 1920, 1080, 0n, payload); // keyframe
     renderer.feedVideoFrame(0x00, 1920, 1080, 1000n, payload); // P-frame
 
     expect(decodedVideoChunks).toHaveLength(2);
-    expect(decodedVideoChunks[0].type).toBe("key");
-    expect(decodedVideoChunks[1].type).toBe("delta");
+    expect(decodedVideoChunks[0].type).toBe('key');
+    expect(decodedVideoChunks[1].type).toBe('delta');
   });
 
-  it("reconfigures decoder on resolution change", () => {
+  it('reconfigures decoder on resolution change', () => {
     const payload = new Uint8Array([1, 2, 3]);
     renderer.feedVideoFrame(0x01, 1920, 1080, 0n, payload);
 
@@ -212,7 +222,7 @@ describe("WebCodecsRenderer", () => {
     expect(decoderCloseCalls).toBeGreaterThan(closesBefore);
   });
 
-  it("needsKeyframe resets on resolution change", () => {
+  it('needsKeyframe resets on resolution change', () => {
     const payload = new Uint8Array([1, 2, 3]);
     // Feed keyframe at 1920x1080
     renderer.feedVideoFrame(0x01, 1920, 1080, 0n, payload);
@@ -223,7 +233,7 @@ describe("WebCodecsRenderer", () => {
     expect(decodedVideoChunks).toHaveLength(1); // still 1, P-frame dropped
   });
 
-  it("audio muted by default", () => {
+  it('audio muted by default', () => {
     const payload = new Uint8Array([1, 2, 3]);
     renderer.feedAudioFrame(0n, payload);
 
@@ -231,7 +241,7 @@ describe("WebCodecsRenderer", () => {
     expect(audioDecoderConfigured).toBe(false);
   });
 
-  it("audio plays when unmuted", () => {
+  it('audio plays when unmuted', () => {
     renderer.setAudioMuted(false);
     const payload = new Uint8Array([1, 2, 3]);
     renderer.feedAudioFrame(0n, payload);
@@ -239,7 +249,7 @@ describe("WebCodecsRenderer", () => {
     expect(decodedAudioChunks).toHaveLength(1);
   });
 
-  it("first frame callback fires once", () => {
+  it('first frame callback fires once', () => {
     let callCount = 0;
     renderer.onFirstFrame(() => callCount++);
 
@@ -250,7 +260,7 @@ describe("WebCodecsRenderer", () => {
     expect(callCount).toBe(1);
   });
 
-  it("destroy cleans up decoders", () => {
+  it('destroy cleans up decoders', () => {
     const payload = new Uint8Array([1, 2, 3]);
     renderer.feedVideoFrame(0x01, 1920, 1080, 0n, payload);
     renderer.setAudioMuted(false);

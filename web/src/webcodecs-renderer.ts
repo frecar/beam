@@ -1,4 +1,4 @@
-import { extractCodecFromAnnexB } from "./h264";
+import { extractCodecFromAnnexB } from './h264';
 
 /**
  * WebCodecs-based video/audio renderer for the Beam remote desktop client.
@@ -36,21 +36,21 @@ export class WebCodecsRenderer {
   constructor(canvas: HTMLCanvasElement, containerElement: HTMLElement) {
     this.canvas = canvas;
     this.containerElement = containerElement;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Failed to get 2d context from canvas");
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Failed to get 2d context from canvas');
     this.ctx = ctx;
 
     // Auto-unmute on first desktop click only if user has never set a preference.
     // Returning users get their saved preference restored by main.ts instead.
-    if (localStorage.getItem("beam_audio_muted") === null) {
+    if (localStorage.getItem('beam_audio_muted') === null) {
       this.containerElement.addEventListener(
-        "click",
+        'click',
         () => {
           if (this.audioMuted) {
             this.setAudioMuted(false);
           }
         },
-        { once: true },
+        { once: true }
       );
     }
   }
@@ -114,10 +114,14 @@ export class WebCodecsRenderer {
 
   /** Configure or reconfigure the video decoder for the given resolution */
   private configureDecoder(width: number, height: number, codec?: string): void {
-    const codecStr = codec ?? "avc1.4d0033";
+    const codecStr = codec ?? 'avc1.4d0033';
     console.log(`[Beam] configureDecoder: ${width}x${height} codec=${codecStr}`);
     if (this.decoder) {
-      try { this.decoder.close(); } catch { /* already closed */ }
+      try {
+        this.decoder.close();
+      } catch {
+        /* already closed */
+      }
       this.decoder = null;
     }
 
@@ -134,19 +138,21 @@ export class WebCodecsRenderer {
         this.decodeTimeMs = performance.now() - this.lastFeedTimeMs;
 
         if (!this.firstFrameFired) {
-          console.log(`[Beam] First video frame decoded: ${frame.displayWidth}x${frame.displayHeight}`);
+          console.log(
+            `[Beam] First video frame decoded: ${frame.displayWidth}x${frame.displayHeight}`
+          );
           this.firstFrameFired = true;
           this.firstFrameCallback?.();
         }
       },
       error: (err: DOMException) => {
-        console.error("VideoDecoder error:", err);
+        console.error('VideoDecoder error:', err);
       },
     });
 
     this.decoder.configure({
       codec: codecStr,
-      hardwareAcceleration: "prefer-hardware",
+      hardwareAcceleration: 'prefer-hardware',
       optimizeForLatency: true,
     });
     this.needsKeyframe = true;
@@ -160,40 +166,42 @@ export class WebCodecsRenderer {
     width: number,
     height: number,
     timestampUs: bigint,
-    payload: Uint8Array,
+    payload: Uint8Array
   ): void {
     this.videoFrameCount++;
     if (this.videoFrameCount <= 5) {
       const isKf = (flags & 0x01) !== 0;
-      console.log(`[Beam] feedVideoFrame #${this.videoFrameCount}: ${width}x${height} flags=0x${flags.toString(16)} keyframe=${isKf} payload=${payload.byteLength} decoderState=${this.decoder?.state ?? "null"}`);
+      console.log(
+        `[Beam] feedVideoFrame #${this.videoFrameCount}: ${width}x${height} flags=0x${flags.toString(16)} keyframe=${isKf} payload=${payload.byteLength} decoderState=${this.decoder?.state ?? 'null'}`
+      );
     }
 
     const isKeyframe = (flags & 0x01) !== 0;
 
     // Reconfigure decoder if resolution changed
     if (width !== this.currentWidth || height !== this.currentHeight) {
-      const codec = isKeyframe ? extractCodecFromAnnexB(payload) ?? undefined : undefined;
+      const codec = isKeyframe ? (extractCodecFromAnnexB(payload) ?? undefined) : undefined;
       this.configureDecoder(width, height, codec);
     }
 
     // Recover from closed decoder (decode error) on next keyframe
-    if (this.decoder?.state === "closed" && isKeyframe) {
-      console.log("[Beam] Decoder closed, reconfiguring on keyframe");
+    if (this.decoder?.state === 'closed' && isKeyframe) {
+      console.log('[Beam] Decoder closed, reconfiguring on keyframe');
       const codec = extractCodecFromAnnexB(payload) ?? undefined;
       this.configureDecoder(width, height, codec);
     }
 
-    if (!this.decoder || this.decoder.state === "closed") return;
+    if (!this.decoder || this.decoder.state === 'closed') return;
 
     // If decoder not yet configured, skip
-    if (this.decoder.state !== "configured") return;
+    if (this.decoder.state !== 'configured') return;
 
     // After configure() or flush(), decoder requires a keyframe first
     if (this.needsKeyframe && !isKeyframe) return;
     if (isKeyframe) this.needsKeyframe = false;
 
     const chunk = new EncodedVideoChunk({
-      type: isKeyframe ? "key" : "delta",
+      type: isKeyframe ? 'key' : 'delta',
       timestamp: Number(timestampUs),
       data: payload,
     });
@@ -202,7 +210,7 @@ export class WebCodecsRenderer {
       this.lastFeedTimeMs = performance.now();
       this.decoder.decode(chunk);
     } catch (err) {
-      console.error("VideoDecoder.decode() error:", err);
+      console.error('VideoDecoder.decode() error:', err);
     }
   }
 
@@ -212,7 +220,7 @@ export class WebCodecsRenderer {
 
     this.audioFrameCount++;
     if (this.audioFrameCount === 1) {
-      console.log("Audio: first frame received", {
+      console.log('Audio: first frame received', {
         payloadSize: payload.byteLength,
         audioContextState: this.audioContext.state,
       });
@@ -224,7 +232,7 @@ export class WebCodecsRenderer {
       this.audioDecoder = new AudioDecoder({
         output: (audioData: AudioData) => {
           if (!firstDecodeLogged) {
-            console.log("Audio: first decode successful", {
+            console.log('Audio: first decode successful', {
               frames: audioData.numberOfFrames,
               channels: audioData.numberOfChannels,
               sampleRate: audioData.sampleRate,
@@ -232,7 +240,7 @@ export class WebCodecsRenderer {
             firstDecodeLogged = true;
           }
           // Play audio via AudioContext
-          if (this.audioContext && this.audioContext.state === "running") {
+          if (this.audioContext && this.audioContext.state === 'running') {
             const numFrames = audioData.numberOfFrames;
             const numChannels = audioData.numberOfChannels;
             const sampleRate = audioData.sampleRate;
@@ -240,7 +248,7 @@ export class WebCodecsRenderer {
 
             for (let ch = 0; ch < numChannels; ch++) {
               const channelData = buffer.getChannelData(ch);
-              audioData.copyTo(channelData, { planeIndex: ch, format: "f32-planar" });
+              audioData.copyTo(channelData, { planeIndex: ch, format: 'f32-planar' });
             }
 
             const source = this.audioContext.createBufferSource();
@@ -258,21 +266,21 @@ export class WebCodecsRenderer {
           audioData.close();
         },
         error: (err: DOMException) => {
-          console.error("AudioDecoder error:", err);
+          console.error('AudioDecoder error:', err);
         },
       });
 
       this.audioDecoder.configure({
-        codec: "opus",
+        codec: 'opus',
         sampleRate: 48000,
         numberOfChannels: 2,
       });
     }
 
-    if (this.audioDecoder.state !== "configured") return;
+    if (this.audioDecoder.state !== 'configured') return;
 
     const chunk = new EncodedAudioChunk({
-      type: "key", // Opus frames are always independently decodable
+      type: 'key', // Opus frames are always independently decodable
       timestamp: Number(timestampUs),
       data: payload,
     });
@@ -280,7 +288,7 @@ export class WebCodecsRenderer {
     try {
       this.audioDecoder.decode(chunk);
     } catch (err) {
-      console.error("AudioDecoder.decode() error:", err);
+      console.error('AudioDecoder.decode() error:', err);
     }
   }
 
@@ -297,7 +305,7 @@ export class WebCodecsRenderer {
   /** Enter fullscreen mode */
   enterFullscreen(): void {
     this.containerElement.requestFullscreen?.().catch((err) => {
-      console.warn("Fullscreen request failed:", err);
+      console.warn('Fullscreen request failed:', err);
     });
   }
 
@@ -312,11 +320,19 @@ export class WebCodecsRenderer {
   destroy(): void {
     this.stopFpsCounter();
     if (this.decoder) {
-      try { this.decoder.close(); } catch { /* already closed */ }
+      try {
+        this.decoder.close();
+      } catch {
+        /* already closed */
+      }
       this.decoder = null;
     }
     if (this.audioDecoder) {
-      try { this.audioDecoder.close(); } catch { /* already closed */ }
+      try {
+        this.audioDecoder.close();
+      } catch {
+        /* already closed */
+      }
       this.audioDecoder = null;
     }
     this.nextAudioPlayTime = 0;

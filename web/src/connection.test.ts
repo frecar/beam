@@ -1,10 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  parseFrameHeader,
-  FRAME_HEADER_SIZE,
-  FRAME_MAGIC,
-  BeamConnection,
-} from "./connection";
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { BeamConnection, FRAME_HEADER_SIZE, FRAME_MAGIC, parseFrameHeader } from './connection';
 
 /**
  * Build a binary frame buffer matching the Rust VideoFrameHeader::serialize() layout.
@@ -15,7 +11,7 @@ function buildFrameBuffer(
   width: number,
   height: number,
   timestampUs: bigint,
-  payload: Uint8Array,
+  payload: Uint8Array
 ): ArrayBuffer {
   const buf = new ArrayBuffer(FRAME_HEADER_SIZE + payload.byteLength);
   const view = new DataView(buf);
@@ -35,8 +31,8 @@ function buildFrameBuffer(
 // parseFrameHeader — cross-language contract tests
 // =========================================================================
 
-describe("parseFrameHeader", () => {
-  it("parses valid video frame", () => {
+describe('parseFrameHeader', () => {
+  it('parses valid video frame', () => {
     const payload = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
     const buf = buildFrameBuffer(0x01, 1920, 1080, 123456n, payload);
     const result = parseFrameHeader(buf);
@@ -50,7 +46,7 @@ describe("parseFrameHeader", () => {
     expect(Array.from(result!.payload)).toEqual([0xde, 0xad, 0xbe, 0xef]);
   });
 
-  it("parses valid audio frame", () => {
+  it('parses valid audio frame', () => {
     const payload = new Uint8Array([1, 2, 3]);
     const buf = buildFrameBuffer(0x02, 0, 0, 999999n, payload);
     const result = parseFrameHeader(buf);
@@ -61,19 +57,19 @@ describe("parseFrameHeader", () => {
     expect(result!.header.payloadLength).toBe(3);
   });
 
-  it("rejects too-short message", () => {
+  it('rejects too-short message', () => {
     const buf = new ArrayBuffer(20);
     expect(parseFrameHeader(buf)).toBeNull();
   });
 
-  it("rejects bad magic", () => {
+  it('rejects bad magic', () => {
     const buf = new ArrayBuffer(FRAME_HEADER_SIZE);
     const view = new DataView(buf);
     view.setUint32(0, 0xdeadbeef, true);
     expect(parseFrameHeader(buf)).toBeNull();
   });
 
-  it("rejects truncated payload", () => {
+  it('rejects truncated payload', () => {
     // Header says 100 bytes payload, but only 50 present
     const buf = new ArrayBuffer(FRAME_HEADER_SIZE + 50);
     const view = new DataView(buf);
@@ -83,7 +79,7 @@ describe("parseFrameHeader", () => {
     expect(parseFrameHeader(buf)).toBeNull();
   });
 
-  it("parses keyframe flag correctly", () => {
+  it('parses keyframe flag correctly', () => {
     const payload = new Uint8Array([0xff]);
     const buf = buildFrameBuffer(0x01, 640, 480, 0n, payload);
     const result = parseFrameHeader(buf);
@@ -92,7 +88,7 @@ describe("parseFrameHeader", () => {
     expect(result!.header.flags & 0x01).toBe(0x01);
   });
 
-  it("handles zero-length payload", () => {
+  it('handles zero-length payload', () => {
     const buf = buildFrameBuffer(0x00, 1920, 1080, 42n, new Uint8Array(0));
     const result = parseFrameHeader(buf);
 
@@ -101,13 +97,13 @@ describe("parseFrameHeader", () => {
     expect(result!.payload.byteLength).toBe(0);
   });
 
-  it("header constants match Rust protocol", () => {
+  it('header constants match Rust protocol', () => {
     expect(FRAME_HEADER_SIZE).toBe(24);
     expect(FRAME_MAGIC).toBe(0x56414542);
     // Verify magic spells "BEAV" in LE
     const magicBytes = new Uint8Array(4);
     new DataView(magicBytes.buffer).setUint32(0, FRAME_MAGIC, true);
-    expect(String.fromCharCode(...magicBytes)).toBe("BEAV");
+    expect(String.fromCharCode(...magicBytes)).toBe('BEAV');
   });
 });
 
@@ -119,7 +115,7 @@ describe("parseFrameHeader", () => {
 let mockWsInstances: MockWebSocket[];
 
 class MockWebSocket {
-  binaryType = "";
+  binaryType = '';
   readyState = 0; // CONNECTING
   onopen: ((ev: any) => void) | null = null;
   onclose: ((ev: any) => void) | null = null;
@@ -148,7 +144,7 @@ class MockWebSocket {
   }
 
   /** Test helper: simulate the WS closing */
-  simulateClose(code = 1006, reason = "", wasClean = false) {
+  simulateClose(code = 1006, reason = '', wasClean = false) {
     this.readyState = MockWebSocket.CLOSED;
     this.onclose?.({ code, reason, wasClean });
   }
@@ -159,14 +155,14 @@ class MockWebSocket {
   }
 }
 
-describe("BeamConnection reconnect logic", () => {
+describe('BeamConnection reconnect logic', () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.spyOn(Math, "random").mockReturnValue(0); // zero jitter
+    vi.spyOn(Math, 'random').mockReturnValue(0); // zero jitter
     mockWsInstances = [];
 
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    vi.stubGlobal("location", { protocol: "https:", host: "localhost:8444" });
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    vi.stubGlobal('location', { protocol: 'https:', host: 'localhost:8444' });
   });
 
   afterEach(() => {
@@ -175,8 +171,8 @@ describe("BeamConnection reconnect logic", () => {
     vi.unstubAllGlobals();
   });
 
-  it("exponential backoff doubles delay", async () => {
-    const conn = new BeamConnection("test-session", "test-token");
+  it('exponential backoff doubles delay', async () => {
+    const conn = new BeamConnection('test-session', 'test-token');
     const reconnectingCalls: number[] = [];
     conn.onReconnecting((attempt) => reconnectingCalls.push(attempt));
 
@@ -207,10 +203,12 @@ describe("BeamConnection reconnect logic", () => {
     expect(reconnectingCalls).toEqual([1, 1, 2]);
   });
 
-  it("max reconnect attempts exhausted calls reconnectFailedCallback", async () => {
-    const conn = new BeamConnection("test-session", "test-token");
+  it('max reconnect attempts exhausted calls reconnectFailedCallback', async () => {
+    const conn = new BeamConnection('test-session', 'test-token');
     let failedCalled = false;
-    conn.onReconnectFailed(() => { failedCalled = true; });
+    conn.onReconnectFailed(() => {
+      failedCalled = true;
+    });
 
     await conn.connect();
     const ws0 = mockWsInstances[0];
@@ -233,10 +231,12 @@ describe("BeamConnection reconnect logic", () => {
     expect(failedCalled).toBe(true);
   });
 
-  it("intentional disconnect does not reconnect", async () => {
-    const conn = new BeamConnection("test-session", "test-token");
+  it('intentional disconnect does not reconnect', async () => {
+    const conn = new BeamConnection('test-session', 'test-token');
     let reconnectingCalled = false;
-    conn.onReconnecting(() => { reconnectingCalled = true; });
+    conn.onReconnecting(() => {
+      reconnectingCalled = true;
+    });
 
     await conn.connect();
     const ws = mockWsInstances[0];
@@ -248,12 +248,16 @@ describe("BeamConnection reconnect logic", () => {
     expect(reconnectingCalled).toBe(false);
   });
 
-  it("auth failure (1006 before open) does not retry", async () => {
-    const conn = new BeamConnection("test-session", "test-token");
+  it('auth failure (1006 before open) does not retry', async () => {
+    const conn = new BeamConnection('test-session', 'test-token');
     let failedCalled = false;
     let reconnectingCalled = false;
-    conn.onReconnectFailed(() => { failedCalled = true; });
-    conn.onReconnecting(() => { reconnectingCalled = true; });
+    conn.onReconnectFailed(() => {
+      failedCalled = true;
+    });
+    conn.onReconnecting(() => {
+      reconnectingCalled = true;
+    });
 
     await conn.connect();
     const ws = mockWsInstances[0];
@@ -265,27 +269,31 @@ describe("BeamConnection reconnect logic", () => {
     expect(reconnectingCalled).toBe(false);
   });
 
-  it("replaced message stops reconnection", async () => {
-    const conn = new BeamConnection("test-session", "test-token");
+  it('replaced message stops reconnection', async () => {
+    const conn = new BeamConnection('test-session', 'test-token');
     let replacedCalled = false;
     let reconnectingCalled = false;
-    conn.onReplaced(() => { replacedCalled = true; });
-    conn.onReconnecting(() => { reconnectingCalled = true; });
+    conn.onReplaced(() => {
+      replacedCalled = true;
+    });
+    conn.onReconnecting(() => {
+      reconnectingCalled = true;
+    });
 
     await conn.connect();
     const ws = mockWsInstances[0];
     ws.simulateOpen();
 
     // Server sends "replaced" error
-    ws.simulateMessage(JSON.stringify({ type: "error", message: "replaced" }));
+    ws.simulateMessage(JSON.stringify({ type: 'error', message: 'replaced' }));
 
     await vi.advanceTimersByTimeAsync(5000);
     expect(replacedCalled).toBe(true);
     expect(reconnectingCalled).toBe(false);
   });
 
-  it("reconnect counter resets on successful connection", async () => {
-    const conn = new BeamConnection("test-session", "test-token");
+  it('reconnect counter resets on successful connection', async () => {
+    const conn = new BeamConnection('test-session', 'test-token');
     const reconnectAttempts: number[] = [];
     conn.onReconnecting((attempt) => reconnectAttempts.push(attempt));
 
