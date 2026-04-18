@@ -14,36 +14,6 @@ export default [
   },
   js.configs.recommended,
   {
-    files: ['**/*.{test,spec}.ts', '**/test/**/*.ts'],
-    languageOptions: {
-      parser: tsParser,
-      parserOptions: {
-        project: ['./tsconfig.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      globals: {
-        vi: 'readonly',
-        expect: 'readonly',
-        describe: 'readonly',
-        it: 'readonly',
-        test: 'readonly',
-        beforeEach: 'readonly',
-        afterEach: 'readonly',
-        beforeAll: 'readonly',
-        afterAll: 'readonly',
-        console: 'readonly',
-      },
-    },
-    plugins: {
-      '@typescript-eslint': tsPlugin,
-    },
-    rules: {
-      '@typescript-eslint/no-unused-vars': 'off',
-      '@typescript-eslint/no-explicit-any': 'off',
-      'no-undef': 'off',
-    },
-  },
-  {
     files: ['**/*.ts'],
     languageOptions: {
       parser: tsParser,
@@ -126,6 +96,31 @@ export default [
       'prefer-template': 'error',
       'object-shorthand': 'error',
       'prefer-arrow-callback': 'error',
+    },
+  },
+  {
+    // Test-file overrides — must come AFTER the general .ts block so
+    // these rules win for the matching files.
+    files: ['**/*.{test,spec}.ts', '**/test/**/*.ts'],
+    languageOptions: {
+      globals: {
+        vi: 'readonly',
+        expect: 'readonly',
+        describe: 'readonly',
+        it: 'readonly',
+        test: 'readonly',
+        beforeEach: 'readonly',
+        afterEach: 'readonly',
+        beforeAll: 'readonly',
+        afterAll: 'readonly',
+      },
+    },
+    rules: {
+      // `any` and bare Function are acceptable in test files for mocking
+      // and reaching into internal state. Strict in src/.
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unsafe-function-type': 'off',
+      '@typescript-eslint/no-unused-vars': 'off',
     },
   },
 ];
