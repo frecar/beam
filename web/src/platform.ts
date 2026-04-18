@@ -11,12 +11,10 @@
  */
 
 export const isMac: boolean =
-  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** Browser shortcuts that should NOT be intercepted (let the browser handle them) */
-const BROWSER_SHORTCUTS = new Set([
-  "l", "n", "q", "t", "w", "shift+t",
-]);
+const BROWSER_SHORTCUTS = new Set(['l', 'n', 'q', 't', 'w', 'shift+t']);
 
 export function isBrowserShortcut(e: KeyboardEvent): boolean {
   if (isMac) {

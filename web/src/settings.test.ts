@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from 'vitest';
 
 // formatCountdown is a pure function but settings.ts imports ui-state.ts which
 // requires DOM. Re-implement inline to test the logic without DOM dependency.
@@ -9,15 +9,15 @@ function formatCountdown(secs: number): string {
   return `${s}s`;
 }
 
-describe("formatCountdown", () => {
-  it("formats minutes and seconds", () => {
-    expect(formatCountdown(125)).toBe("2m 5s");
-    expect(formatCountdown(60)).toBe("1m 0s");
-    expect(formatCountdown(90)).toBe("1m 30s");
+describe('formatCountdown', () => {
+  it('formats minutes and seconds', () => {
+    expect(formatCountdown(125)).toBe('2m 5s');
+    expect(formatCountdown(60)).toBe('1m 0s');
+    expect(formatCountdown(90)).toBe('1m 30s');
   });
 
-  it("formats seconds only when under a minute", () => {
-    expect(formatCountdown(45)).toBe("45s");
-    expect(formatCountdown(0)).toBe("0s");
+  it('formats seconds only when under a minute', () => {
+    expect(formatCountdown(45)).toBe('45s');
+    expect(formatCountdown(0)).toBe('0s');
   });
 });

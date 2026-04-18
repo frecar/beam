@@ -1,10 +1,10 @@
-import type { InputEvent } from "./connection";
-import { keyCodeToEvdev } from "./keymap";
-import { isBrowserShortcut, isMac } from "./platform";
-import { roundToEven, isSignificantResize } from "./resize";
+import type { InputEvent } from './connection';
+import { keyCodeToEvdev } from './keymap';
+import { isBrowserShortcut, isMac } from './platform';
+import { isSignificantResize, roundToEven } from './resize';
 
 // Re-export for external use (tests, etc.)
-export { roundToEven, isSignificantResize } from "./resize";
+export { isSignificantResize, roundToEven } from './resize';
 
 /** Evdev code for Left Ctrl, used when remapping Mac Cmd shortcuts */
 const EVDEV_LEFT_CTRL = 29;
@@ -15,17 +15,17 @@ const EVDEV_LEFT_CTRL = 29;
  * (Chrome/Edge) to detect the actual OS keyboard layout.
  */
 const LAYOUT_SIGNATURES: Record<string, Record<string, string>> = {
-  no:  { BracketLeft: "\u00e5", Semicolon: "\u00f8", Quote: "\u00e6" },  // å ø æ
-  se:  { BracketLeft: "\u00e5", Semicolon: "\u00f6", Quote: "\u00e4" },  // å ö ä
-  dk:  { BracketLeft: "\u00e5", Semicolon: "\u00e6", Quote: "\u00f8" },  // å æ ø
-  de:  { BracketLeft: "\u00fc", Semicolon: "\u00f6", Quote: "\u00e4", KeyZ: "y" },
-  fr:  { KeyQ: "a", KeyW: "z", KeyA: "q", Semicolon: "m" },
-  es:  { Quote: "\u00b4", BracketLeft: "`" },
-  fi:  { BracketLeft: "\u00e5", Semicolon: "\u00f6", Quote: "\u00e4", Backslash: "'" },
-  it:  { BracketLeft: "\u00e8", Quote: "\u00e0" },
-  pt:  { BracketLeft: "+", Quote: "\u00ba" },
-  gb:  { BracketLeft: "[", Semicolon: ";", Quote: "'", Backquote: "`" },
-  us:  { BracketLeft: "[", Semicolon: ";", Quote: "'", Backquote: "`" },
+  no: { BracketLeft: '\u00e5', Semicolon: '\u00f8', Quote: '\u00e6' }, // å ø æ
+  se: { BracketLeft: '\u00e5', Semicolon: '\u00f6', Quote: '\u00e4' }, // å ö ä
+  dk: { BracketLeft: '\u00e5', Semicolon: '\u00e6', Quote: '\u00f8' }, // å æ ø
+  de: { BracketLeft: '\u00fc', Semicolon: '\u00f6', Quote: '\u00e4', KeyZ: 'y' },
+  fr: { KeyQ: 'a', KeyW: 'z', KeyA: 'q', Semicolon: 'm' },
+  es: { Quote: '\u00b4', BracketLeft: '`' },
+  fi: { BracketLeft: '\u00e5', Semicolon: '\u00f6', Quote: '\u00e4', Backslash: "'" },
+  it: { BracketLeft: '\u00e8', Quote: '\u00e0' },
+  pt: { BracketLeft: '+', Quote: '\u00ba' },
+  gb: { BracketLeft: '[', Semicolon: ';', Quote: "'", Backquote: '`' },
+  us: { BracketLeft: '[', Semicolon: ';', Quote: "'", Backquote: '`' },
 };
 
 /**
@@ -35,11 +35,11 @@ const LAYOUT_SIGNATURES: Record<string, Record<string, string>> = {
  */
 async function detectKeyboardLayout(): Promise<string> {
   // Try Keyboard Layout Map API (Chrome/Edge only)
-  if ("keyboard" in navigator && typeof (navigator as any).keyboard?.getLayoutMap === "function") {
+  if ('keyboard' in navigator && typeof (navigator as any).keyboard?.getLayoutMap === 'function') {
     try {
       const layoutMap: Map<string, string> = await (navigator as any).keyboard.getLayoutMap();
 
-      let bestLayout = "";
+      let bestLayout = '';
       let bestScore = 0;
 
       for (const [layout, signature] of Object.entries(LAYOUT_SIGNATURES)) {
@@ -60,7 +60,9 @@ async function detectKeyboardLayout(): Promise<string> {
       }
 
       if (bestScore >= 0.6) {
-        console.log(`Keyboard layout detected via Layout Map API: ${bestLayout} (score: ${bestScore})`);
+        console.log(
+          `Keyboard layout detected via Layout Map API: ${bestLayout} (score: ${bestScore})`
+        );
         return bestLayout;
       }
     } catch {
@@ -70,21 +72,45 @@ async function detectKeyboardLayout(): Promise<string> {
 
   // Fallback: check navigator.languages for non-English locale hints
   const LANG_MAP: Record<string, string> = {
-    nb: "no", nn: "no", no: "no", sv: "se", da: "dk", de: "de",
-    fr: "fr", es: "es", fi: "fi", pt: "pt", it: "it", nl: "nl",
-    pl: "pl", ru: "ru", ja: "jp", ko: "kr", zh: "cn", cs: "cz",
-    hu: "hu", ro: "ro", tr: "tr", uk: "ua", el: "gr", he: "il",
-    ar: "ara", th: "th", is: "is",
+    nb: 'no',
+    nn: 'no',
+    no: 'no',
+    sv: 'se',
+    da: 'dk',
+    de: 'de',
+    fr: 'fr',
+    es: 'es',
+    fi: 'fi',
+    pt: 'pt',
+    it: 'it',
+    nl: 'nl',
+    pl: 'pl',
+    ru: 'ru',
+    ja: 'jp',
+    ko: 'kr',
+    zh: 'cn',
+    cs: 'cz',
+    hu: 'hu',
+    ro: 'ro',
+    tr: 'tr',
+    uk: 'ua',
+    el: 'gr',
+    he: 'il',
+    ar: 'ara',
+    th: 'th',
+    is: 'is',
   };
   for (const lang of navigator.languages || []) {
-    const prefix = lang.toLowerCase().split("-")[0];
-    if (prefix !== "en" && LANG_MAP[prefix]) {
-      console.log(`Keyboard layout guessed from navigator.languages: ${LANG_MAP[prefix]} (${lang})`);
+    const prefix = lang.toLowerCase().split('-')[0];
+    if (prefix !== 'en' && LANG_MAP[prefix]) {
+      console.log(
+        `Keyboard layout guessed from navigator.languages: ${LANG_MAP[prefix]} (${lang})`
+      );
       return LANG_MAP[prefix];
     }
   }
 
-  return "";
+  return '';
 }
 
 /**
@@ -148,9 +174,9 @@ export class InputHandler {
 
   constructor(target: HTMLElement, sendInput: (event: InputEvent) => void) {
     this.target = target;
-    this.videoElement = target.querySelector("video");
-    this.canvasElement = target.querySelector("canvas");
-    this.localCursor = document.getElementById("local-cursor");
+    this.videoElement = target.querySelector('video');
+    this.canvasElement = target.querySelector('canvas');
+    this.localCursor = document.getElementById('local-cursor');
     this.sendInput = sendInput;
   }
 
@@ -166,7 +192,7 @@ export class InputHandler {
     this.lastSentW = w;
     this.lastSentH = h;
     if (w > 0 && h > 0) {
-      this.sendInput({ t: "r", w, h });
+      this.sendInput({ t: 'r', w, h });
     }
   }
 
@@ -185,7 +211,7 @@ export class InputHandler {
 
   /** Send keyboard layout to remote agent. Uses saved preference, auto-detection, or fallback. */
   async sendLayout(): Promise<void> {
-    const saved = localStorage.getItem("beam_keyboard_layout");
+    const saved = localStorage.getItem('beam_keyboard_layout');
     let layout: string;
     if (saved) {
       layout = saved;
@@ -193,13 +219,13 @@ export class InputHandler {
     } else {
       layout = await detectKeyboardLayout();
       if (!layout) {
-        layout = "us";
-        console.log("Could not detect keyboard layout, defaulting to US");
+        layout = 'us';
+        console.log('Could not detect keyboard layout, defaulting to US');
       }
     }
-    this.sendInput({ t: "l", layout });
+    this.sendInput({ t: 'l', layout });
     // Update the selector if it exists
-    const select = document.getElementById("layout-select") as HTMLSelectElement | null;
+    const select = document.getElementById('layout-select') as HTMLSelectElement | null;
     if (select && select.value !== layout) {
       select.value = layout;
     }
@@ -207,7 +233,7 @@ export class InputHandler {
 
   /** Send a specific keyboard layout to remote agent */
   sendSpecificLayout(layout: string): void {
-    this.sendInput({ t: "l", layout });
+    this.sendInput({ t: 'l', layout });
   }
 
   /** Set the scroll speed multiplier (applied to wheel deltas before sending) */
@@ -219,18 +245,18 @@ export class InputHandler {
     if (this.active) return;
     this.active = true;
 
-    document.addEventListener("keydown", this.onKeyDown);
-    document.addEventListener("keyup", this.onKeyUp);
-    this.target.addEventListener("mousemove", this.onMouseMove);
-    this.target.addEventListener("mousedown", this.onMouseDown);
-    this.target.addEventListener("mouseup", this.onMouseUp);
-    this.target.addEventListener("wheel", this.onWheel, { passive: false });
-    this.target.addEventListener("contextmenu", this.onContextMenu);
-    document.addEventListener("fullscreenchange", this.onFullscreenChange);
-    document.addEventListener("pointerlockchange", this.onPointerLockChange);
-    this.target.addEventListener("touchstart", this.onTouchStart, { passive: false });
-    this.target.addEventListener("touchmove", this.onTouchMove, { passive: false });
-    this.target.addEventListener("touchend", this.onTouchEnd, { passive: false });
+    document.addEventListener('keydown', this.onKeyDown);
+    document.addEventListener('keyup', this.onKeyUp);
+    this.target.addEventListener('mousemove', this.onMouseMove);
+    this.target.addEventListener('mousedown', this.onMouseDown);
+    this.target.addEventListener('mouseup', this.onMouseUp);
+    this.target.addEventListener('wheel', this.onWheel, { passive: false });
+    this.target.addEventListener('contextmenu', this.onContextMenu);
+    document.addEventListener('fullscreenchange', this.onFullscreenChange);
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
+    this.target.addEventListener('touchstart', this.onTouchStart, { passive: false });
+    this.target.addEventListener('touchmove', this.onTouchMove, { passive: false });
+    this.target.addEventListener('touchend', this.onTouchEnd, { passive: false });
 
     // Watch for container size changes and send resize events (debounced).
     this.resizeObserver = new ResizeObserver((entries) => {
@@ -249,18 +275,18 @@ export class InputHandler {
     if (!this.active) return;
     this.active = false;
 
-    document.removeEventListener("keydown", this.onKeyDown);
-    document.removeEventListener("keyup", this.onKeyUp);
-    this.target.removeEventListener("mousemove", this.onMouseMove);
-    this.target.removeEventListener("mousedown", this.onMouseDown);
-    this.target.removeEventListener("mouseup", this.onMouseUp);
-    this.target.removeEventListener("wheel", this.onWheel);
-    this.target.removeEventListener("contextmenu", this.onContextMenu);
-    document.removeEventListener("fullscreenchange", this.onFullscreenChange);
-    document.removeEventListener("pointerlockchange", this.onPointerLockChange);
-    this.target.removeEventListener("touchstart", this.onTouchStart);
-    this.target.removeEventListener("touchmove", this.onTouchMove);
-    this.target.removeEventListener("touchend", this.onTouchEnd);
+    document.removeEventListener('keydown', this.onKeyDown);
+    document.removeEventListener('keyup', this.onKeyUp);
+    this.target.removeEventListener('mousemove', this.onMouseMove);
+    this.target.removeEventListener('mousedown', this.onMouseDown);
+    this.target.removeEventListener('mouseup', this.onMouseUp);
+    this.target.removeEventListener('wheel', this.onWheel);
+    this.target.removeEventListener('contextmenu', this.onContextMenu);
+    document.removeEventListener('fullscreenchange', this.onFullscreenChange);
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    this.target.removeEventListener('touchstart', this.onTouchStart);
+    this.target.removeEventListener('touchmove', this.onTouchMove);
+    this.target.removeEventListener('touchend', this.onTouchEnd);
     this.cancelLongPress();
 
     // Cancel pending mouse-move coalescing
@@ -272,7 +298,7 @@ export class InputHandler {
     this.pendingRelativeMouseMove = null;
 
     // Hide local cursor
-    this.localCursor?.classList.remove("visible");
+    this.localCursor?.classList.remove('visible');
 
     // Exit pointer lock if active
     if (this.pointerLocked && document.pointerLockElement) {
@@ -308,7 +334,7 @@ export class InputHandler {
 
     // On Mac, suppress Meta (Cmd) key itself - it's remapped to Ctrl for
     // all shortcuts. Sending Meta to remote causes Super+Ctrl combos.
-    if (isMac && (e.code === "MetaLeft" || e.code === "MetaRight")) {
+    if (isMac && (e.code === 'MetaLeft' || e.code === 'MetaRight')) {
       e.preventDefault();
       return;
     }
@@ -324,7 +350,7 @@ export class InputHandler {
       // read clipboardData reliably (navigator.clipboard.readText() often
       // fails on self-signed cert pages). Send Ctrl+V after a short delay
       // to give the agent time to set the X11 clipboard.
-      if (e.key.toLowerCase() === "v") {
+      if (e.key.toLowerCase() === 'v') {
         // Don't preventDefault — let browser generate the paste event
         setTimeout(() => this.sendCtrlCombo(evdev), 50);
         return;
@@ -336,7 +362,7 @@ export class InputHandler {
     }
 
     // Non-Mac Ctrl+V: same approach — let paste event fire for clipboard sync
-    if (!isMac && e.ctrlKey && e.key.toLowerCase() === "v") {
+    if (!isMac && e.ctrlKey && e.key.toLowerCase() === 'v') {
       const evdev = keyCodeToEvdev(e.code);
       if (evdev === undefined) return;
       setTimeout(() => this.sendCtrlCombo(evdev), 50);
@@ -347,7 +373,7 @@ export class InputHandler {
     if (evdev === undefined) return;
 
     e.preventDefault();
-    this.sendInput({ t: "k", c: evdev, d: true });
+    this.sendInput({ t: 'k', c: evdev, d: true });
   }
 
   private handleKeyUp(e: KeyboardEvent): void {
@@ -358,7 +384,7 @@ export class InputHandler {
     if (this.isInputElement(e.target)) return;
 
     // On Mac, suppress Meta key release (never sent to remote)
-    if (isMac && (e.code === "MetaLeft" || e.code === "MetaRight")) {
+    if (isMac && (e.code === 'MetaLeft' || e.code === 'MetaRight')) {
       e.preventDefault();
       return;
     }
@@ -373,19 +399,18 @@ export class InputHandler {
     if (evdev === undefined) return;
 
     e.preventDefault();
-    this.sendInput({ t: "k", c: evdev, d: false });
+    this.sendInput({ t: 'k', c: evdev, d: false });
   }
 
   // --- Keyboard helpers ---
 
   /** Send a complete Ctrl+key press+release sequence */
   private sendCtrlCombo(evdev: number): void {
-    this.sendInput({ t: "k", c: EVDEV_LEFT_CTRL, d: true });
-    this.sendInput({ t: "k", c: evdev, d: true });
-    this.sendInput({ t: "k", c: evdev, d: false });
-    this.sendInput({ t: "k", c: EVDEV_LEFT_CTRL, d: false });
+    this.sendInput({ t: 'k', c: EVDEV_LEFT_CTRL, d: true });
+    this.sendInput({ t: 'k', c: evdev, d: true });
+    this.sendInput({ t: 'k', c: evdev, d: false });
+    this.sendInput({ t: 'k', c: EVDEV_LEFT_CTRL, d: false });
   }
-
 
   // --- Mouse ---
 
@@ -394,14 +419,30 @@ export class InputHandler {
    * accounting for object-fit:contain letterboxing/pillarboxing.
    */
   /** Get the content element (canvas or video) and its intrinsic dimensions */
-  private getContentElement(): { el: HTMLElement; contentWidth: number; contentHeight: number } | null {
+  private getContentElement(): {
+    el: HTMLElement;
+    contentWidth: number;
+    contentHeight: number;
+  } | null {
     // Prefer canvas (WebCodecs path)
     if (this.canvasElement && this.canvasElement.width > 0 && this.canvasElement.height > 0) {
-      return { el: this.canvasElement, contentWidth: this.canvasElement.width, contentHeight: this.canvasElement.height };
+      return {
+        el: this.canvasElement,
+        contentWidth: this.canvasElement.width,
+        contentHeight: this.canvasElement.height,
+      };
     }
     // Fallback to video element
-    if (this.videoElement && this.videoElement.videoWidth > 0 && this.videoElement.videoHeight > 0) {
-      return { el: this.videoElement, contentWidth: this.videoElement.videoWidth, contentHeight: this.videoElement.videoHeight };
+    if (
+      this.videoElement &&
+      this.videoElement.videoWidth > 0 &&
+      this.videoElement.videoHeight > 0
+    ) {
+      return {
+        el: this.videoElement,
+        contentWidth: this.videoElement.videoWidth,
+        contentHeight: this.videoElement.videoHeight,
+      };
     }
     return null;
   }
@@ -471,12 +512,16 @@ export class InputHandler {
     this.animationFrameId = requestAnimationFrame(() => {
       this.animationFrameId = null;
       if (this.pendingMouseMove) {
-        this.sendInput({ t: "m", x: this.pendingMouseMove.x, y: this.pendingMouseMove.y });
+        this.sendInput({ t: 'm', x: this.pendingMouseMove.x, y: this.pendingMouseMove.y });
         this.updateLocalCursor(this.pendingMouseMove.x, this.pendingMouseMove.y);
         this.pendingMouseMove = null;
       }
       if (this.pendingRelativeMouseMove) {
-        this.sendInput({ t: "rm", dx: this.pendingRelativeMouseMove.dx, dy: this.pendingRelativeMouseMove.dy });
+        this.sendInput({
+          t: 'rm',
+          dx: this.pendingRelativeMouseMove.dx,
+          dy: this.pendingRelativeMouseMove.dy,
+        });
         this.pendingRelativeMouseMove = null;
       }
     });
@@ -511,7 +556,7 @@ export class InputHandler {
 
     this.localCursor.style.left = `${left}px`;
     this.localCursor.style.top = `${top}px`;
-    this.localCursor.classList.add("visible");
+    this.localCursor.classList.add('visible');
   }
 
   private handleMouseDown(e: MouseEvent): void {
@@ -519,7 +564,7 @@ export class InputHandler {
     const coords = this.getVideoCoords(e);
     if (coords) {
       // Send coordinates immediately for clicks to ensure accuracy
-      this.sendInput({ t: "m", x: coords.x, y: coords.y });
+      this.sendInput({ t: 'm', x: coords.x, y: coords.y });
       this.pendingMouseMove = null;
     }
 
@@ -531,7 +576,7 @@ export class InputHandler {
     if (e.button === 1) {
       this.sendPrimaryClipboardThenButton(e.button);
     } else {
-      this.sendInput({ t: "b", b: e.button, d: true });
+      this.sendInput({ t: 'b', b: e.button, d: true });
     }
   }
 
@@ -547,19 +592,19 @@ export class InputHandler {
       .readText()
       .then((text) => {
         if (text && text.length <= MAX_CLIPBOARD_BYTES) {
-          this.sendInput({ t: "cp", text });
+          this.sendInput({ t: 'cp', text });
         }
-        this.sendInput({ t: "b", b: button, d: true });
+        this.sendInput({ t: 'b', b: button, d: true });
       })
       .catch(() => {
         // Clipboard read failed — send button press without clipboard sync
-        this.sendInput({ t: "b", b: button, d: true });
+        this.sendInput({ t: 'b', b: button, d: true });
       });
   }
 
   private handleMouseUp(e: MouseEvent): void {
     e.preventDefault();
-    this.sendInput({ t: "b", b: e.button, d: false });
+    this.sendInput({ t: 'b', b: e.button, d: false });
   }
 
   private handleWheel(e: WheelEvent): void {
@@ -579,7 +624,7 @@ export class InputHandler {
     dx *= this.scrollMultiplier;
     dy *= this.scrollMultiplier;
 
-    this.sendInput({ t: "s", dx, dy });
+    this.sendInput({ t: 's', dx, dy });
   }
 
   private handleContextMenu(e: Event): void {
@@ -600,7 +645,7 @@ export class InputHandler {
   private handlePointerLockChange(): void {
     this.pointerLocked = document.pointerLockElement === this.target;
     if (this.pointerLocked && this.localCursor) {
-      this.localCursor.classList.remove("visible");
+      this.localCursor.classList.remove('visible');
     }
   }
 
@@ -620,16 +665,16 @@ export class InputHandler {
       // screen.width/height can differ from the actual fullscreen area
       // (e.g. macOS notch, DPR scaling, rounding).
       const rect = this.target.getBoundingClientRect();
-      let w = roundToEven(rect.width);
-      let h = roundToEven(rect.height);
+      const w = roundToEven(rect.width);
+      const h = roundToEven(rect.height);
 
       // Re-assert cursor visibility after Chrome's fullscreen transition.
       // Chrome's user-agent fullscreen styles can hide the cursor.
       if (document.fullscreenElement) {
-        this.target.style.cursor = "default";
+        this.target.style.cursor = 'default';
         const contentEl = this.canvasElement || this.videoElement;
         if (contentEl) {
-          contentEl.style.cursor = "default";
+          contentEl.style.cursor = 'default';
         }
       }
 
@@ -641,7 +686,7 @@ export class InputHandler {
         const significant = isSignificantResize(this.lastSentW, this.lastSentH, w, h);
         this.lastSentW = w;
         this.lastSentH = h;
-        this.sendInput({ t: "r", w, h });
+        this.sendInput({ t: 'r', w, h });
         if (significant) {
           this.resizeNeededCallback?.();
         }
@@ -661,7 +706,7 @@ export class InputHandler {
       const significant = isSignificantResize(this.lastSentW, this.lastSentH, ew, eh);
       this.lastSentW = ew;
       this.lastSentH = eh;
-      this.sendInput({ t: "r", w: ew, h: eh });
+      this.sendInput({ t: 'r', w: ew, h: eh });
       if (significant) {
         this.resizeNeededCallback?.();
       }
@@ -723,7 +768,7 @@ export class InputHandler {
     const coords = this.getTouchVideoCoords(touch);
     if (coords) {
       // Send coordinates immediately for clicks to ensure accuracy
-      this.sendInput({ t: "m", x: coords.x, y: coords.y });
+      this.sendInput({ t: 'm', x: coords.x, y: coords.y });
       this.pendingMouseMove = null;
     }
 
@@ -736,14 +781,14 @@ export class InputHandler {
       this.longPressTriggered = true;
       // Send right-click (button 2) press + release
       if (coords) {
-        this.sendInput({ t: "m", x: coords.x, y: coords.y });
+        this.sendInput({ t: 'm', x: coords.x, y: coords.y });
       }
-      this.sendInput({ t: "b", b: 2, d: true });
-      this.sendInput({ t: "b", b: 2, d: false });
+      this.sendInput({ t: 'b', b: 2, d: true });
+      this.sendInput({ t: 'b', b: 2, d: false });
     }, InputHandler.LONG_PRESS_MS);
 
     // Send left button down
-    this.sendInput({ t: "b", b: 0, d: true });
+    this.sendInput({ t: 'b', b: 0, d: true });
   }
 
   private handleTouchMove(e: TouchEvent): void {
@@ -776,7 +821,7 @@ export class InputHandler {
 
     // Don't send button up if long press fired (it already sent right-click)
     if (!this.longPressTriggered) {
-      this.sendInput({ t: "b", b: 0, d: false });
+      this.sendInput({ t: 'b', b: 0, d: false });
     }
     this.longPressTriggered = false;
   }
@@ -791,11 +836,6 @@ export class InputHandler {
   private isInputElement(target: EventTarget | null): boolean {
     if (!target || !(target instanceof HTMLElement)) return false;
     const tag = target.tagName;
-    return (
-      tag === "INPUT" ||
-      tag === "TEXTAREA" ||
-      tag === "SELECT" ||
-      target.isContentEditable
-    );
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
   }
 }

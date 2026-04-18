@@ -86,6 +86,12 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      - name: Lint
+        run: npx eslint src
+
+      - name: Format check
+        run: npx prettier --check src
+
       - name: Run tests
         run: npm test
 
