@@ -271,18 +271,17 @@ impl Encoder {
                             "GStreamer pipeline warning"
                         );
                     }
-                    MessageView::StateChanged(state) => {
+                    MessageView::StateChanged(state)
                         if state
                             .src()
                             .map(|s| s.name().as_str() == "pipeline0")
-                            .unwrap_or(false)
-                        {
-                            tracing::debug!(
-                                old = ?state.old(),
-                                new = ?state.current(),
-                                "Pipeline state changed"
-                            );
-                        }
+                            .unwrap_or(false) =>
+                    {
+                        tracing::debug!(
+                            old = ?state.old(),
+                            new = ?state.current(),
+                            "Pipeline state changed"
+                        );
                     }
                     _ => {}
                 }

@@ -46,17 +46,13 @@ fn parse_args() -> (PathBuf, Option<u16>) {
                 println!("    -h, --help             Print this help and exit");
                 std::process::exit(0);
             }
-            "--config" | "-c" => {
-                if i + 1 < args.len() {
-                    config_path = PathBuf::from(&args[i + 1]);
-                    i += 1;
-                }
+            "--config" | "-c" if i + 1 < args.len() => {
+                config_path = PathBuf::from(&args[i + 1]);
+                i += 1;
             }
-            "--port" | "-p" => {
-                if i + 1 < args.len() {
-                    port_override = args[i + 1].parse().ok();
-                    i += 1;
-                }
+            "--port" | "-p" if i + 1 < args.len() => {
+                port_override = args[i + 1].parse().ok();
+                i += 1;
             }
             _ => {}
         }
@@ -402,7 +398,7 @@ fn cleanup_old_agent_logs(max_age_secs: u64, max_count: usize) {
         .collect();
 
     // Sort newest first
-    logs.sort_by(|a, b| b.1.cmp(&a.1));
+    logs.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (i, (path, mtime)) in logs.iter().enumerate() {
         let age = now.duration_since(*mtime).unwrap_or_default().as_secs();
