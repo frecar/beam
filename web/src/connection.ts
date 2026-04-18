@@ -283,16 +283,19 @@ export class BeamConnection {
 
   /** Handle incoming JSON text messages (signaling + agent messages) */
   private handleTextMessage(data: string): void {
-    let msg: any;
+    let parsed: unknown;
     try {
-      msg = JSON.parse(data);
+      parsed = JSON.parse(data);
     } catch {
       console.warn('Failed to parse text message:', data);
       return;
     }
 
+    if (typeof parsed !== 'object' || parsed === null) return;
+    const msg = parsed as Record<string, unknown>;
+
     // Server signaling messages
-    if (msg.type === 'error') {
+    if (msg['type'] === 'error') {
       const serverMsg = msg as ServerMessage & { type: 'error' };
       if (serverMsg.message === 'replaced') {
         console.log('Session taken over by another tab');
@@ -314,7 +317,7 @@ export class BeamConnection {
 
     // Agent-to-browser messages (clipboard, cursor, file download events)
     // These have a "t" field matching the InputEvent discriminator
-    if (msg.t) {
+    if (msg['t']) {
       this.agentMessageCallback?.(msg as InputEvent);
     }
   }

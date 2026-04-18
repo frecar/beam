@@ -33,11 +33,18 @@ const LAYOUT_SIGNATURES: Record<string, Record<string, string>> = {
  * Probes physical key mappings to identify the layout with high confidence.
  * Returns the XKB layout name or empty string if detection fails.
  */
+// Chrome/Edge experimental Keyboard API — not in TS DOM lib yet.
+// https://developer.mozilla.org/en-US/docs/Web/API/Keyboard
+interface NavigatorWithKeyboard extends Navigator {
+  keyboard?: { getLayoutMap?: () => Promise<Map<string, string>> };
+}
+
 async function detectKeyboardLayout(): Promise<string> {
   // Try Keyboard Layout Map API (Chrome/Edge only)
-  if ('keyboard' in navigator && typeof (navigator as any).keyboard?.getLayoutMap === 'function') {
+  const nav = navigator as NavigatorWithKeyboard;
+  if (typeof nav.keyboard?.getLayoutMap === 'function') {
     try {
-      const layoutMap: Map<string, string> = await (navigator as any).keyboard.getLayoutMap();
+      const layoutMap: Map<string, string> = await nav.keyboard.getLayoutMap();
 
       let bestLayout = '';
       let bestScore = 0;
