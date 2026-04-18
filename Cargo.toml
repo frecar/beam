@@ -44,9 +44,9 @@ jsonwebtoken = "9"
 pam = "0.8"
 
 # GStreamer
-gstreamer = "0.24"
-gstreamer-app = { version = "0.24", features = ["v1_24"] }
-gstreamer-video = "0.24"
+gstreamer = "0.25"
+gstreamer-app = { version = "0.25", features = ["v1_24"] }
+gstreamer-video = "0.25"
 
 # X11
 x11rb = { version = "0.13", features = ["shm", "randr", "xfixes", "xtest", "allow-unsafe-code"] }
