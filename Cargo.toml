@@ -26,7 +26,7 @@ beam-protocol = { path = "crates/protocol" }
 
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
-axum-extra = { version = "0.10", features = ["typed-header"] }
+axum-extra = { version = "0.12", features = ["typed-header"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors", "trace", "limit", "request-id", "uuid"] }
 
