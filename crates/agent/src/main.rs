@@ -104,10 +104,10 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
             | InputEvent::MouseMove { .. }
             | InputEvent::RelativeMouseMove { .. }
             | InputEvent::Button { .. }
-            | InputEvent::Scroll { .. } => {
-                if tab_backgrounded.swap(false, Ordering::Relaxed) {
-                    debug!("Input received while backgrounded, clearing flag");
-                }
+            | InputEvent::Scroll { .. }
+                if tab_backgrounded.swap(false, Ordering::Relaxed) =>
+            {
+                debug!("Input received while backgrounded, clearing flag");
             }
             _ => {}
         }
