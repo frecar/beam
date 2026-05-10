@@ -1,0 +1,80 @@
+# Cursor IDE Rules — Beam
+
+Authoritative project context for Cursor (and similar AI-assisted editors).
+
+## Project shape
+
+Beam is a remote-desktop application:
+
+- `crates/server/` — Rust HTTPS server: auth, session lifecycle, signaling relay, binary frame relay
+- `crates/agent/` — Rust desktop-capture agent: capture, encode, WebSocket streaming, input injection
+- `crates/protocol/` — Rust shared types: message schemas, binary frame header, config
+- `web/` — TypeScript/Vite frontend client
+- `packaging/`, `systemd/` — Debian packaging + service unit
+- `scripts/` — install / setup helpers
+
+## Authoritative docs
+
+When in doubt about architecture, security decisions, build commands, or
+release process: read `CLAUDE.md` first. It's the project's living spec.
+`CONTRIBUTING.md` covers the dev-onboarding flow.
+
+## Code style
+
+### Rust
+
+- `cargo fmt` before committing — non-negotiable
+- `cargo clippy --workspace -- -D warnings` must pass
+- Errors: `anyhow::Result` in binary crates, `thiserror` in libraries
+- Logging: `tracing` only, never `println!`
+- Document public APIs with `///`
+- Avoid `unwrap()` / `expect()` outside of `main()` entrypoints; use `?` with proper error context
+
+### TypeScript
+
+- Strict mode; **no `any` types** (use `unknown` + narrowing instead)
+- Modern ES2022+ features
+- Prefer composition over inheritance
+
+## Security-conscious patterns (settled decisions, see CLAUDE.md)
+
+- **Constant-time equality**: when comparing tokens or HMACs, use the helper that fails on length mismatch with `1u8` (not `XOR` on lengths cast to `u8` — that truncates to 0 for sufficiently different lengths and bypasses the length check). Don't reintroduce the truncation bug.
+- **Rate limiter**: split read-only `is_allowed()` from write `record_failure()`. Dual limiters (username 5/60s + IP 20/60s). On success: clear *username* counter only, never the IP counter. Don't re-debate without a clear reason.
+- **IPv6 normalization**: rate-limit by /64 prefix, not full address — prevents trivial rotation bypass within a single allocation.
+- **Admin authorization**: config-based `admin_users` list in `beam.toml`. Empty list disables the admin panel (returns 403). No JWT role claims. No Linux group syscall checks.
+- **Admin error messages**: generic "You do not have permission…" — never leak config file names, format hints, or key names to authenticated non-admin users.
+- **`beam.toml` permissions**: 0640. Contains `jwt_secret`; world-readable would be a credential leak.
+- **TLS cert**: self-signed cert files at `/var/lib/beam/`, key file mode 0600. mtime-based age check (>365d → regenerate). Don't add x509 parsing for self-signed certs.
+
+## Testing
+
+- `cargo test --workspace` for Rust
+- `cd web && npx tsc --noEmit` for TypeScript type-check
+- Tests live alongside the code (`#[cfg(test)] mod tests` for Rust; `web/src/**/*.test.ts` for TS)
+- New security-relevant logic gets a test. New protocol-format logic gets a test that locks in the wire format.
+
+## Versioning
+
+Three files must stay in sync on every version bump:
+
+1. `Cargo.toml` `[workspace.package]` version (source of truth)
+2. `web/package.json` version (must match exactly)
+3. `Cargo.lock` (auto-updated by `cargo` commands; no manual step)
+
+Use `make bump-version VERSION=X.Y.Z` — it updates all three. `make version-check` MUST pass before committing.
+
+`make release VERSION=X.Y.Z` runs full CI, tags, and pushes — never tag manually.
+
+## Git workflow
+
+- Conventional commits: `feat:`, `fix:`, `refactor:`, `chore:`, `docs:`, `test:`, `ci:`, `perf:`, `style:`, `build:`, `revert:`, `deps:`
+- `release:` is reserved for the version-bump commit
+- Pre-push hook runs fast checks (`make pre-push` — fmt + tsc). The full `make ci` runs in GitHub Actions on every PR.
+- Run `make install-hooks` after cloning to install the pre-push hook.
+
+## What NOT to do
+
+- Don't run cargo's full build/test in pre-push hooks — that requires libclang/pkg-config/gstreamer dev headers and blocks docs-only contributions.
+- Don't tag releases manually. Use `make release VERSION=X.Y.Z`.
+- Don't deploy to production by SSHing into hosts and building from source. Hosts consume `.deb` packages via APT; building locally on a host causes path mismatches.
+- Don't blindly re-enable systemd hardening that was deliberately relaxed (`PrivateTmp`, `ProtectSystem=strict`, `RestrictNamespaces`) — see CLAUDE.md "systemd Hardening" section for why.

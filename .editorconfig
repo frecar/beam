@@ -1,0 +1,24 @@
+# EditorConfig — https://editorconfig.org
+#
+# Tells editors and IDEs to use consistent indentation, charset, and
+# line endings across the project. Most editors support this natively;
+# some need a plugin (e.g. VS Code: "EditorConfig for VS Code").
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{js,jsx,ts,tsx,json,html,css,yaml,yml}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false  # markdown uses trailing spaces for line breaks
+
+[Makefile]
+indent_style = tab
