@@ -12,7 +12,7 @@
 # - Minor (0.x.0): breaking config/protocol changes requiring simultaneous update
 
 .PHONY: build build-release build-web build-rust \
-        dev run test lint fmt check ci version-check bump-version \
+        dev run test lint fmt check ci pre-push install-hooks version-check bump-version \
         install uninstall deploy clean setup doctor help
 
 CARGO := cargo
@@ -32,7 +32,9 @@ help:
 	@echo "  make lint           Run clippy + TypeScript type check"
 	@echo "  make fmt            Format all Rust code"
 	@echo "  make check          Full pre-commit check (fmt + lint + test)"
+	@echo "  make pre-push       Fast pre-push checks (fmt + type-check, no link)"
 	@echo "  make ci             Run exact CI checks (verify before pushing)"
+	@echo "  make install-hooks  Install git pre-push hook calling 'make pre-push'"
 	@echo ""
 	@echo "Deployment:"
 	@echo "  sudo make install   Build and install to system"
@@ -111,6 +113,21 @@ ci:
 	cd web && npx tsc --noEmit && $(NPM) test && $(NPM) run build
 	@echo ""
 	@echo "All CI checks passed."
+
+# Fast pre-push: fmt + type-check only. No clippy/test/web-build because
+# those need libclang+pkg-config+gstreamer-dev installed (linker step).
+# GitHub Actions runs the full `make ci` on every PR — that's the
+# canonical correctness gate. This target keeps the dev loop quick and
+# unblocks contributors who haven't installed system dev headers.
+pre-push:
+	@echo "Running fast pre-push checks (fmt + type-check only)..."
+	$(CARGO) fmt --all -- --check
+	cd web && npx tsc --noEmit
+	@echo ""
+	@echo "Pre-push checks passed. CI will run the full clippy+test+build suite."
+
+install-hooks:
+	@bash scripts/install-hooks.sh
 
 version-check:
 	@CARGO_VER=$$(grep -A5 '^\[workspace\.package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)"/\1/'); \

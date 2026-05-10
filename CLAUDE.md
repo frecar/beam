@@ -17,7 +17,9 @@
 - Run Rust clippy: `cargo clippy --workspace -- -D warnings`
 - Format Rust: `make fmt`
 - Full pre-commit check: `make check`
-- CI check: `make ci`
+- CI check: `make ci` (mirrors GitHub Actions; needs libclang+pkg-config+gstreamer-dev)
+- Fast pre-push: `make pre-push` (fmt + tsc only; no link, no system deps)
+- Install pre-push hook: `make install-hooks`
 
 ## Deployment
 
