@@ -59,6 +59,49 @@ cargo test -p beam-agent
 cd web && npx tsc --noEmit
 ```
 
+## Versioning & Release
+
+Beam follows [semver](https://semver.org/). Three files must stay in sync on
+every version bump:
+
+1. `Cargo.toml` — `[workspace.package]` version (source of truth)
+2. `web/package.json` — must match exactly
+3. `Cargo.lock` — updated automatically by `cargo` commands
+
+Use the helpers:
+
+```bash
+make bump-version VERSION=X.Y.Z   # updates all three files in sync
+make version-check                # asserts they match (also runs in CI)
+make release VERSION=X.Y.Z        # full CI + tag + push (triggers .deb build via Actions)
+```
+
+Never tag manually — always `make release`. The release workflow refuses to
+tag if `make version-check` fails or any CI step doesn't pass.
+
+For the full release pipeline (CI → APT publish → deploy), see `CLAUDE.md`.
+
+## Commit message conventions
+
+Conventional commits:
+
+- `feat:` — new feature
+- `fix:` — bug fix
+- `refactor:` — code change that neither adds a feature nor fixes a bug
+- `chore:` — tooling, dev-experience, hygiene
+- `docs:` — documentation only
+- `test:` — adding/updating tests
+- `ci:` — GitHub Actions / build pipeline
+- `perf:` — performance improvement
+- `style:` — formatting, whitespace
+- `build:` — build system / dependency changes
+- `revert:` — revert a prior commit
+- `deps:` — dependency bumps
+- `release:` — reserved for the version-bump commit produced by `make bump-version`
+
+The pre-commit hook in `.pre-commit-config.yaml` rejects commits that
+don't match one of these prefixes.
+
 ## Architecture Guidelines
 
 - **Server** handles authentication, session lifecycle, and signaling relay
