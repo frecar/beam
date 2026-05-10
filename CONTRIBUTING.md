@@ -10,6 +10,9 @@ cd beam
 # Install development dependencies
 ./scripts/dev-setup.sh
 
+# Install the git pre-push hook (fast checks only)
+make install-hooks
+
 # Build and run (builds web + Rust, starts server in debug mode)
 make dev
 
@@ -17,6 +20,17 @@ make dev
 # cargo build --workspace
 # cd web && npm install && npm run build && cd ..
 ```
+
+## Git hooks
+
+`make install-hooks` installs a pre-push hook that runs `make pre-push` —
+`cargo fmt --check` plus `tsc --noEmit`. These are *cheap* checks that don't
+need libclang/pkg-config/gstreamer dev headers, so docs-only PRs (and
+contributors who haven't installed system dev deps) are not blocked.
+
+GitHub Actions runs the full `make ci` (clippy + test + web build) on every
+PR — that's the canonical correctness gate. The local pre-push hook exists
+to catch obvious style/type slips before they bounce off CI, not to mirror CI.
 
 ## Code Style
 
