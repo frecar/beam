@@ -1,9 +1,10 @@
 # Test config for NVIDIA GPU display support
-# Run from l40s: cd ~/code/beam && ./target/release/beam-server --config config/beam-test-nvidia.toml
+# Run from a beam checkout: ./target/release/beam-server --config config/beam-test-nvidia.toml
+# (adjust web_root if your checkout isn't at the default relative path)
 
 [server]
 port = 9444
-web_root = "/home/frecar/code/beam/web/dist"
+web_root = "./web/dist"
 
 [video]
 bitrate = 50000

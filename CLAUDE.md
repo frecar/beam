@@ -28,7 +28,9 @@
 **Production deployment** (the ONLY correct way):
 1. `make release VERSION=X.Y.Z` — runs CI, tags, pushes
 2. Wait for GitHub Actions to build `.deb` and publish to APT repo
-3. Deploy via Ansible: `cd /home/frecar/code/asgard && ansible-playbook -i inventory playbooks/beam.yml`
+3. Hosts pick up the new package via their normal APT update cycle (e.g.
+   an Ansible playbook calling `apt update && apt install beam=X.Y.Z` from
+   the operator's infra-management repo — out of scope for this project)
 4. Verify: check service health on each host
 
 **Development only** (local testing on your own machine):
@@ -88,9 +90,9 @@ make release VERSION=X.Y.Z
 # 5. Monitor GitHub Actions: https://github.com/frecar/beam/actions
 #    Wait for the release workflow to complete (builds .deb, publishes to APT)
 
-# 6. Deploy to production via Ansible
-cd /home/frecar/code/asgard
-ansible-playbook -i inventory playbooks/beam.yml
+# 6. Deploy to production via the operator's infra-management tooling
+#    (out of scope for this repo — typically an Ansible play that
+#    runs `apt update && apt install beam=X.Y.Z` on each target host)
 
 # 7. Verify deployment on each host (service health, logs, version)
 ```

@@ -21,7 +21,7 @@ pub struct ServerConfig {
     /// HTTPS port
     #[serde(default = "default_port")]
     pub port: u16,
-    /// Public hostname (e.g., "l40s.home.carlsen.io"). When set with a custom
+    /// Public hostname (e.g., "host.example.com"). When set with a custom
     /// TLS cert, the agent connects via wss://hostname:port instead of
     /// wss://127.0.0.1:port, avoiding TLS hostname mismatch errors.
     pub hostname: Option<String>,
