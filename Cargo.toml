@@ -28,12 +28,12 @@ beam-protocol = { path = "crates/protocol" }
 axum = { version = "0.8.9", features = ["ws"] }
 axum-extra = { version = "0.12.6", features = ["typed-header"] }
 tower = "0.5.3"
-tower-http = { version = "0.6.8", features = ["fs", "cors", "trace", "limit", "request-id", "uuid"] }
+tower-http = { version = "0.6.10", features = ["fs", "cors", "trace", "limit", "request-id", "uuid"] }
 
 # TLS
-rustls = { version = "0.23.38", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2"
-rcgen = "0.14.7"
+rcgen = "0.14.8"
 tokio-rustls = "0.26.4"
 
 # HTTP internals
@@ -44,7 +44,7 @@ jsonwebtoken = "9"
 pam = "0.8"
 
 # GStreamer
-gstreamer = "0.25.1"
+gstreamer = "0.25.2"
 gstreamer-app = { version = "0.25", features = ["v1_24"] }
 gstreamer-video = "0.25"
 
@@ -52,7 +52,7 @@ gstreamer-video = "0.25"
 x11rb = { version = "0.13.2", features = ["shm", "randr", "xfixes", "xtest", "allow-unsafe-code"] }
 
 # Input
-nix = { version = "0.31.2", features = ["ioctl", "fs", "process", "signal", "user"] }
+nix = { version = "0.31.3", features = ["ioctl", "fs", "process", "signal", "user"] }
 
 # Audio
 libpulse-binding = "2"
