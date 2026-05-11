@@ -203,8 +203,9 @@ sudo make uninstall
 ### Development Setup
 
 ```bash
-./scripts/dev-setup.sh
-make doctor
+./scripts/dev-setup.sh    # install Rust, Node, system deps
+make install-hooks        # install the pre-push hook (fast fmt+tsc checks)
+make doctor               # verify system readiness
 ```
 
 ### Build and Run
@@ -250,6 +251,12 @@ Browser (TypeScript)         Server (Rust/Axum)           Agent (Rust, per-user)
 
 The server handles authentication and signaling. When a user logs in, it spawns a per-user agent process that creates an isolated virtual display, captures the screen via XCB shared memory, encodes with GStreamer (NVENC/VA-API/x264), and streams to the browser over a WebSocket connection. The browser decodes frames using the WebCodecs API with hardware acceleration.
 
+### Commit Conventions
+
+`feat:` / `fix:` / `refactor:` / `chore:` / `docs:` / `test:` / `ci:` / `perf:` / `style:` / `build:` / `revert:` / `deps:` / `release:` (reserved for version bumps)
+
+The pre-commit hook rejects commits that don't match these prefixes.
+
 ### Project Structure
 
 ```
@@ -263,6 +270,14 @@ beam/
   scripts/      # Install/uninstall/dev-setup scripts
   systemd/      # Service file
 ```
+
+## Security
+
+**Reporting**: Do not open public issues for security vulnerabilities. Use [GitHub private vulnerability reporting](https://github.com/frecar/beam/security/advisories/new). We aim to acknowledge within 48 hours.
+
+**Security model**: PAM authentication, per-user isolated virtual displays, all traffic over a single TLS WebSocket (no P2P), JWT session tokens (24h), rate limiting (5 failures/60s per username + 20/60s per /64 prefix). See `CLAUDE.md` Security Decisions for settled implementation choices.
+
+This project has not undergone a formal security audit.
 
 ## License
 
