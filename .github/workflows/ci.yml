@@ -99,12 +99,8 @@ jobs:
         run: npm run build
 
   coverage:
-    name: Coverage (report-only)
+    name: Coverage
     runs-on: ubuntu-24.04
-    # First pass: no --fail-under-lines threshold. This job exists to
-    # establish a baseline so a follow-up PR can ratchet the floor at
-    # floor(actual - 1). Does not block merges.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -146,7 +142,13 @@ jobs:
           # that exercise GStreamer pipelines, which can abort.
           LLVM_PROFILE_FILE: beam-%p-%m.profraw
         run: |
+          # Ratchet protocol: --fail-under-lines locks current
+          # coverage as a floor. Baseline measured in #46 was 55.40%
+          # — set to 54 = floor(55.40 - 1). Every subsequent PR that
+          # raises actual coverage may bump this; never lower.
           # --ignore-filename-regex 'tests?/' excludes the test
-          # harness modules from the baseline so the ratchet later
-          # floors against real source coverage only.
-          cargo llvm-cov --workspace --ignore-filename-regex 'tests?/'
+          # harness modules from the floor so it tracks real source
+          # coverage only.
+          cargo llvm-cov --workspace \
+            --ignore-filename-regex 'tests?/' \
+            --fail-under-lines 54
