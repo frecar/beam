@@ -92,8 +92,11 @@ jobs:
       - name: Format check
         run: npx prettier --check src
 
-      - name: Run tests
-        run: npm test
+      # Coverage subsumes the bare test run — vitest --coverage
+      # executes every test and additionally gates on the
+      # `lines` threshold in vite.config.ts (#45 ratchet protocol).
+      - name: Run tests with coverage
+        run: npm run test:coverage
 
       - name: Build
         run: npm run build
