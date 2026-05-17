@@ -16,6 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Cluster LLM policy lint
+        run: python3 scripts/check_no_external_llm.py
+
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
