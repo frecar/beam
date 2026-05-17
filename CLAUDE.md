@@ -26,6 +26,10 @@
 - Fast pre-push: `make pre-push` (fmt + tsc only; no link, no system deps)
 - Install pre-push hook: `make install-hooks`
 
+## LLM Policy
+- Route model-assisted features through `llm.carlsen.io`.
+- Do not add Claude/OpenAI/Anthropic external API endpoints or runtime fallbacks. `scripts/check_no_external_llm.py` enforces this in pre-commit and CI (asgard#833).
+
 ## Deployment
 
 **CRITICAL: NEVER deploy by SSHing into hosts and running manual builds.** Hosts consume .deb packages via APT — they should not have build toolchains. Manual deploys cause path mismatches and wasted debugging time.

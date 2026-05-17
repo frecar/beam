@@ -18,7 +18,14 @@ repos:
     hooks:
       - id: conventional-commit
         name: Check conventional commit format
-        entry: bash -c 'MSG=$(head -1 "$1"); if echo "$MSG" | grep -qE "^release:"; then exit 0; fi; if echo "$MSG" | grep -qE "^Merge "; then exit 0; fi; if ! echo "$MSG" | grep -qE "^(feat|fix|refactor|chore|docs|test|ci|perf|style|build|revert|deps)(\(.+\))?(!)?:"; then echo "Commit message must use conventional commit format"; echo "  Valid: feat:, fix:, refactor:, chore:, docs:, test:, ci:, perf:, build:, revert:, deps:"; echo "  Got: $MSG"; exit 1; fi' --
+        entry: >-
+          bash -c 'MSG=$(head -1 "$1");
+          if echo "$MSG" | grep -qE "^release:"; then exit 0; fi;
+          if echo "$MSG" | grep -qE "^Merge "; then exit 0; fi;
+          if ! echo "$MSG" | grep -qE "^(feat|fix|refactor|chore|docs|test|ci|perf|style|build|revert|deps)(\(.+\))?(!)?:"; then
+          echo "Commit message must use conventional commit format";
+          echo "  Valid: feat:, fix:, refactor:, chore:, docs:, test:, ci:, perf:, build:, revert:, deps:";
+          echo "  Got: $MSG"; exit 1; fi' --
         language: system
         always_run: true
         stages: [commit-msg]
@@ -29,3 +36,10 @@ repos:
         language: system
         always_run: true
         stages: [commit-msg]
+
+      - id: no-external-llm
+        name: "Cluster LLM policy lint"  # llm-policy: ignore
+        entry: python3 scripts/check_no_external_llm.py
+        language: system
+        pass_filenames: true
+        stages: [pre-commit]
