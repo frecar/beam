@@ -97,3 +97,58 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            pkg-config \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+            libpulse-dev libopus-dev \
+            libpam0g-dev libclang-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          # Separate cache key from `check` — RUSTFLAGS=-C
+          # instrument-coverage invalidates incremental builds, so
+          # sharing the cache would cause full rebuilds on both sides.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-coverage-
+
+      - name: Run coverage
+        env:
+          # Per-process .profraw filenames keep test crashes from
+          # silently dropping coverage data — important for tests
+          # that exercise GStreamer pipelines, which can abort.
+          LLVM_PROFILE_FILE: beam-%p-%m.profraw
+        run: |
+          # Ratchet protocol: --fail-under-lines locks current
+          # coverage as a floor. Baseline measured in #46 was 55.40%
+          # — set to 54 = floor(55.40 - 1). Every subsequent PR that
+          # raises actual coverage may bump this; never lower.
+          # --ignore-filename-regex 'tests?/' excludes the test
+          # harness modules from the floor so it tracks real source
+          # coverage only.
+          cargo llvm-cov --workspace \
+            --ignore-filename-regex 'tests?/' \
+            --fail-under-lines 54
