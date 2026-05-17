@@ -2,6 +2,13 @@ name: Dependabot Auto-Merge
 
 on:
   pull_request:
+  # Hourly sweep to rebase auto-merge-enabled PRs that fell behind main.
+  # Dependabot doesn't refire pull_request when main moves, so an
+  # `auto-merge enabled + behind main` PR stalls indefinitely without
+  # this. Discovered after 8 PRs sat 6 days (sentinel#470).
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -9,8 +16,10 @@ permissions:
 
 jobs:
   auto-merge:
+    # Runs on PR-event (the original path). Skip during scheduled
+    # sweeps — the rebase-stale job below handles that.
+    if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
@@ -31,3 +40,25 @@ jobs:
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  rebase-stale:
+    # Hourly sweep: find auto-merge-enabled dependabot PRs that are
+    # behind main and trigger a branch update. Updating the branch
+    # retriggers CI; once green, GitHub's auto-merge fires the squash.
+    # `pull_request_target` would be an alternative but introduces
+    # security pitfalls (untrusted refs running with write perms);
+    # the explicit cron sweep + GH API is cleaner.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebase behind-main dependabot PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --author "app/dependabot" --state open \
+            --json number,autoMergeRequest,mergeStateStatus \
+            | jq -r '.[] | select(.autoMergeRequest != null and .mergeStateStatus == "BEHIND") | .number' \
+            | while read pr; do
+                echo "Rebasing behind-main PR #$pr"
+                gh pr update-branch "$pr" || echo "  (update-branch failed for #$pr, will retry next sweep)"
+              done
