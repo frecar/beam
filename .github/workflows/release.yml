@@ -69,7 +69,7 @@ jobs:
         run: cd web && npm ci && npm run build
 
       - name: Upload web dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: web-dist
           path: web/dist/
@@ -117,7 +117,7 @@ jobs:
         run: cargo build --release --workspace
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.arch }}
           path: |
@@ -173,7 +173,7 @@ jobs:
             --target beam_${VERSION}_${{ matrix.arch }}.deb
 
       - name: Upload .deb
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}
           path: beam_*.deb
