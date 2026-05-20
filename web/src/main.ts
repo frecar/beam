@@ -5,6 +5,7 @@ import { FileDownloader, FileUploader } from './filetransfer';
 import { ICON_CAPTURE, ICON_MUTE, ICON_UNMUTE } from './icons';
 import { InputHandler } from './input';
 import { clearRateLimitTimer, performLogin } from './login';
+import { initMonitoring } from './monitoring';
 import { clearSession, loadSession, sendReleaseBeacon, TokenManager } from './session';
 import {
   AUDIO_MUTED_KEY,
@@ -79,6 +80,8 @@ import {
   usernameInput,
 } from './ui-state';
 import { WebCodecsRenderer } from './webcodecs-renderer';
+
+initMonitoring();
 
 // --- Token manager (singleton) ---
 const tokenManager = new TokenManager();
