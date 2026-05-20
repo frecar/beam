@@ -254,6 +254,10 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
             InputEvent::Quality { .. } => {
                 // Quality selector removed — bitrate/framerate set by config
             }
+            InputEvent::ClientMetricsPing { .. } | InputEvent::ClientMetrics(_) => {
+                // Browser metrics are handled by the server and should not be
+                // forwarded to the agent. Ignore defensively if one arrives.
+            }
             InputEvent::VisibilityState { visible } => {
                 info!(visible, "Browser tab visibility changed");
                 tab_backgrounded.store(!visible, Ordering::Relaxed);

@@ -11,6 +11,7 @@ export interface LoginResponse {
   token: string;
   release_token?: string;
   idle_timeout?: number;
+  client_metrics_enabled?: boolean;
 }
 
 /** Stored session with expiry timestamp */

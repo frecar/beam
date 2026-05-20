@@ -1,4 +1,5 @@
 mod auth;
+mod client_metrics;
 mod config;
 mod session;
 mod signaling;
@@ -192,6 +193,7 @@ async fn main() -> Result<()> {
         metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
         metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
         metrics_agent_restarts: std::sync::atomic::AtomicU64::new(0),
+        client_metrics: Arc::new(client_metrics::ClientMetricsStore::default()),
     });
 
     // Restore sessions from previous graceful shutdown
@@ -286,6 +288,7 @@ async fn main() -> Result<()> {
                         tracing::error!(%session_id, "Failed to reap session: {e}");
                     }
                     signaling::remove_channel(&reaper_state.channels, session_id).await;
+                    reaper_state.client_metrics.remove(session_id);
                 }
             }
         });
@@ -366,6 +369,7 @@ async fn main() -> Result<()> {
                 .destroy_session(session.id)
                 .await;
             signaling::remove_channel(&shutdown_state.channels, session.id).await;
+            shutdown_state.client_metrics.remove(session.id);
         }
     }
 

@@ -7,6 +7,7 @@ port = 8444
 web_root = "/usr/share/beam/web/dist"
 # tls_cert = "/etc/beam/cert.pem"    # Auto-generated self-signed if absent
 # tls_key = "/etc/beam/key.pem"      # Auto-generated self-signed if absent
+# client_metrics_enabled = false     # Opt-in browser connection-quality metrics
 
 [video]
 bitrate = 5000      # kbps (initial target)

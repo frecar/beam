@@ -8,6 +8,8 @@ use tokio::sync::{Notify, RwLock, broadcast};
 use tokio::time::{Duration, Instant, interval};
 use uuid::Uuid;
 
+use crate::client_metrics::ClientMetricsStore;
+
 /// Interval between WebSocket ping frames.
 const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -84,7 +86,13 @@ pub async fn remove_channel(registry: &ChannelRegistry, session_id: Uuid) {
 ///
 /// Only one browser per session at a time. Connecting a new browser
 /// kicks the previous one with close code 4001 ("replaced").
-pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry: ChannelRegistry) {
+pub async fn handle_browser_ws(
+    mut socket: WebSocket,
+    session_id: Uuid,
+    registry: ChannelRegistry,
+    client_metrics_enabled: bool,
+    client_metrics: Arc<ClientMetricsStore>,
+) {
     tracing::info!(%session_id, "Browser WebSocket upgrade request");
     let channel = get_or_create_channel(&registry, session_id).await;
 
@@ -192,9 +200,26 @@ pub async fn handle_browser_ws(mut socket: WebSocket, session_id: Uuid, registry
                         // Try parsing as InputEvent first (most common)
                         match serde_json::from_str::<InputEvent>(&text) {
                             Ok(event) => {
-                                let cmd = AgentCommand::Input(event);
-                                if let Err(e) = channel.to_agent.send(cmd) {
-                                    tracing::warn!(%session_id, "No agent listening for input: {e}");
+                                match event {
+                                    InputEvent::ClientMetricsPing { id, sent_ms } => {
+                                        if client_metrics_enabled {
+                                            let msg = SignalingMessage::MetricsPong { id, sent_ms };
+                                            if let Ok(json) = serde_json::to_string(&msg) {
+                                                let _ = socket.send(Message::Text(json.into())).await;
+                                            }
+                                        }
+                                    }
+                                    InputEvent::ClientMetrics(report) => {
+                                        if client_metrics_enabled {
+                                            client_metrics.update(session_id, report);
+                                        }
+                                    }
+                                    event => {
+                                        let cmd = AgentCommand::Input(event);
+                                        if let Err(e) = channel.to_agent.send(cmd) {
+                                            tracing::warn!(%session_id, "No agent listening for input: {e}");
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {

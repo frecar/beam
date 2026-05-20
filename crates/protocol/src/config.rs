@@ -37,6 +37,10 @@ pub struct ServerConfig {
     /// Require JWT auth for the /metrics endpoint (default: true)
     #[serde(default = "default_true")]
     pub metrics_require_auth: bool,
+    /// Ask browser clients to report anonymous connection-quality metrics.
+    /// Disabled by default so deployments opt in intentionally.
+    #[serde(default)]
+    pub client_metrics_enabled: bool,
     /// Users allowed to access /api/admin/* endpoints (empty = admin panel disabled)
     #[serde(default)]
     pub admin_users: Vec<String>,
@@ -109,6 +113,7 @@ impl Default for ServerConfig {
             jwt_secret: None,
             web_root: default_web_root(),
             metrics_require_auth: true,
+            client_metrics_enabled: false,
             admin_users: Vec::new(),
         }
     }
@@ -370,6 +375,7 @@ mod tests {
         assert!(config.server.jwt_secret.is_none());
         assert_eq!(config.server.web_root, "web/dist");
         assert!(config.server.metrics_require_auth);
+        assert!(!config.server.client_metrics_enabled);
 
         // Video defaults
         assert_eq!(config.video.bitrate, 50000);
@@ -467,6 +473,7 @@ tls_key = "/etc/beam/key.pem"
 jwt_secret = "supersecret"
 web_root = "/usr/share/beam/web/dist"
 metrics_require_auth = false
+client_metrics_enabled = true
 
 [video]
 bitrate = 10000
@@ -503,6 +510,7 @@ idle_timeout = 7200
         assert_eq!(config.server.jwt_secret.as_deref(), Some("supersecret"));
         assert_eq!(config.server.web_root, "/usr/share/beam/web/dist");
         assert!(!config.server.metrics_require_auth);
+        assert!(config.server.client_metrics_enabled);
 
         // Video
         assert_eq!(config.video.bitrate, 10000);
@@ -541,6 +549,10 @@ idle_timeout = 7200
         assert_eq!(
             server.metrics_require_auth,
             from_toml.server.metrics_require_auth
+        );
+        assert_eq!(
+            server.client_metrics_enabled,
+            from_toml.server.client_metrics_enabled
         );
 
         let video = VideoConfig::default();

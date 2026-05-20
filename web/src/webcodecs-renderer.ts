@@ -1,3 +1,4 @@
+import type { RendererQualitySnapshot } from './connection';
 import { extractCodecFromAnnexB } from './h264';
 
 /**
@@ -32,6 +33,10 @@ export class WebCodecsRenderer {
   private needsKeyframe = true;
   private videoFrameCount = 0;
   private audioFrameCount = 0;
+  private videoFramesDropped = 0;
+  private audioFramesDecoded = 0;
+  private audioDropouts = 0;
+  private audioBufferDelayMs = 0;
 
   constructor(canvas: HTMLCanvasElement, containerElement: HTMLElement) {
     this.canvas = canvas;
@@ -191,13 +196,22 @@ export class WebCodecsRenderer {
       this.configureDecoder(width, height, codec);
     }
 
-    if (!this.decoder || this.decoder.state === 'closed') return;
+    if (!this.decoder || this.decoder.state === 'closed') {
+      this.videoFramesDropped++;
+      return;
+    }
 
     // If decoder not yet configured, skip
-    if (this.decoder.state !== 'configured') return;
+    if (this.decoder.state !== 'configured') {
+      this.videoFramesDropped++;
+      return;
+    }
 
     // After configure() or flush(), decoder requires a keyframe first
-    if (this.needsKeyframe && !isKeyframe) return;
+    if (this.needsKeyframe && !isKeyframe) {
+      this.videoFramesDropped++;
+      return;
+    }
     if (isKeyframe) this.needsKeyframe = false;
 
     const chunk = new EncodedVideoChunk({
@@ -210,6 +224,7 @@ export class WebCodecsRenderer {
       this.lastFeedTimeMs = performance.now();
       this.decoder.decode(chunk);
     } catch (err) {
+      this.videoFramesDropped++;
       console.error('VideoDecoder.decode() error:', err);
     }
   }
@@ -258,11 +273,16 @@ export class WebCodecsRenderer {
             const now = this.audioContext.currentTime;
             // Snap forward if we've fallen behind (network stall, tab resume)
             if (this.nextAudioPlayTime < now) {
+              if (this.nextAudioPlayTime > 0) {
+                this.audioDropouts++;
+              }
               this.nextAudioPlayTime = now;
             }
             source.start(this.nextAudioPlayTime);
             this.nextAudioPlayTime += buffer.duration;
+            this.audioBufferDelayMs = Math.max(0, (this.nextAudioPlayTime - now) * 1000);
           }
+          this.audioFramesDecoded++;
           audioData.close();
         },
         error: (err: DOMException) => {
@@ -288,8 +308,21 @@ export class WebCodecsRenderer {
     try {
       this.audioDecoder.decode(chunk);
     } catch (err) {
+      this.audioDropouts++;
       console.error('AudioDecoder.decode() error:', err);
     }
+  }
+
+  getQualitySnapshot(): RendererQualitySnapshot {
+    return {
+      fps: this.currentFps,
+      decodeMs: this.decodeTimeMs,
+      videoFramesDecodedTotal: this.framesDecoded,
+      videoFramesDroppedTotal: this.videoFramesDropped,
+      audioFramesDecodedTotal: this.audioFramesDecoded,
+      audioDropoutsTotal: this.audioDropouts,
+      audioBufferDelayMs: this.audioBufferDelayMs,
+    };
   }
 
   /** Get current FPS value */
@@ -343,6 +376,10 @@ export class WebCodecsRenderer {
     this.firstFrameFired = false;
     this.currentWidth = 0;
     this.currentHeight = 0;
+    this.videoFramesDropped = 0;
+    this.audioFramesDecoded = 0;
+    this.audioDropouts = 0;
+    this.audioBufferDelayMs = 0;
   }
 
   private startFpsCounter(): void {
