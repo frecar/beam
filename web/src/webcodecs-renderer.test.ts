@@ -188,6 +188,7 @@ describe('WebCodecsRenderer', () => {
     // configureDecoder is called (resolution triggers it), but decode should not happen
     // because needsKeyframe=true and this is not a keyframe
     expect(decodedVideoChunks).toHaveLength(0);
+    expect(renderer.getQualitySnapshot().videoFramesDroppedTotal).toBe(1);
   });
 
   it('accepts keyframe when needsKeyframe=true', () => {
@@ -231,6 +232,7 @@ describe('WebCodecsRenderer', () => {
     // Feed P-frame at NEW resolution — should be dropped (needs new keyframe)
     renderer.feedVideoFrame(0x00, 1280, 720, 1000n, payload);
     expect(decodedVideoChunks).toHaveLength(1); // still 1, P-frame dropped
+    expect(renderer.getQualitySnapshot().videoFramesDroppedTotal).toBe(1);
   });
 
   it('audio muted by default', () => {
@@ -239,6 +241,7 @@ describe('WebCodecsRenderer', () => {
 
     expect(decodedAudioChunks).toHaveLength(0);
     expect(audioDecoderConfigured).toBe(false);
+    expect(renderer.getQualitySnapshot().audioFramesDecodedTotal).toBe(0);
   });
 
   it('audio plays when unmuted', () => {
@@ -247,6 +250,23 @@ describe('WebCodecsRenderer', () => {
     renderer.feedAudioFrame(0n, payload);
 
     expect(decodedAudioChunks).toHaveLength(1);
+    expect(renderer.getQualitySnapshot().audioFramesDecodedTotal).toBe(1);
+  });
+
+  it('returns connection quality counters', () => {
+    renderer.setAudioMuted(false);
+    const payload = new Uint8Array([1, 2, 3]);
+
+    renderer.feedVideoFrame(0x01, 1920, 1080, 0n, payload);
+    renderer.feedVideoFrame(0x00, 1280, 720, 1000n, payload);
+    renderer.feedAudioFrame(0n, payload);
+
+    expect(renderer.getQualitySnapshot()).toMatchObject({
+      videoFramesDecodedTotal: 1,
+      videoFramesDroppedTotal: 1,
+      audioFramesDecodedTotal: 1,
+      audioDropoutsTotal: 0,
+    });
   });
 
   it('first frame callback fires once', () => {

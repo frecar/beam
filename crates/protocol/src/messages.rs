@@ -7,8 +7,40 @@ use uuid::Uuid;
 pub enum SignalingMessage {
     /// Session created successfully
     SessionReady { session_id: Uuid },
+    /// Response to a browser metrics ping. Used for client-observed RTT.
+    MetricsPong { id: u32, sent_ms: f64 },
     /// Error
     Error { message: String },
+}
+
+/// Browser-observed connection quality snapshot.
+///
+/// This is intentionally anonymous: the server associates it with the
+/// authenticated session that sent it and should not require user labels.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientMetricsReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_ms: Option<f64>,
+    #[serde(default)]
+    pub video_bytes_per_second: u64,
+    #[serde(default)]
+    pub audio_bytes_per_second: u64,
+    #[serde(default)]
+    pub video_frames_decoded_total: u64,
+    #[serde(default)]
+    pub video_frames_dropped_total: u64,
+    #[serde(default)]
+    pub audio_frames_decoded_total: u64,
+    #[serde(default)]
+    pub audio_dropouts_total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_buffer_delay_ms: Option<f64>,
 }
 
 /// Input events sent over WebSocket (compact format).
@@ -58,6 +90,12 @@ pub enum InputEvent {
     /// Browser tab visibility state (true = visible, false = hidden/backgrounded)
     #[serde(rename = "vs")]
     VisibilityState { visible: bool },
+    /// Browser metrics ping. The server responds with SignalingMessage::MetricsPong.
+    #[serde(rename = "mp")]
+    ClientMetricsPing { id: u32, sent_ms: f64 },
+    /// Browser-observed connection quality metrics.
+    #[serde(rename = "cm")]
+    ClientMetrics(ClientMetricsReport),
     /// File transfer start: initiates a new file upload
     #[serde(rename = "fs")]
     FileStart { id: String, name: String, size: u64 },
@@ -111,6 +149,9 @@ pub struct AuthResponse {
     /// Returned so the client can show accurate idle warnings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout: Option<u64>,
+    /// Whether the server wants this client to emit anonymous quality metrics.
+    #[serde(default)]
+    pub client_metrics_enabled: bool,
 }
 
 /// Session information
@@ -152,6 +193,26 @@ mod tests {
                 assert_eq!(session_id, Uuid::nil());
             }
             _ => panic!("Expected SessionReady"),
+        }
+    }
+
+    #[test]
+    fn signaling_metrics_pong_roundtrip() {
+        let msg = SignalingMessage::MetricsPong {
+            id: 7,
+            sent_ms: 123.5,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"metrics_pong""#));
+        assert!(json.contains(r#""id":7"#));
+
+        let parsed: SignalingMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            SignalingMessage::MetricsPong { id, sent_ms } => {
+                assert_eq!(id, 7);
+                assert_eq!(sent_ms, 123.5);
+            }
+            _ => panic!("Expected MetricsPong"),
         }
     }
 
@@ -224,6 +285,33 @@ mod tests {
         let json = serde_json::to_string(&visibility_true).unwrap();
         assert!(json.contains(r#""t":"vs""#));
         assert!(json.contains(r#""visible":true"#));
+
+        let metrics_ping = InputEvent::ClientMetricsPing {
+            id: 3,
+            sent_ms: 456.25,
+        };
+        let json = serde_json::to_string(&metrics_ping).unwrap();
+        assert!(json.contains(r#""t":"mp""#));
+        assert!(json.contains(r#""id":3"#));
+        assert!(json.contains(r#""sent_ms":456.25"#));
+
+        let metrics = InputEvent::ClientMetrics(ClientMetricsReport {
+            latency_ms: Some(23.5),
+            jitter_ms: Some(4.25),
+            fps: Some(60.0),
+            decode_ms: Some(2.5),
+            video_bytes_per_second: 1_000_000,
+            audio_bytes_per_second: 12_000,
+            video_frames_decoded_total: 120,
+            video_frames_dropped_total: 2,
+            audio_frames_decoded_total: 90,
+            audio_dropouts_total: 1,
+            audio_buffer_delay_ms: Some(35.0),
+        });
+        let json = serde_json::to_string(&metrics).unwrap();
+        assert!(json.contains(r#""t":"cm""#));
+        assert!(json.contains(r#""latency_ms":23.5"#));
+        assert!(json.contains(r#""video_bytes_per_second":1000000"#));
 
         // Verify deserialization from browser format
         let browser_vs: InputEvent = serde_json::from_str(r#"{"t":"vs","visible":false}"#).unwrap();
@@ -411,9 +499,11 @@ mod tests {
             session_id: Uuid::nil(),
             release_token: None,
             idle_timeout: Some(3600),
+            client_metrics_enabled: true,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains(r#""idle_timeout":3600"#));
+        assert!(json.contains(r#""client_metrics_enabled":true"#));
     }
 
     #[test]
@@ -423,9 +513,11 @@ mod tests {
             session_id: Uuid::nil(),
             release_token: None,
             idle_timeout: None,
+            client_metrics_enabled: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("idle_timeout"));
+        assert!(json.contains(r#""client_metrics_enabled":false"#));
     }
 
     #[test]
@@ -467,6 +559,23 @@ mod tests {
             },
             InputEvent::VisibilityState { visible: true },
             InputEvent::VisibilityState { visible: false },
+            InputEvent::ClientMetricsPing {
+                id: 1,
+                sent_ms: 1.0,
+            },
+            InputEvent::ClientMetrics(ClientMetricsReport {
+                latency_ms: Some(12.0),
+                jitter_ms: Some(1.5),
+                fps: Some(60.0),
+                decode_ms: Some(3.0),
+                video_bytes_per_second: 100,
+                audio_bytes_per_second: 20,
+                video_frames_decoded_total: 10,
+                video_frames_dropped_total: 1,
+                audio_frames_decoded_total: 8,
+                audio_dropouts_total: 0,
+                audio_buffer_delay_ms: Some(25.0),
+            }),
         ];
 
         for event in events {
@@ -499,6 +608,10 @@ mod tests {
         let messages = vec![
             SignalingMessage::SessionReady {
                 session_id: Uuid::nil(),
+            },
+            SignalingMessage::MetricsPong {
+                id: 1,
+                sent_ms: 10.0,
             },
             SignalingMessage::Error {
                 message: "test error".to_string(),

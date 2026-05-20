@@ -77,6 +77,8 @@ export type InputEvent =
   | { t: 'l'; layout: string }
   | { t: 'q'; mode: string }
   | { t: 'vs'; visible: boolean }
+  | { t: 'mp'; id: number; sent_ms: number }
+  | ClientMetricsReport
   | { t: 'cur'; css: string }
   | { t: 'fs'; id: string; name: string; size: number }
   | { t: 'fc'; id: string; data: string }
@@ -100,6 +102,31 @@ type VideoFrameCallback = (
 ) => void;
 type AudioFrameCallback = (timestampUs: bigint, payload: Uint8Array) => void;
 
+export interface RendererQualitySnapshot {
+  fps?: number;
+  decodeMs?: number;
+  videoFramesDecodedTotal: number;
+  videoFramesDroppedTotal: number;
+  audioFramesDecodedTotal: number;
+  audioDropoutsTotal: number;
+  audioBufferDelayMs?: number;
+}
+
+type ClientMetricsReport = {
+  t: 'cm';
+  latency_ms?: number;
+  jitter_ms?: number;
+  fps?: number;
+  decode_ms?: number;
+  video_bytes_per_second: number;
+  audio_bytes_per_second: number;
+  video_frames_decoded_total: number;
+  video_frames_dropped_total: number;
+  audio_frames_decoded_total: number;
+  audio_dropouts_total: number;
+  audio_buffer_delay_ms?: number;
+};
+
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -116,6 +143,14 @@ export class BeamConnection {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalDisconnect = false;
+  private metricsInterval: ReturnType<typeof setInterval> | null = null;
+  private metricsSnapshotProvider: (() => RendererQualitySnapshot | null) | null = null;
+  private videoBytesThisSecond = 0;
+  private audioBytesThisSecond = 0;
+  private metricsPingId = 0;
+  private pendingMetricPings = new Map<number, number>();
+  private latencyMs: number | null = null;
+  private jitterMs: number | null = null;
 
   // Callbacks
   private videoFrameCallback: VideoFrameCallback | null = null;
@@ -193,6 +228,7 @@ export class BeamConnection {
   /** Cleanly tear down the connection */
   disconnect(): void {
     this.intentionalDisconnect = true;
+    this.stopClientMetrics();
     this.cleanup();
   }
 
@@ -201,6 +237,29 @@ export class BeamConnection {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(event));
     }
+  }
+
+  startClientMetrics(snapshotProvider: () => RendererQualitySnapshot | null): void {
+    this.stopClientMetrics();
+    this.metricsSnapshotProvider = snapshotProvider;
+    this.sendMetricsPing();
+    this.metricsInterval = setInterval(() => {
+      this.sendMetricsPing();
+      this.sendClientMetricsReport();
+    }, 1000);
+  }
+
+  stopClientMetrics(): void {
+    if (this.metricsInterval) {
+      clearInterval(this.metricsInterval);
+      this.metricsInterval = null;
+    }
+    this.metricsSnapshotProvider = null;
+    this.pendingMetricPings.clear();
+    this.videoBytesThisSecond = 0;
+    this.audioBytesThisSecond = 0;
+    this.latencyMs = null;
+    this.jitterMs = null;
   }
 
   private async establishConnection(): Promise<void> {
@@ -217,6 +276,7 @@ export class BeamConnection {
     this.ws.onopen = () => {
       wsOpened = true;
       this.reconnectAttempt = 0;
+      this.sendMetricsPing();
       this.connectedCallback?.();
     };
 
@@ -269,8 +329,10 @@ export class BeamConnection {
     const isAudio = (header.flags & 0x02) !== 0;
 
     if (isAudio) {
+      this.audioBytesThisSecond += data.byteLength;
       this.audioFrameCallback?.(header.timestampUs, payload);
     } else {
+      this.videoBytesThisSecond += data.byteLength;
       this.videoFrameCallback?.(
         header.flags,
         header.width,
@@ -295,6 +357,11 @@ export class BeamConnection {
     const msg = parsed as Record<string, unknown>;
 
     // Server signaling messages
+    if (msg['type'] === 'metrics_pong') {
+      this.handleMetricsPong(msg);
+      return;
+    }
+
     if (msg['type'] === 'error') {
       const serverMsg = msg as ServerMessage & { type: 'error' };
       if (serverMsg.message === 'replaced') {
@@ -320,6 +387,61 @@ export class BeamConnection {
     if (msg['t']) {
       this.agentMessageCallback?.(msg as InputEvent);
     }
+  }
+
+  private sendMetricsPing(): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    const id = ++this.metricsPingId;
+    const sentMs = performance.now();
+    this.pendingMetricPings.set(id, sentMs);
+    this.ws.send(JSON.stringify({ t: 'mp', id, sent_ms: sentMs }));
+
+    if (this.pendingMetricPings.size > 32) {
+      const oldest = this.pendingMetricPings.keys().next().value;
+      if (oldest !== undefined) this.pendingMetricPings.delete(oldest);
+    }
+  }
+
+  private handleMetricsPong(msg: Record<string, unknown>): void {
+    const id = typeof msg['id'] === 'number' ? msg['id'] : null;
+    if (id === null) return;
+    const sentMs = this.pendingMetricPings.get(id);
+    if (sentMs === undefined) return;
+    this.pendingMetricPings.delete(id);
+
+    const rtt = Math.max(0, performance.now() - sentMs);
+    if (Number.isFinite(rtt)) {
+      if (this.latencyMs !== null) {
+        this.jitterMs = Math.abs(rtt - this.latencyMs);
+      }
+      this.latencyMs = rtt;
+    }
+  }
+
+  private sendClientMetricsReport(): void {
+    if (this.ws?.readyState !== WebSocket.OPEN || !this.metricsSnapshotProvider) return;
+    const snapshot = this.metricsSnapshotProvider();
+    if (!snapshot) return;
+
+    const report: ClientMetricsReport = {
+      t: 'cm',
+      video_bytes_per_second: this.videoBytesThisSecond,
+      audio_bytes_per_second: this.audioBytesThisSecond,
+      video_frames_decoded_total: snapshot.videoFramesDecodedTotal,
+      video_frames_dropped_total: snapshot.videoFramesDroppedTotal,
+      audio_frames_decoded_total: snapshot.audioFramesDecodedTotal,
+      audio_dropouts_total: snapshot.audioDropoutsTotal,
+    };
+
+    addFiniteMetric(report, 'latency_ms', this.latencyMs);
+    addFiniteMetric(report, 'jitter_ms', this.jitterMs);
+    addFiniteMetric(report, 'fps', snapshot.fps);
+    addFiniteMetric(report, 'decode_ms', snapshot.decodeMs);
+    addFiniteMetric(report, 'audio_buffer_delay_ms', snapshot.audioBufferDelayMs);
+
+    this.videoBytesThisSecond = 0;
+    this.audioBytesThisSecond = 0;
+    this.ws.send(JSON.stringify(report));
   }
 
   private scheduleReconnect(): void {
@@ -361,5 +483,15 @@ export class BeamConnection {
       this.ws.close();
       this.ws = null;
     }
+  }
+}
+
+function addFiniteMetric(
+  report: Record<string, unknown>,
+  key: string,
+  value: number | null | undefined
+): void {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    report[key] = value;
   }
 }

@@ -14,6 +14,7 @@ use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 use crate::auth;
+use crate::client_metrics::ClientMetricsStore;
 use crate::session::SessionManager;
 use crate::signaling::{self, ChannelRegistry};
 
@@ -31,6 +32,7 @@ pub struct AppState {
     pub metrics_logins_attempted: std::sync::atomic::AtomicU64,
     pub metrics_logins_failed: std::sync::atomic::AtomicU64,
     pub metrics_agent_restarts: std::sync::atomic::AtomicU64,
+    pub client_metrics: Arc<ClientMetricsStore>,
 }
 
 /// Simple per-key rate limiter for login attempts.
@@ -482,6 +484,7 @@ async fn login(
                 session_id: existing.id,
                 release_token,
                 idle_timeout: Some(effective_timeout),
+                client_metrics_enabled: state.config.server.client_metrics_enabled,
             })),
         )
             .into_response();
@@ -556,6 +559,7 @@ async fn login(
             session_id: session.id,
             release_token,
             idle_timeout: Some(effective_timeout),
+            client_metrics_enabled: state.config.server.client_metrics_enabled,
         })),
     )
         .into_response()
@@ -708,6 +712,7 @@ pub async fn spawn_agent_monitor(state: Arc<AppState>, session_id: Uuid) {
             tracing::error!(%session_id, "Failed to clean up after agent exit: {e:#}");
         }
         signaling::remove_channel(&state.channels, session_id).await;
+        state.client_metrics.remove(session_id);
         tracing::info!(%session_id, "Session cleaned up after agent service exit");
     });
 }
@@ -766,8 +771,18 @@ async fn browser_ws_upgrade(
 
     tracing::info!(%id, "Browser WebSocket upgrade");
     let channels = state.channels.clone();
+    let client_metrics_enabled = state.config.server.client_metrics_enabled;
+    let client_metrics = Arc::clone(&state.client_metrics);
     ws.max_message_size(2 * 1024 * 1024) // 2MB max (binary video frames + text input)
-        .on_upgrade(move |socket| signaling::handle_browser_ws(socket, id, channels))
+        .on_upgrade(move |socket| {
+            signaling::handle_browser_ws(
+                socket,
+                id,
+                channels,
+                client_metrics_enabled,
+                client_metrics,
+            )
+        })
         .into_response()
 }
 
@@ -834,6 +849,7 @@ async fn delete_session(
 
     // Clean up signaling channel
     signaling::remove_channel(&state.channels, id).await;
+    state.client_metrics.remove(id);
 
     tracing::info!(target: "audit", event = "session_destroyed", session_id = %id, "Session destroyed");
     (StatusCode::OK, "Session destroyed").into_response()
@@ -924,6 +940,7 @@ async fn admin_delete_session(
     }
 
     signaling::remove_channel(&state.channels, id).await;
+    state.client_metrics.remove(id);
     tracing::info!(target: "audit", event = "admin_session_destroyed", session_id = %id, admin = %claims.sub, "Session destroyed by admin");
     (StatusCode::OK, "Session destroyed").into_response()
 }
@@ -996,6 +1013,7 @@ async fn release_session(
             tracing::info!(target: "audit", event = "session_destroyed", session_id = %id, "Session destroyed");
         }
         signaling::remove_channel(&state_clone.channels, id).await;
+        state_clone.client_metrics.remove(id);
     });
 
     (StatusCode::OK, "Release accepted").into_response()
@@ -1043,7 +1061,8 @@ async fn metrics(
         return (status, msg).into_response();
     }
 
-    let active_sessions = state.session_manager.list_sessions().await.len();
+    let sessions = state.session_manager.list_sessions().await;
+    let active_sessions = sessions.len();
     let uptime_secs = state.started_at.elapsed().as_secs();
     let logins_attempted = state
         .metrics_logins_attempted
@@ -1054,6 +1073,8 @@ async fn metrics(
     let agent_restarts = state
         .metrics_agent_restarts
         .load(std::sync::atomic::Ordering::Relaxed);
+    let client_metrics_enabled = u8::from(state.config.server.client_metrics_enabled);
+    let client_metrics = state.client_metrics.render_prometheus(&sessions);
 
     let body = format!(
         "# HELP beam_active_sessions Number of active sessions\n\
@@ -1074,7 +1095,13 @@ async fn metrics(
          \n\
          # HELP beam_agent_restarts_total Total agent restart attempts\n\
          # TYPE beam_agent_restarts_total counter\n\
-         beam_agent_restarts_total {agent_restarts}\n"
+         beam_agent_restarts_total {agent_restarts}\n\
+         \n\
+         # HELP beam_client_metrics_enabled Whether browser connection-quality metrics are enabled\n\
+         # TYPE beam_client_metrics_enabled gauge\n\
+         beam_client_metrics_enabled {client_metrics_enabled}\n\
+         \n\
+         {client_metrics}"
     );
 
     (
@@ -1469,6 +1496,7 @@ mod tests {
             metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
             metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
             metrics_agent_restarts: std::sync::atomic::AtomicU64::new(0),
+            client_metrics: Arc::new(ClientMetricsStore::default()),
         })
     }
 
@@ -1829,6 +1857,10 @@ mod tests {
         assert!(body.contains("# HELP beam_agent_restarts_total"));
         assert!(body.contains("# TYPE beam_agent_restarts_total counter"));
         assert!(body.contains("beam_agent_restarts_total 2"));
+
+        assert!(body.contains("# HELP beam_client_metrics_enabled"));
+        assert!(body.contains("# TYPE beam_client_metrics_enabled gauge"));
+        assert!(body.contains("beam_client_metrics_enabled 0"));
     }
 
     #[tokio::test]
@@ -1872,6 +1904,7 @@ mod tests {
             metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
             metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
             metrics_agent_restarts: std::sync::atomic::AtomicU64::new(0),
+            client_metrics: Arc::new(ClientMetricsStore::default()),
         });
 
         let app = build_router(state);

@@ -121,6 +121,7 @@ class MockWebSocket {
   onclose: ((ev: any) => void) | null = null;
   onmessage: ((ev: any) => void) | null = null;
   onerror: ((ev: any) => void) | null = null;
+  sent: any[] = [];
 
   static CONNECTING = 0;
   static OPEN = 1;
@@ -135,7 +136,9 @@ class MockWebSocket {
     this.readyState = MockWebSocket.CLOSED;
   }
 
-  send(_data: any) {}
+  send(data: any) {
+    this.sent.push(data);
+  }
 
   /** Test helper: simulate the WS opening */
   simulateOpen() {
@@ -150,7 +153,7 @@ class MockWebSocket {
   }
 
   /** Test helper: simulate a text message */
-  simulateMessage(data: string) {
+  simulateMessage(data: string | ArrayBuffer) {
     this.onmessage?.({ data });
   }
 }
@@ -314,5 +317,73 @@ describe('BeamConnection reconnect logic', () => {
     ws1.simulateClose(1000);
     await vi.advanceTimersByTimeAsync(50);
     expect(reconnectAttempts).toEqual([1, 1]);
+  });
+
+  it('sends opt-in client metrics over the websocket', async () => {
+    const conn = new BeamConnection('test-session', 'test-token');
+    conn.startClientMetrics(() => ({
+      fps: 60,
+      decodeMs: 2.5,
+      videoFramesDecodedTotal: 120,
+      videoFramesDroppedTotal: 3,
+      audioFramesDecodedTotal: 80,
+      audioDropoutsTotal: 1,
+      audioBufferDelayMs: 25,
+    }));
+
+    await conn.connect();
+    const ws = mockWsInstances[0];
+    ws.simulateOpen();
+
+    const videoFrame = buildFrameBuffer(0x01, 1920, 1080, 10n, new Uint8Array([1, 2, 3, 4]));
+    const audioFrame = buildFrameBuffer(0x02, 0, 0, 20n, new Uint8Array([5, 6]));
+    ws.simulateMessage(videoFrame);
+    ws.simulateMessage(audioFrame);
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const sent = ws.sent.map((data) => JSON.parse(String(data)));
+    expect(sent.some((msg) => msg.t === 'mp' && typeof msg.id === 'number')).toBe(true);
+
+    const report = sent.find((msg) => msg.t === 'cm');
+    expect(report).toMatchObject({
+      t: 'cm',
+      fps: 60,
+      decode_ms: 2.5,
+      video_frames_decoded_total: 120,
+      video_frames_dropped_total: 3,
+      audio_frames_decoded_total: 80,
+      audio_dropouts_total: 1,
+      audio_buffer_delay_ms: 25,
+    });
+    expect(report.video_bytes_per_second).toBe(videoFrame.byteLength);
+    expect(report.audio_bytes_per_second).toBe(audioFrame.byteLength);
+  });
+
+  it('records latency from metrics pong replies', async () => {
+    let now = 1000;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+
+    const conn = new BeamConnection('test-session', 'test-token');
+    conn.startClientMetrics(() => ({
+      videoFramesDecodedTotal: 1,
+      videoFramesDroppedTotal: 0,
+      audioFramesDecodedTotal: 0,
+      audioDropoutsTotal: 0,
+    }));
+
+    await conn.connect();
+    const ws = mockWsInstances[0];
+    ws.simulateOpen();
+    const ping = ws.sent.map((data) => JSON.parse(String(data))).find((msg) => msg.t === 'mp');
+
+    now = 1042;
+    ws.simulateMessage(
+      JSON.stringify({ type: 'metrics_pong', id: ping.id, sent_ms: ping.sent_ms })
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const report = ws.sent.map((data) => JSON.parse(String(data))).find((msg) => msg.t === 'cm');
+    expect(report.latency_ms).toBe(42);
   });
 });

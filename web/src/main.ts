@@ -698,7 +698,11 @@ async function handleReconnectClick(): Promise<void> {
   try {
     hideReconnectOverlay();
     setStatus('connecting', 'Reconnecting...');
-    await startConnection(session.session_id, tokenManager.getToken()!);
+    await startConnection(
+      session.session_id,
+      tokenManager.getToken()!,
+      session.client_metrics_enabled === true
+    );
   } catch {
     reconnectBtn.disabled = false;
     reconnectBtn.textContent = defaultLabel;
@@ -809,7 +813,7 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
   tokenManager.scheduleTokenRefresh();
 
   try {
-    await startConnection(data.session_id, data.token);
+    await startConnection(data.session_id, data.token, data.client_metrics_enabled === true);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Connection failed.';
     showLoadingError(message);
@@ -817,7 +821,11 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
   }
 }
 
-async function startConnection(sessionId: string, token: string): Promise<void> {
+async function startConnection(
+  sessionId: string,
+  token: string,
+  clientMetricsEnabled = false
+): Promise<void> {
   if (connection) {
     connection.disconnect();
     connection = null;
@@ -842,6 +850,9 @@ async function startConnection(sessionId: string, token: string): Promise<void> 
   connection = new BeamConnection(sessionId, token);
   tokenManager.setConnection(connection);
   renderer = new WebCodecsRenderer(remoteCanvas, desktopView);
+  if (clientMetricsEnabled) {
+    connection.startClientMetrics(() => renderer?.getQualitySnapshot() ?? null);
+  }
 
   // Sync mute button when renderer's mute state changes (e.g. click-to-unmute)
   renderer.onMuteChange((muted) => updateMuteButton(muted));
@@ -1415,7 +1426,11 @@ if (savedSession) {
       }
       tokenManager.scheduleTokenRefresh();
       showLoading('Resuming session...');
-      startConnection(savedSession.session_id, savedSession.token);
+      startConnection(
+        savedSession.session_id,
+        savedSession.token,
+        savedSession.client_metrics_enabled === true
+      );
     } catch (err) {
       console.warn('Could not resume previous session:', err);
       clearSession();
