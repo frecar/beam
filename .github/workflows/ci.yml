@@ -90,10 +90,10 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Lint
-        run: npx eslint src
+        run: npm run lint
 
       - name: Format check
-        run: npx prettier --check src
+        run: npm run format:check
 
       # Coverage subsumes the bare test run — vitest --coverage
       # executes every test and additionally gates on the
@@ -103,6 +103,12 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Bundle budget
+        run: npm run check:bundle
+
+      - name: Audit dependencies
+        run: npm run audit
 
   coverage:
     name: Coverage

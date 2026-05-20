@@ -92,16 +92,24 @@ test:
 lint:
 	$(CARGO) clippy --workspace -- -D warnings
 	cd web && npx tsc --noEmit
+	cd web && $(NPM) run lint
+	cd web && $(NPM) run format:check
 
 fmt:
 	$(CARGO) fmt --all
+	cd web && $(NPM) run format
 
 check:
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --workspace -- -D warnings
 	$(CARGO) test --workspace
 	cd web && npx tsc --noEmit
-	cd web && $(NPM) test
+	cd web && $(NPM) run lint
+	cd web && $(NPM) run format:check
+	cd web && $(NPM) run test:coverage
+	cd web && $(NPM) run build
+	cd web && $(NPM) run check:bundle
+	cd web && $(NPM) run audit
 	@echo ""
 	@echo "All checks passed."
 
@@ -110,7 +118,13 @@ ci:
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --workspace -- -D warnings
 	$(CARGO) test --workspace
-	cd web && npx tsc --noEmit && $(NPM) test && $(NPM) run build
+	cd web && npx tsc --noEmit
+	cd web && $(NPM) run lint
+	cd web && $(NPM) run format:check
+	cd web && $(NPM) run test:coverage
+	cd web && $(NPM) run build
+	cd web && $(NPM) run check:bundle
+	cd web && $(NPM) run audit
 	@echo ""
 	@echo "All CI checks passed."
 

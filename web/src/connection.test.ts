@@ -117,6 +117,7 @@ let mockWsInstances: MockWebSocket[];
 class MockWebSocket {
   binaryType = '';
   readyState = 0; // CONNECTING
+  url: string;
   onopen: ((ev: any) => void) | null = null;
   onclose: ((ev: any) => void) | null = null;
   onmessage: ((ev: any) => void) | null = null;
@@ -128,7 +129,8 @@ class MockWebSocket {
   static CLOSING = 2;
   static CLOSED = 3;
 
-  constructor(_url: string) {
+  constructor(url: string) {
+    this.url = url;
     mockWsInstances.push(this);
   }
 
@@ -172,6 +174,35 @@ describe('BeamConnection reconnect logic', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('smoke: opens the session websocket, receives video, and sends input', async () => {
+    const conn = new BeamConnection('primary-session', 'release token/1');
+    const connected = vi.fn();
+    const videoFrame = vi.fn();
+    conn.onConnected(connected);
+    conn.onVideoFrame(videoFrame);
+
+    await conn.connect();
+    const ws = mockWsInstances[0];
+
+    expect(ws.url).toBe(
+      'wss://localhost:8444/api/sessions/primary-session/ws?token=release%20token%2F1'
+    );
+
+    ws.simulateOpen();
+    ws.simulateMessage(buildFrameBuffer(0x01, 1280, 720, 123n, new Uint8Array([9, 8, 7])));
+    conn.sendInput({ t: 'm', x: 42, y: 24 });
+
+    expect(connected).toHaveBeenCalledTimes(1);
+    expect(videoFrame).toHaveBeenCalledTimes(1);
+    expect(videoFrame).toHaveBeenCalledWith(0x01, 1280, 720, 123n, expect.any(Uint8Array));
+    expect(Array.from(videoFrame.mock.calls[0][4])).toEqual([9, 8, 7]);
+    expect(ws.sent.map((data) => JSON.parse(String(data)))).toContainEqual({
+      t: 'm',
+      x: 42,
+      y: 24,
+    });
   });
 
   it('exponential backoff doubles delay', async () => {
