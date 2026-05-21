@@ -155,12 +155,13 @@ jobs:
           LLVM_PROFILE_FILE: beam-%p-%m.profraw
         run: |
           # Ratchet protocol: --fail-under-lines locks current
-          # coverage as a floor. Baseline measured in #46 was 55.40%
-          # — set to 54 = floor(55.40 - 1). Every subsequent PR that
+          # coverage as a floor. Baseline measured in #46 was 55.40%;
+          # re-measurement on d330b96 (PR #59 merge) showed 56.13% —
+          # set to 55 = floor(56.13 - 1). Every subsequent PR that
           # raises actual coverage may bump this; never lower.
           # --ignore-filename-regex 'tests?/' excludes the test
           # harness modules from the floor so it tracks real source
           # coverage only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 54
+            --fail-under-lines 55
