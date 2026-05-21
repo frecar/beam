@@ -1,0 +1,47 @@
+name: Security audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.cargo/audit.toml'
+      - '.github/workflows/audit.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.cargo/audit.toml'
+      - '.github/workflows/audit.yml'
+  # Run weekly so newly-disclosed advisories against an unchanged
+  # Cargo.lock still surface (the whole point of supply-chain scanning).
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+  issues: write
+  checks: write
+
+jobs:
+  security_audit:
+    name: cargo audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Advisories with no fixed upgrade available are allowlisted
+          # here with rationale. Review on every dependency bump — if a
+          # fix becomes available, drop the ID and run `cargo update`.
+          #
+          # RUSTSEC-2025-0040 (users 0.10.0): `root` appended to group
+          # listings. No fixed upgrade available; reaches us transitively
+          # via `pam 0.8.0`. We do not consume the `users` group-listing
+          # API. Re-evaluate when `pam` ships a release that drops the
+          # `users` dependency or `users` publishes a fix.
+          ignore: RUSTSEC-2025-0040
