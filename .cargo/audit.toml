@@ -1,0 +1,41 @@
+# cargo-audit configuration.
+#
+# This file is the canonical allowlist for advisories that cargo-audit
+# would otherwise flag. It is consumed when running `cargo audit`
+# locally (`cargo install cargo-audit && cargo audit`) and is the
+# documentation source for the CI workflow at
+# `.github/workflows/audit.yml`, which mirrors the `ignore` list via
+# the `rustsec/audit-check` action input.
+#
+# Allowlist policy
+# ----------------
+# Add an entry ONLY for advisories with no fixed upgrade available, or
+# where the fix is blocked by an upstream dependency we do not control.
+# Each entry MUST carry rationale describing:
+#   - which crate / version the advisory targets,
+#   - the path it reaches our workspace through,
+#   - why the advisory does not apply (or is acceptable) here,
+#   - the trigger to re-evaluate (usually "fix becomes available").
+#
+# Advisories with an available fix should be resolved by running
+# `cargo update -p <crate>` (or bumping the relevant dependency in
+# `Cargo.toml`), NOT by adding to this allowlist.
+#
+# When updating this file, mirror the change to
+# `.github/workflows/audit.yml`'s `ignore:` input.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2025-0040 (users 0.10.0): `root` appended to group listings.
+  # No fixed upgrade available. Reaches us transitively via `pam 0.8.0`.
+  # We do not consume the `users` group-listing API. Re-evaluate when
+  # `pam` ships a release that drops the `users` dependency or `users`
+  # publishes a fix.
+  "RUSTSEC-2025-0040",
+]
+
+# Informational categories that should warn (visible in audit output)
+# but not fail the build. Failing on these would block normal work on
+# the slow-moving long-tail of "unmaintained" upstream crates that have
+# no actual vulnerability.
+informational_warnings = ["unmaintained", "notice", "unsound"]
