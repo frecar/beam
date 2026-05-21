@@ -249,7 +249,7 @@ async fn main() -> Result<()> {
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
 
     // Clean up old agent logs on startup (keep last 20, remove >24h old)
-    cleanup_old_agent_logs(24 * 3600, 20);
+    cleanup_old_agent_logs(std::path::Path::new("/var/log/beam"), 24 * 3600, 20);
 
     // Print startup banner
     tracing::info!("===========================================");
@@ -378,10 +378,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Remove old agent logs from /var/log/beam/, keeping at most `max_count`
+/// Remove old agent logs from `dir`, keeping at most `max_count`
 /// and removing any older than `max_age_secs`.
-fn cleanup_old_agent_logs(max_age_secs: u64, max_count: usize) {
-    let dir = std::path::Path::new("/var/log/beam");
+///
+/// Only files named `agent-*.log` are considered for cleanup; other files in
+/// the directory are left untouched. Errors at any stage (directory missing,
+/// metadata unreadable, unlink failure) are swallowed so a hostile filesystem
+/// state never blocks server startup.
+fn cleanup_old_agent_logs(dir: &std::path::Path, max_age_secs: u64, max_count: usize) {
     let _ = std::fs::create_dir_all(dir);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -409,5 +413,93 @@ fn cleanup_old_agent_logs(max_age_secs: u64, max_count: usize) {
         if i >= max_count || age > max_age_secs {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::cleanup_old_agent_logs;
+    use std::time::{Duration, SystemTime};
+
+    fn unique_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "beam-cleanup-test-{}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4(),
+            label,
+        ))
+    }
+
+    fn write_log(dir: &std::path::Path, name: &str, age_secs: u64) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"log contents").unwrap();
+        // Rewind mtime so the age-filter has something to bite.
+        let mtime = SystemTime::now() - Duration::from_secs(age_secs);
+        let ft = filetime::FileTime::from_system_time(mtime);
+        filetime::set_file_mtime(&path, ft).unwrap();
+        path
+    }
+
+    #[test]
+    fn cleanup_creates_dir_when_missing_and_returns_quietly() {
+        let dir = unique_dir("creates");
+        assert!(!dir.exists());
+        // Empty dir; nothing to remove, but the call must not panic and must
+        // create the directory so the caller can write logs after startup.
+        cleanup_old_agent_logs(&dir, 24 * 3600, 20);
+        assert!(dir.exists(), "cleanup should ensure the log dir exists");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_removes_files_older_than_max_age() {
+        let dir = unique_dir("age");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fresh = write_log(&dir, "agent-001.log", 60);
+        let stale = write_log(&dir, "agent-002.log", 7 * 24 * 3600);
+        // max_age = 1h
+        cleanup_old_agent_logs(&dir, 3600, 100);
+        assert!(fresh.exists(), "Fresh log must be retained");
+        assert!(!stale.exists(), "Stale log must be removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_caps_total_count_keeping_newest() {
+        let dir = unique_dir("count");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Five logs aged 60..300s; max_count=2 should keep the two freshest.
+        let oldest = write_log(&dir, "agent-old1.log", 300);
+        let mid1 = write_log(&dir, "agent-old2.log", 240);
+        let mid2 = write_log(&dir, "agent-old3.log", 180);
+        let new1 = write_log(&dir, "agent-new1.log", 120);
+        let new2 = write_log(&dir, "agent-new2.log", 60);
+
+        cleanup_old_agent_logs(&dir, 24 * 3600, 2);
+
+        assert!(new1.exists(), "Second-newest must survive");
+        assert!(new2.exists(), "Newest must survive");
+        assert!(!mid1.exists(), "Excess older logs must be removed");
+        assert!(!mid2.exists(), "Excess older logs must be removed");
+        assert!(!oldest.exists(), "Oldest must be removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_ignores_non_agent_files() {
+        let dir = unique_dir("filter");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Names that don't match the agent-*.log pattern stay put even
+        // when they would otherwise be in the "too old" bucket.
+        let unrelated = write_log(&dir, "server.log", 30 * 24 * 3600);
+        let other = write_log(&dir, "agent-001.txt", 30 * 24 * 3600);
+        let agent_stale = write_log(&dir, "agent-001.log", 30 * 24 * 3600);
+
+        cleanup_old_agent_logs(&dir, 24 * 3600, 100);
+
+        assert!(unrelated.exists(), "Non-agent log must be left alone");
+        assert!(other.exists(), "Non-.log extension must be left alone");
+        assert!(!agent_stale.exists(), "Matching stale agent log removed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
