@@ -156,12 +156,13 @@ jobs:
         run: |
           # Ratchet protocol: --fail-under-lines locks current
           # coverage as a floor. Baseline measured in #46 was 55.40%;
-          # re-measurement on c3e3df8 (PR #60 merge) showed 56.39%
-          # lines — set to 56 = floor(56.39 - 1). Every subsequent PR
-          # that raises actual coverage may bump this; never lower.
-          # --ignore-filename-regex 'tests?/' excludes the test
-          # harness modules from the floor so it tracks real source
-          # coverage only.
+          # re-measurement on b12adb6 (PR #61 merge) showed 56.39%
+          # lines. PR #45 ratchet-step adds config + cleanup +
+          # download-loop tests on top of that baseline — set to 57.
+          # Every subsequent PR that raises actual coverage may bump
+          # this; never lower. --ignore-filename-regex 'tests?/'
+          # excludes the test harness modules from the floor so it
+          # tracks real source coverage only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 56
+            --fail-under-lines 57
