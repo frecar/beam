@@ -4,6 +4,7 @@ use uuid::Uuid;
 pub(crate) const DEFAULT_BITRATE: u32 = 50_000; // 50 Mbps -- LAN default
 pub(crate) const DEFAULT_FRAMERATE: u32 = 120; // 120fps
 
+#[derive(Debug)]
 pub(crate) struct Args {
     pub display: String,
     pub server_url: String,
@@ -21,7 +22,34 @@ pub(crate) struct Args {
     pub display_start: u32,
 }
 
-pub(crate) fn parse_args() -> anyhow::Result<Args> {
+/// Outcome of CLI argument parsing.
+///
+/// Split out so the parser is unit-testable: the public `parse_args()` wraps
+/// this in handling for `--version` and `--help` which terminate the process,
+/// but the underlying parse logic in `parse_args_from` is side-effect-free
+/// (no `std::process::exit`, no `println!`).
+#[derive(Debug)]
+pub(crate) enum ArgsOutcome {
+    /// Continue startup with these settings.
+    Run(Args),
+    /// Print the version banner, then exit successfully.
+    PrintVersion,
+    /// Print help text, then exit successfully.
+    PrintHelp,
+}
+
+/// Parse arguments from an iterator (typically `std::env::args()`).
+///
+/// Side-effect free: returns `ArgsOutcome` instead of calling
+/// `std::process::exit`. The caller is responsible for handling the
+/// `PrintVersion` / `PrintHelp` variants.
+pub(crate) fn parse_args_from<I, S>(args: I) -> anyhow::Result<ArgsOutcome>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+
     let mut display = ":0".to_string();
     let mut server_url = String::new();
     let mut session_id = None;
@@ -37,49 +65,11 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
     let mut gpu_driver = "auto".to_string();
     let mut display_start: u32 = 10;
 
-    let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-V" | "--version" => {
-                println!("beam-agent {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
-            "-h" | "--help" => {
-                println!("beam-agent - Beam Remote Desktop capture agent");
-                println!();
-                println!("USAGE:");
-                println!("    beam-agent [OPTIONS]");
-                println!();
-                println!("OPTIONS:");
-                println!("    --display <DISPLAY>          X11 display [default: :0]");
-                println!("    --server-url <URL>           Signaling server WebSocket URL");
-                println!("    --session-id <UUID>          Session identifier (required)");
-                println!(
-                    "    --agent-token <TOKEN>        Agent authentication token (prefer BEAM_AGENT_TOKEN env)"
-                );
-                println!(
-                    "    --tls-cert <PATH>            TLS certificate to pin for server connection"
-                );
-                println!("    --width <PIXELS>             Initial display width [default: 1920]");
-                println!("    --height <PIXELS>            Initial display height [default: 1080]");
-                println!("    --framerate <FPS>            Target framerate [default: 120]");
-                println!(
-                    "    --bitrate <KBPS>             Initial video bitrate [default: 100000]"
-                );
-                println!(
-                    "    --encoder <NAME>             Force encoder (nvh264enc, vah264enc, x264enc)"
-                );
-                println!("    --max-width <PIXELS>         Maximum resize width [default: 3840]");
-                println!("    --max-height <PIXELS>        Maximum resize height [default: 2160]");
-                println!(
-                    "    --gpu-driver <MODE>          GPU driver: auto, nvidia, dummy [default: auto]"
-                );
-                println!("    --display-start <N>          Starting display number [default: 10]");
-                println!("    -V, --version                Print version and exit");
-                println!("    -h, --help                   Print this help and exit");
-                std::process::exit(0);
-            }
+            "-V" | "--version" => return Ok(ArgsOutcome::PrintVersion),
+            "-h" | "--help" => return Ok(ArgsOutcome::PrintHelp),
             "--display" => {
                 i += 1;
                 display = args.get(i).context("Missing --display value")?.clone();
@@ -180,7 +170,7 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
         agent_token = std::env::var("BEAM_AGENT_TOKEN").ok();
     }
 
-    Ok(Args {
+    Ok(ArgsOutcome::Run(Args {
         display,
         server_url,
         session_id: session_id.context("--session-id is required")?,
@@ -195,5 +185,330 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
         max_height,
         gpu_driver,
         display_start,
-    })
+    }))
+}
+
+pub(crate) fn parse_args() -> anyhow::Result<Args> {
+    let args: Vec<String> = std::env::args().collect();
+    match parse_args_from(args)? {
+        ArgsOutcome::Run(args) => Ok(args),
+        ArgsOutcome::PrintVersion => {
+            println!("beam-agent {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        ArgsOutcome::PrintHelp => {
+            print_help();
+            std::process::exit(0);
+        }
+    }
+}
+
+fn print_help() {
+    println!("beam-agent - Beam Remote Desktop capture agent");
+    println!();
+    println!("USAGE:");
+    println!("    beam-agent [OPTIONS]");
+    println!();
+    println!("OPTIONS:");
+    println!("    --display <DISPLAY>          X11 display [default: :0]");
+    println!("    --server-url <URL>           Signaling server WebSocket URL");
+    println!("    --session-id <UUID>          Session identifier (required)");
+    println!(
+        "    --agent-token <TOKEN>        Agent authentication token (prefer BEAM_AGENT_TOKEN env)"
+    );
+    println!("    --tls-cert <PATH>            TLS certificate to pin for server connection");
+    println!("    --width <PIXELS>             Initial display width [default: 1920]");
+    println!("    --height <PIXELS>            Initial display height [default: 1080]");
+    println!("    --framerate <FPS>            Target framerate [default: 120]");
+    println!("    --bitrate <KBPS>             Initial video bitrate [default: 100000]");
+    println!("    --encoder <NAME>             Force encoder (nvh264enc, vah264enc, x264enc)");
+    println!("    --max-width <PIXELS>         Maximum resize width [default: 3840]");
+    println!("    --max-height <PIXELS>        Maximum resize height [default: 2160]");
+    println!("    --gpu-driver <MODE>          GPU driver: auto, nvidia, dummy [default: auto]");
+    println!("    --display-start <N>          Starting display number [default: 10]");
+    println!("    -V, --version                Print version and exit");
+    println!("    -h, --help                   Print this help and exit");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> anyhow::Result<ArgsOutcome> {
+        // SAFETY: tests share process env. Clear BEAM_AGENT_TOKEN so tests are
+        // deterministic regardless of run order.
+        // SAFETY: clearing an env var is safe and only affects this process.
+        unsafe { std::env::remove_var("BEAM_AGENT_TOKEN") };
+        let mut full = vec!["beam-agent".to_string()];
+        full.extend(args.iter().map(|s| s.to_string()));
+        parse_args_from(full)
+    }
+
+    fn parsed_args(args: &[&str]) -> anyhow::Result<Args> {
+        match parse(args)? {
+            ArgsOutcome::Run(a) => Ok(a),
+            other => anyhow::bail!("Expected Run, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn defaults_with_only_session_id() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&["--session-id", &id.to_string()]).unwrap();
+        assert_eq!(a.display, ":0");
+        assert_eq!(a.server_url, "");
+        assert_eq!(a.session_id, id);
+        assert!(a.agent_token.is_none());
+        assert_eq!(a.width, 1920);
+        assert_eq!(a.height, 1080);
+        assert_eq!(a.framerate, DEFAULT_FRAMERATE);
+        assert_eq!(a.bitrate, DEFAULT_BITRATE);
+        assert_eq!(a.max_width, 3840);
+        assert_eq!(a.max_height, 2160);
+        assert_eq!(a.gpu_driver, "auto");
+        assert_eq!(a.display_start, 10);
+        assert!(a.encoder.is_none());
+        assert!(a.tls_cert_path.is_none());
+    }
+
+    #[test]
+    fn missing_session_id_returns_err() {
+        let result = parse(&[]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("--session-id is required")
+        );
+    }
+
+    #[test]
+    fn invalid_session_id_returns_err() {
+        let result = parse(&["--session-id", "not-a-uuid"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn version_short_returns_print_version() {
+        let outcome = parse(&["-V"]).unwrap();
+        assert!(matches!(outcome, ArgsOutcome::PrintVersion));
+    }
+
+    #[test]
+    fn version_long_returns_print_version() {
+        let outcome = parse(&["--version"]).unwrap();
+        assert!(matches!(outcome, ArgsOutcome::PrintVersion));
+    }
+
+    #[test]
+    fn help_short_returns_print_help() {
+        let outcome = parse(&["-h"]).unwrap();
+        assert!(matches!(outcome, ArgsOutcome::PrintHelp));
+    }
+
+    #[test]
+    fn help_long_returns_print_help() {
+        let outcome = parse(&["--help"]).unwrap();
+        assert!(matches!(outcome, ArgsOutcome::PrintHelp));
+    }
+
+    #[test]
+    fn version_short_circuits_before_session_id_required() {
+        // --version should bypass --session-id requirement
+        let outcome = parse(&["--version"]).unwrap();
+        assert!(matches!(outcome, ArgsOutcome::PrintVersion));
+    }
+
+    #[test]
+    fn display_override() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&["--display", ":10", "--session-id", &id.to_string()]).unwrap();
+        assert_eq!(a.display, ":10");
+    }
+
+    #[test]
+    fn server_url_override() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&[
+            "--server-url",
+            "wss://example.test/ws",
+            "--session-id",
+            &id.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(a.server_url, "wss://example.test/ws");
+    }
+
+    #[test]
+    fn agent_token_override() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&[
+            "--agent-token",
+            "secret-token-value",
+            "--session-id",
+            &id.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(a.agent_token.as_deref(), Some("secret-token-value"));
+    }
+
+    #[test]
+    fn tls_cert_path_override() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&[
+            "--tls-cert",
+            "/etc/beam/cert.pem",
+            "--session-id",
+            &id.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(a.tls_cert_path.as_deref(), Some("/etc/beam/cert.pem"));
+    }
+
+    #[test]
+    fn width_height_overrides() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&[
+            "--width",
+            "2560",
+            "--height",
+            "1440",
+            "--session-id",
+            &id.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(a.width, 2560);
+        assert_eq!(a.height, 1440);
+    }
+
+    #[test]
+    fn framerate_bitrate_overrides() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&[
+            "--framerate",
+            "60",
+            "--bitrate",
+            "10000",
+            "--session-id",
+            &id.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(a.framerate, 60);
+        assert_eq!(a.bitrate, 10000);
+    }
+
+    #[test]
+    fn encoder_override() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&["--encoder", "x264enc", "--session-id", &id.to_string()]).unwrap();
+        assert_eq!(a.encoder.as_deref(), Some("x264enc"));
+    }
+
+    #[test]
+    fn max_dimensions_override() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&[
+            "--max-width",
+            "7680",
+            "--max-height",
+            "4320",
+            "--session-id",
+            &id.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(a.max_width, 7680);
+        assert_eq!(a.max_height, 4320);
+    }
+
+    #[test]
+    fn gpu_driver_override() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&["--gpu-driver", "nvidia", "--session-id", &id.to_string()]).unwrap();
+        assert_eq!(a.gpu_driver, "nvidia");
+    }
+
+    #[test]
+    fn display_start_override() {
+        let id = Uuid::new_v4();
+        let a = parsed_args(&["--display-start", "42", "--session-id", &id.to_string()]).unwrap();
+        assert_eq!(a.display_start, 42);
+    }
+
+    #[test]
+    fn unknown_argument_returns_err() {
+        let id = Uuid::new_v4();
+        let result = parse(&["--bogus", "--session-id", &id.to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown argument"));
+    }
+
+    #[test]
+    fn missing_value_for_display_returns_err() {
+        let result = parse(&["--display"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_value_for_width_returns_err() {
+        let result = parse(&["--width"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_width_value_returns_err() {
+        let id = Uuid::new_v4();
+        let result = parse(&["--width", "not-a-number", "--session-id", &id.to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("--width"));
+    }
+
+    #[test]
+    fn invalid_height_value_returns_err() {
+        let id = Uuid::new_v4();
+        let result = parse(&["--height", "not-a-number", "--session-id", &id.to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_framerate_value_returns_err() {
+        let id = Uuid::new_v4();
+        let result = parse(&["--framerate", "x", "--session-id", &id.to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_bitrate_value_returns_err() {
+        let id = Uuid::new_v4();
+        let result = parse(&["--bitrate", "abc", "--session-id", &id.to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_max_width_value_returns_err() {
+        let id = Uuid::new_v4();
+        let result = parse(&["--max-width", "x", "--session-id", &id.to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_max_height_value_returns_err() {
+        let id = Uuid::new_v4();
+        let result = parse(&["--max-height", "x", "--session-id", &id.to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_display_start_value_returns_err() {
+        let id = Uuid::new_v4();
+        let result = parse(&["--display-start", "x", "--session-id", &id.to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn defaults_are_sensible_constants() {
+        // Document and lock the default constants.
+        assert_eq!(DEFAULT_BITRATE, 50_000);
+        assert_eq!(DEFAULT_FRAMERATE, 120);
+    }
 }

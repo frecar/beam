@@ -989,4 +989,29 @@ idle_timeout = 7200
             "empty admin username should produce warning"
         );
     }
+
+    // Cover the `default_true` helper — used by `metrics_require_auth` and
+    // `enabled` (audio). A minimal TOML omitting those fields must
+    // deserialize them to `true`.
+    #[test]
+    fn default_true_helpers_are_invoked_during_deserialization() {
+        let minimal = r#"
+[server]
+port = 8444
+
+[observability]
+
+[video]
+
+[audio]
+
+[session]
+"#;
+        let config: BeamConfig = toml::from_str(minimal).unwrap();
+        assert!(
+            config.server.metrics_require_auth,
+            "default_true for metrics_require_auth"
+        );
+        assert!(config.audio.enabled, "default_true for audio.enabled");
+    }
 }
