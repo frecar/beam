@@ -5,7 +5,7 @@ on:
   # Hourly sweep to rebase auto-merge-enabled PRs that fell behind main.
   # Dependabot doesn't refire pull_request when main moves, so an
   # `auto-merge enabled + behind main` PR stalls indefinitely without
-  # this. Discovered after 8 PRs sat 6 days (sentinel#470).
+  # this. Discovered after 8 PRs sat 6 days unmerged.
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
