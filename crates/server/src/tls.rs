@@ -325,4 +325,218 @@ mod tests {
         let _acceptor = make_acceptor(config);
         // Just verify it doesn't panic
     }
+
+    // --- build_tls_config: user-provided cert+key path ---
+
+    /// Helper: write a fresh self-signed cert+key pair to temp PEM files,
+    /// returns (cert_path, key_path) and the owning tempdir (kept alive by caller).
+    fn write_temp_cert_pair(
+        prefix: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        init_crypto();
+        let (certs, key) = generate_self_signed().unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "beam-tls-{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+
+        let cert_pem = pem::encode(&pem::Pem::new("CERTIFICATE", certs[0].to_vec()));
+        std::fs::write(&cert_path, &cert_pem).unwrap();
+        let key_bytes = match &key {
+            PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der(),
+            _ => unreachable!(),
+        };
+        let key_pem = pem::encode(&pem::Pem::new("PRIVATE KEY", key_bytes.to_vec()));
+        std::fs::write(&key_path, &key_pem).unwrap();
+
+        (cert_path, key_path, dir)
+    }
+
+    #[test]
+    fn build_tls_config_with_user_provided_paths_succeeds() {
+        init_crypto();
+        let (cert_path, key_path, dir) = write_temp_cert_pair("build-ok");
+
+        let result = build_tls_config(
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
+        );
+        assert!(
+            result.is_ok(),
+            "build_tls_config failed: {:?}",
+            result.err()
+        );
+
+        let cfg = result.unwrap();
+        assert_eq!(
+            cfg.cert_pem_path,
+            cert_path.to_str().unwrap(),
+            "cert_pem_path should echo the user-provided cert path"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tls_config_user_cert_drives_acceptor() {
+        init_crypto();
+        let (cert_path, key_path, dir) = write_temp_cert_pair("acceptor");
+
+        let cfg = build_tls_config(
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
+        )
+        .unwrap();
+        // The returned ServerConfig should be usable by tokio_rustls
+        let _acceptor = make_acceptor(cfg.config);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tls_config_only_cert_set_falls_through_to_self_signed_branch() {
+        // (Some, None) and (None, Some) both fall through to the self-signed branch.
+        // We can't exercise the full self-signed branch without write access to
+        // /var/lib/beam, but we CAN verify the function attempts that branch
+        // (returns Err if /var/lib/beam isn't writable, doesn't panic) — and
+        // critically that it does NOT call load_certs_from_files with one None.
+        let (cert_path, _key_path, dir) = write_temp_cert_pair("partial");
+
+        // (Some, None) must route into the self-signed branch, NOT the load branch.
+        // The load branch would never be reached with one None.
+        let result = build_tls_config(Some(cert_path.to_str().unwrap()), None);
+        // On a typical CI worker, /var/lib/beam is not writable → expect Err.
+        // On a test host where it IS writable, expect Ok. Both prove we didn't
+        // misroute into the (Some, Some) branch with a None key argument.
+        if let Err(e) = &result {
+            let msg = format!("{e:#}");
+            assert!(
+                msg.contains("/var/lib/beam")
+                    || msg.contains("Permission denied")
+                    || msg.contains("Read-only"),
+                "Unexpected error from build_tls_config(Some, None): {msg}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tls_config_with_bad_cert_path_returns_err() {
+        let result = build_tls_config(
+            Some("/nonexistent/path/cert.pem"),
+            Some("/nonexistent/path/key.pem"),
+        );
+        assert!(
+            result.is_err(),
+            "Should error on missing user-provided cert/key"
+        );
+    }
+
+    #[test]
+    fn build_tls_config_with_corrupt_cert_returns_err() {
+        let dir = std::env::temp_dir().join(format!("beam-tls-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(
+            &cert_path,
+            "-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        std::fs::write(&key_path, "garbage").unwrap();
+
+        let result = build_tls_config(
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
+        );
+        assert!(result.is_err(), "Corrupt PEM should produce an error");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- load_certs_from_files: directory-as-cert and empty-file cases ---
+
+    #[test]
+    fn load_certs_fails_on_empty_pem_files() {
+        let dir = std::env::temp_dir().join(format!("beam-tls-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, "").unwrap();
+        std::fs::write(&key_path, "").unwrap();
+
+        let result = load_certs_from_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
+        // Empty PEM → no private key found → Err
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_certs_fails_when_key_file_has_no_private_key() {
+        init_crypto();
+        let (certs, _key) = generate_self_signed().unwrap();
+        let dir = std::env::temp_dir().join(format!("beam-tls-nokey-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+
+        // Valid cert file
+        let cert_pem = pem::encode(&pem::Pem::new("CERTIFICATE", certs[0].to_vec()));
+        std::fs::write(&cert_path, &cert_pem).unwrap();
+        // Key file holds only a CERTIFICATE block, no private key → Err("No private key")
+        std::fs::write(&key_path, &cert_pem).unwrap();
+
+        let result = load_certs_from_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("No private key") || msg.contains("private key"),
+            "Expected private-key error, got: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- self-signed cert content sanity ---
+
+    #[test]
+    fn generated_cert_has_localhost_dns_san() {
+        init_crypto();
+        let (certs, _key) = generate_self_signed().unwrap();
+        let der = &certs[0];
+        // The cert should contain the literal "localhost" string somewhere in
+        // its DER encoding (DNS SAN). We don't fully parse the x509 to keep
+        // this dep-free.
+        let bytes: &[u8] = der.as_ref();
+        let needle = b"localhost";
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "Generated cert DER should contain the localhost DNS SAN"
+        );
+    }
+
+    #[test]
+    fn generated_cert_is_repeatable_in_structure_not_content() {
+        // Two consecutive calls must each succeed and each produce a distinct cert.
+        init_crypto();
+        let (certs_a, _key_a) = generate_self_signed().unwrap();
+        let (certs_b, _key_b) = generate_self_signed().unwrap();
+        assert_eq!(certs_a.len(), 1);
+        assert_eq!(certs_b.len(), 1);
+        // RSA/ECDSA randomness means the two DERs should not be identical
+        assert_ne!(
+            certs_a[0], certs_b[0],
+            "Two generated self-signed certs should differ"
+        );
+    }
 }

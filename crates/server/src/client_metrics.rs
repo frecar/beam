@@ -269,4 +269,291 @@ mod tests {
 
         assert!(!body.contains("beam_client_latency_ms{session="));
     }
+
+    // --- Header / type lines always emitted ---
+
+    #[test]
+    fn render_prometheus_emits_all_help_and_type_lines_when_empty() {
+        let store = ClientMetricsStore::default();
+        let body = store.render_prometheus(&[]);
+
+        // Every metric must have its HELP + TYPE header regardless of active sessions
+        let expected_headers = [
+            "beam_client_latency_ms",
+            "beam_client_jitter_ms",
+            "beam_client_fps",
+            "beam_client_decode_ms",
+            "beam_client_video_bytes_per_second",
+            "beam_client_audio_bytes_per_second",
+            "beam_client_video_frames_decoded_total",
+            "beam_client_video_frames_dropped_total",
+            "beam_client_audio_frames_decoded_total",
+            "beam_client_audio_dropouts_total",
+            "beam_client_audio_buffer_delay_ms",
+            "beam_client_last_report_age_seconds",
+        ];
+        for name in expected_headers {
+            assert!(
+                body.contains(&format!("# HELP {name}")),
+                "Missing HELP line for {name}"
+            );
+            assert!(
+                body.contains(&format!("# TYPE {name}")),
+                "Missing TYPE line for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_prometheus_counter_types_distinct_from_gauges() {
+        let store = ClientMetricsStore::default();
+        let body = store.render_prometheus(&[]);
+        // Counters are *_total
+        assert!(body.contains("# TYPE beam_client_video_frames_decoded_total counter"));
+        assert!(body.contains("# TYPE beam_client_audio_dropouts_total counter"));
+        // Gauges
+        assert!(body.contains("# TYPE beam_client_latency_ms gauge"));
+        assert!(body.contains("# TYPE beam_client_fps gauge"));
+    }
+
+    // --- Optional metric branches: Some vs None ---
+
+    #[test]
+    fn render_prometheus_omits_none_optional_metrics() {
+        let store = ClientMetricsStore::default();
+        let session_id = Uuid::nil();
+        // All optional fields are None — only counters/gauges should appear, optionals skipped
+        store.update(
+            session_id,
+            ClientMetricsReport {
+                latency_ms: None,
+                jitter_ms: None,
+                fps: None,
+                decode_ms: None,
+                video_bytes_per_second: 5,
+                audio_bytes_per_second: 6,
+                video_frames_decoded_total: 7,
+                video_frames_dropped_total: 8,
+                audio_frames_decoded_total: 9,
+                audio_dropouts_total: 10,
+                audio_buffer_delay_ms: None,
+            },
+        );
+
+        let body = store.render_prometheus(&[session(session_id)]);
+
+        // Required (always-present) metrics still rendered
+        assert!(body.contains(
+            "beam_client_video_bytes_per_second{session=\"00000000-0000-0000-0000-000000000000\"} 5"
+        ));
+        // Optional metrics with None value should NOT appear with a value
+        let session_str = "session=\"00000000-0000-0000-0000-000000000000\"";
+        for name in [
+            "beam_client_latency_ms",
+            "beam_client_jitter_ms",
+            "beam_client_fps",
+            "beam_client_decode_ms",
+            "beam_client_audio_buffer_delay_ms",
+        ] {
+            let line = format!("{name}{{{session_str}}}");
+            assert!(
+                !body.contains(&line),
+                "Expected no value line for None optional {name}, got body: {body}"
+            );
+        }
+    }
+
+    // --- f64 finiteness guard ---
+
+    #[test]
+    fn render_prometheus_skips_non_finite_optionals() {
+        let store = ClientMetricsStore::default();
+        let session_id = Uuid::nil();
+        store.update(
+            session_id,
+            ClientMetricsReport {
+                // NaN, +inf, -inf must all be skipped by the is_finite() guard
+                latency_ms: Some(f64::NAN),
+                jitter_ms: Some(f64::INFINITY),
+                fps: Some(f64::NEG_INFINITY),
+                decode_ms: Some(1.5),
+                video_bytes_per_second: 0,
+                audio_bytes_per_second: 0,
+                video_frames_decoded_total: 0,
+                video_frames_dropped_total: 0,
+                audio_frames_decoded_total: 0,
+                audio_dropouts_total: 0,
+                audio_buffer_delay_ms: Some(2.25),
+            },
+        );
+
+        let body = store.render_prometheus(&[session(session_id)]);
+
+        // Finite values are emitted
+        assert!(body.contains(
+            "beam_client_decode_ms{session=\"00000000-0000-0000-0000-000000000000\"} 1.500"
+        ));
+        assert!(body.contains("beam_client_audio_buffer_delay_ms{session=\"00000000-0000-0000-0000-000000000000\"} 2.250"));
+        // NaN/Inf values are silently dropped
+        assert!(!body.contains("NaN"), "Body should never serialize NaN");
+        assert!(!body.contains("inf"), "Body should never serialize inf");
+    }
+
+    // --- remove() path ---
+
+    #[test]
+    fn remove_clears_snapshot_for_session() {
+        let store = ClientMetricsStore::default();
+        let session_id = Uuid::new_v4();
+        store.update(
+            session_id,
+            ClientMetricsReport {
+                latency_ms: Some(42.0),
+                ..Default::default()
+            },
+        );
+
+        // Confirm metric is present before remove
+        let body_before = store.render_prometheus(&[session(session_id)]);
+        let label = format!("session=\"{session_id}\"");
+        assert!(
+            body_before.contains(&format!("beam_client_latency_ms{{{label}}}")),
+            "Pre-remove body should contain the session's latency line"
+        );
+
+        store.remove(session_id);
+
+        let body_after = store.render_prometheus(&[session(session_id)]);
+        assert!(
+            !body_after.contains(&format!("beam_client_latency_ms{{{label}}}")),
+            "Post-remove body should not contain the session's latency line"
+        );
+    }
+
+    #[test]
+    fn remove_nonexistent_session_is_noop() {
+        let store = ClientMetricsStore::default();
+        // Removing a session never inserted should not panic or alter behavior
+        store.remove(Uuid::new_v4());
+        let body = store.render_prometheus(&[]);
+        // Still emits headers
+        assert!(body.contains("# HELP beam_client_latency_ms"));
+    }
+
+    // --- update() overwrites previous snapshot ---
+
+    #[test]
+    fn update_overwrites_previous_snapshot() {
+        let store = ClientMetricsStore::default();
+        let session_id = Uuid::nil();
+        store.update(
+            session_id,
+            ClientMetricsReport {
+                video_frames_decoded_total: 1,
+                ..Default::default()
+            },
+        );
+        store.update(
+            session_id,
+            ClientMetricsReport {
+                video_frames_decoded_total: 999,
+                ..Default::default()
+            },
+        );
+
+        let body = store.render_prometheus(&[session(session_id)]);
+        assert!(body.contains("beam_client_video_frames_decoded_total{session=\"00000000-0000-0000-0000-000000000000\"} 999"));
+        // Previous value gone
+        assert!(!body.contains("beam_client_video_frames_decoded_total{session=\"00000000-0000-0000-0000-000000000000\"} 1\n"));
+    }
+
+    // --- Multi-session rendering ---
+
+    #[test]
+    fn render_prometheus_handles_multiple_active_sessions() {
+        let store = ClientMetricsStore::default();
+        let a = Uuid::from_u128(0x11);
+        let b = Uuid::from_u128(0x22);
+        store.update(
+            a,
+            ClientMetricsReport {
+                latency_ms: Some(10.0),
+                video_frames_decoded_total: 100,
+                ..Default::default()
+            },
+        );
+        store.update(
+            b,
+            ClientMetricsReport {
+                latency_ms: Some(20.0),
+                video_frames_decoded_total: 200,
+                ..Default::default()
+            },
+        );
+
+        let body = store.render_prometheus(&[session(a), session(b)]);
+
+        let label_a = format!("session=\"{a}\"");
+        let label_b = format!("session=\"{b}\"");
+        assert!(body.contains(&format!("beam_client_latency_ms{{{label_a}}} 10.000")));
+        assert!(body.contains(&format!("beam_client_latency_ms{{{label_b}}} 20.000")));
+        assert!(body.contains(&format!(
+            "beam_client_video_frames_decoded_total{{{label_a}}} 100"
+        )));
+        assert!(body.contains(&format!(
+            "beam_client_video_frames_decoded_total{{{label_b}}} 200"
+        )));
+    }
+
+    #[test]
+    fn render_prometheus_evicts_only_stale_keeps_active() {
+        let store = ClientMetricsStore::default();
+        let active = Uuid::from_u128(0xA);
+        let stale = Uuid::from_u128(0xB);
+        store.update(
+            active,
+            ClientMetricsReport {
+                latency_ms: Some(5.0),
+                ..Default::default()
+            },
+        );
+        store.update(
+            stale,
+            ClientMetricsReport {
+                latency_ms: Some(99.0),
+                ..Default::default()
+            },
+        );
+
+        // Only `active` is in the active list — stale must be evicted from internal store too
+        let body = store.render_prometheus(&[session(active)]);
+
+        let active_label = format!("session=\"{active}\"");
+        let stale_label = format!("session=\"{stale}\"");
+        assert!(body.contains(&format!("beam_client_latency_ms{{{active_label}}} 5.000")));
+        assert!(!body.contains(&format!("beam_client_latency_ms{{{stale_label}}}")));
+
+        // After eviction, re-rendering with no sessions should still not have the stale entry
+        let body2 = store.render_prometheus(&[]);
+        assert!(!body2.contains(&format!("beam_client_latency_ms{{{stale_label}}}")));
+    }
+
+    // --- last_report_age always >=0 finite ---
+
+    #[test]
+    fn render_prometheus_includes_last_report_age() {
+        let store = ClientMetricsStore::default();
+        let session_id = Uuid::nil();
+        store.update(session_id, ClientMetricsReport::default());
+
+        let body = store.render_prometheus(&[session(session_id)]);
+
+        // Age line is present (always finite, derived from updated_at.elapsed())
+        let prefix =
+            "beam_client_last_report_age_seconds{session=\"00000000-0000-0000-0000-000000000000\"}";
+        assert!(
+            body.contains(prefix),
+            "Expected last_report_age line for session, body: {body}"
+        );
+    }
 }
