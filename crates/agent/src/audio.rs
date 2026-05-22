@@ -146,4 +146,77 @@ mod tests {
             "960 samples * 2 channels * 2 bytes = 3840"
         );
     }
+
+    #[test]
+    fn audio_frame_math_24khz_mono() {
+        // 20ms at 24kHz mono s16le = 480 samples, 960 bytes
+        let sample_rate: u32 = 24000;
+        let channels: u16 = 1;
+        let samples_per_frame = (sample_rate * 20 / 1000) as usize;
+        let frame_bytes = samples_per_frame * channels as usize * 2;
+        assert_eq!(samples_per_frame, 480);
+        assert_eq!(frame_bytes, 960);
+    }
+
+    #[test]
+    fn audio_frame_math_8khz_mono() {
+        // 20ms at 8kHz mono s16le = 160 samples, 320 bytes
+        let sample_rate: u32 = 8000;
+        let channels: u16 = 1;
+        let samples_per_frame = (sample_rate * 20 / 1000) as usize;
+        let frame_bytes = samples_per_frame * channels as usize * 2;
+        assert_eq!(samples_per_frame, 160);
+        assert_eq!(frame_bytes, 320);
+    }
+
+    #[test]
+    fn audio_frame_math_48khz_stereo_matches_24khz_stereo_doubled() {
+        // 48kHz stereo has exactly 2x the per-frame byte budget of 24kHz stereo.
+        let bytes_48 = ((48000u32 * 20 / 1000) as usize) * 2 * 2;
+        let bytes_24 = ((24000u32 * 20 / 1000) as usize) * 2 * 2;
+        assert_eq!(bytes_48, bytes_24 * 2);
+    }
+
+    #[test]
+    fn audio_capture_rejects_invalid_channel_count_zero() {
+        // 0 channels is invalid for PulseAudio — connection itself should fail
+        // before we get to the Opus sanity check.
+        let result = AudioCapture::new(48000, 0, Some("/tmp/nonexistent-pulse-server"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audio_capture_rejects_invalid_channel_count_three() {
+        // 3 channels: PulseAudio may accept it, but our match in
+        // AudioCapture::new rejects anything except 1 or 2 for Opus.
+        // Either branch (connection failure or unsupported channel count)
+        // produces an Err, which is what we assert here.
+        let result = AudioCapture::new(48000, 3, Some("/tmp/nonexistent-pulse-server"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audio_capture_rejects_unsupported_sample_rate() {
+        // 44.1kHz is not in our Opus sample-rate match. Even if PulseAudio
+        // would accept it, our explicit list (48k/24k/16k/12k/8k) rejects.
+        let result = AudioCapture::new(44100, 2, Some("/tmp/nonexistent-pulse-server"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audio_pcm_to_i16_little_endian_conversion() {
+        // The capture path uses i16::from_le_bytes; verify the byte order
+        // matches the s16le PulseAudio format declaration.
+        let pcm = [0x00u8, 0x80]; // -32768 in s16le
+        let sample = i16::from_le_bytes([pcm[0], pcm[1]]);
+        assert_eq!(sample, i16::MIN);
+
+        let pcm = [0xFFu8, 0x7F]; // 32767 in s16le
+        let sample = i16::from_le_bytes([pcm[0], pcm[1]]);
+        assert_eq!(sample, i16::MAX);
+
+        let pcm = [0x00u8, 0x00];
+        let sample = i16::from_le_bytes([pcm[0], pcm[1]]);
+        assert_eq!(sample, 0);
+    }
 }

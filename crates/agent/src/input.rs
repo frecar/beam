@@ -295,4 +295,84 @@ mod tests {
         InputInjector::accumulate_scroll(&mut accum, -0.5);
         assert!(accum.abs() < 0.001);
     }
+
+    #[test]
+    fn accumulate_scroll_exact_zero_input_returns_zero() {
+        // A 0.0 push should be a no-op and leave the accumulator untouched.
+        let mut accum = 0.5;
+        let discrete = InputInjector::accumulate_scroll(&mut accum, 0.0);
+        assert_eq!(discrete, 0);
+        assert!((accum - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn accumulate_scroll_just_under_one_notch_stays_subnotch() {
+        let mut accum = 0.0;
+        let discrete = InputInjector::accumulate_scroll(&mut accum, 0.999);
+        assert_eq!(discrete, 0);
+        assert!((accum - 0.999).abs() < 0.001);
+    }
+
+    #[test]
+    fn accumulate_scroll_two_subnotch_pushes_yield_one_notch() {
+        let mut accum = 0.0;
+        assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.6), 0);
+        // First push leaves 0.6 in the bank.
+        let discrete = InputInjector::accumulate_scroll(&mut accum, 0.6);
+        assert_eq!(discrete, 1);
+        // 0.6 + 0.6 = 1.2 → 1 notch emitted, 0.2 left in the accumulator.
+        assert!((accum - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn accumulate_scroll_large_negative_jump() {
+        // Symmetric to the positive large-jump case: -5.7 → -5 with -0.7 carry.
+        let mut accum = 0.0;
+        let discrete = InputInjector::accumulate_scroll(&mut accum, -5.7);
+        assert_eq!(discrete, -5);
+        assert!((accum - (-0.7)).abs() < 0.001);
+    }
+
+    #[test]
+    fn accumulate_scroll_negative_then_positive_returns_to_zero() {
+        let mut accum = 0.0;
+        let _ = InputInjector::accumulate_scroll(&mut accum, -0.3);
+        let _ = InputInjector::accumulate_scroll(&mut accum, 0.3);
+        assert!(accum.abs() < 0.001);
+    }
+
+    #[test]
+    fn accumulate_scroll_keeps_sign_of_residual() {
+        // Negative pushes should leave a negative residual (no sign flip from `as i32`).
+        let mut accum = 0.0;
+        let _ = InputInjector::accumulate_scroll(&mut accum, -1.4);
+        // 1 negative notch emitted, residual is between -1 and 0.
+        assert!(accum < 0.0, "residual should be negative, got {accum}");
+        assert!(accum > -1.0, "residual should be > -1, got {accum}");
+    }
+
+    #[test]
+    fn map_button_known_buttons_are_offset_by_one() {
+        // Browser button index → X11 button: 0→1, 1→2, 2→3.
+        for browser in 0u8..3 {
+            let x11 = InputInjector::map_button(browser).unwrap();
+            assert_eq!(
+                x11,
+                browser + 1,
+                "Browser button {browser} should map to X11 {}",
+                browser + 1
+            );
+        }
+    }
+
+    #[test]
+    fn map_button_errors_for_each_unknown_index() {
+        // Anything from 3 upwards must fail, not silently map to a stale button.
+        for b in [3u8, 4, 5, 10, 100] {
+            assert!(
+                InputInjector::map_button(b).is_err(),
+                "Browser button {b} should be rejected"
+            );
+        }
+    }
 }
