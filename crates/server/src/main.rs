@@ -20,33 +20,37 @@ use tracing_subscriber::EnvFilter;
 use crate::session::SessionManager;
 use crate::web::AppState;
 
-fn parse_args() -> (PathBuf, Option<u16>) {
-    let args: Vec<String> = std::env::args().collect();
+/// What `parse_args_from` requests of the caller.
+///
+/// Split out so the argument parser is testable (no `std::process::exit`
+/// inside, no `println!` side effects in the hot path).
+#[derive(Debug, PartialEq, Eq)]
+enum ArgsOutcome {
+    /// Continue startup with these settings.
+    Run {
+        config_path: PathBuf,
+        port_override: Option<u16>,
+    },
+    /// Print the version banner, then exit successfully.
+    PrintVersion,
+    /// Print help text, then exit successfully.
+    PrintHelp,
+}
+
+fn parse_args_from<I, S>(args: I) -> ArgsOutcome
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
     let mut config_path = PathBuf::from("./config/beam.toml");
     let mut port_override = None;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-V" | "--version" => {
-                println!("beam-server {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
-            "-h" | "--help" => {
-                println!("beam-server - Beam Remote Desktop signaling server");
-                println!();
-                println!("USAGE:");
-                println!("    beam-server [OPTIONS]");
-                println!();
-                println!("OPTIONS:");
-                println!(
-                    "    -c, --config <PATH>    Configuration file [default: ./config/beam.toml]"
-                );
-                println!("    -p, --port <PORT>      Override server port");
-                println!("    -V, --version          Print version and exit");
-                println!("    -h, --help             Print this help and exit");
-                std::process::exit(0);
-            }
+            "-V" | "--version" => return ArgsOutcome::PrintVersion,
+            "-h" | "--help" => return ArgsOutcome::PrintHelp,
             "--config" | "-c" if i + 1 < args.len() => {
                 config_path = PathBuf::from(&args[i + 1]);
                 i += 1;
@@ -60,7 +64,37 @@ fn parse_args() -> (PathBuf, Option<u16>) {
         i += 1;
     }
 
-    (config_path, port_override)
+    ArgsOutcome::Run {
+        config_path,
+        port_override,
+    }
+}
+
+fn parse_args() -> (PathBuf, Option<u16>) {
+    let args: Vec<String> = std::env::args().collect();
+    match parse_args_from(args) {
+        ArgsOutcome::Run {
+            config_path,
+            port_override,
+        } => (config_path, port_override),
+        ArgsOutcome::PrintVersion => {
+            println!("beam-server {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        ArgsOutcome::PrintHelp => {
+            println!("beam-server - Beam Remote Desktop signaling server");
+            println!();
+            println!("USAGE:");
+            println!("    beam-server [OPTIONS]");
+            println!();
+            println!("OPTIONS:");
+            println!("    -c, --config <PATH>    Configuration file [default: ./config/beam.toml]");
+            println!("    -p, --port <PORT>      Override server port");
+            println!("    -V, --version          Print version and exit");
+            println!("    -h, --help             Print this help and exit");
+            std::process::exit(0);
+        }
+    }
 }
 
 #[tokio::main]
@@ -501,5 +535,246 @@ mod cleanup_tests {
         assert!(other.exists(), "Non-.log extension must be left alone");
         assert!(!agent_stale.exists(), "Matching stale agent log removed");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod args_tests {
+    use super::{ArgsOutcome, parse_args_from};
+    use std::path::PathBuf;
+
+    fn run_outcome(args: &[&str]) -> ArgsOutcome {
+        parse_args_from(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn defaults_when_no_arguments() {
+        let outcome = run_outcome(&["beam-server"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: None,
+            }
+        );
+    }
+
+    #[test]
+    fn config_long_flag_overrides_path() {
+        let outcome = run_outcome(&["beam-server", "--config", "/etc/beam/server.toml"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("/etc/beam/server.toml"),
+                port_override: None,
+            }
+        );
+    }
+
+    #[test]
+    fn config_short_flag_overrides_path() {
+        let outcome = run_outcome(&["beam-server", "-c", "./custom.toml"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./custom.toml"),
+                port_override: None,
+            }
+        );
+    }
+
+    #[test]
+    fn port_long_flag_sets_override() {
+        let outcome = run_outcome(&["beam-server", "--port", "9443"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: Some(9443),
+            }
+        );
+    }
+
+    #[test]
+    fn port_short_flag_sets_override() {
+        let outcome = run_outcome(&["beam-server", "-p", "443"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: Some(443),
+            }
+        );
+    }
+
+    #[test]
+    fn port_non_numeric_is_silently_dropped() {
+        // Bad port input → keep port_override at None rather than crashing.
+        let outcome = run_outcome(&["beam-server", "--port", "not-a-number"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: None,
+            }
+        );
+    }
+
+    #[test]
+    fn port_out_of_u16_range_is_silently_dropped() {
+        let outcome = run_outcome(&["beam-server", "-p", "70000"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: None,
+            }
+        );
+    }
+
+    #[test]
+    fn config_and_port_combined() {
+        let outcome = run_outcome(&["beam-server", "--config", "/tmp/x.toml", "--port", "8443"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("/tmp/x.toml"),
+                port_override: Some(8443),
+            }
+        );
+    }
+
+    #[test]
+    fn config_and_port_short_combined() {
+        let outcome = run_outcome(&["beam-server", "-c", "/tmp/y.toml", "-p", "12345"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("/tmp/y.toml"),
+                port_override: Some(12345),
+            }
+        );
+    }
+
+    #[test]
+    fn version_long_flag_returns_print_version() {
+        assert_eq!(
+            run_outcome(&["beam-server", "--version"]),
+            ArgsOutcome::PrintVersion
+        );
+    }
+
+    #[test]
+    fn version_short_flag_returns_print_version() {
+        assert_eq!(
+            run_outcome(&["beam-server", "-V"]),
+            ArgsOutcome::PrintVersion
+        );
+    }
+
+    #[test]
+    fn help_long_flag_returns_print_help() {
+        assert_eq!(
+            run_outcome(&["beam-server", "--help"]),
+            ArgsOutcome::PrintHelp
+        );
+    }
+
+    #[test]
+    fn help_short_flag_returns_print_help() {
+        assert_eq!(run_outcome(&["beam-server", "-h"]), ArgsOutcome::PrintHelp);
+    }
+
+    #[test]
+    fn unknown_flag_is_ignored() {
+        // Unrecognized arguments don't crash the parser; defaults stand.
+        let outcome = run_outcome(&["beam-server", "--what-is-this", "extra"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: None,
+            }
+        );
+    }
+
+    #[test]
+    fn trailing_config_flag_without_value_keeps_default() {
+        // "--config" at the very end has no following argv slot.
+        let outcome = run_outcome(&["beam-server", "--config"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: None,
+            }
+        );
+    }
+
+    #[test]
+    fn trailing_port_flag_without_value_keeps_default() {
+        let outcome = run_outcome(&["beam-server", "-p"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: None,
+            }
+        );
+    }
+
+    #[test]
+    fn version_short_circuits_remaining_args() {
+        // Once we see --version we return immediately, so a later --port is ignored.
+        assert_eq!(
+            run_outcome(&["beam-server", "--version", "--port", "9999"]),
+            ArgsOutcome::PrintVersion,
+        );
+    }
+
+    #[test]
+    fn help_short_circuits_remaining_args() {
+        assert_eq!(
+            run_outcome(&["beam-server", "-h", "--config", "/etc/x"]),
+            ArgsOutcome::PrintHelp,
+        );
+    }
+
+    #[test]
+    fn duplicate_port_uses_last_value() {
+        // The simple while-loop overwrites earlier overrides with later ones.
+        let outcome = run_outcome(&["beam-server", "-p", "1111", "-p", "2222"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: Some(2222),
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_config_uses_last_value() {
+        let outcome = run_outcome(&["beam-server", "-c", "a.toml", "-c", "b.toml"]);
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("b.toml"),
+                port_override: None,
+            }
+        );
+    }
+
+    #[test]
+    fn empty_argv_returns_defaults() {
+        // Defensive: even an empty argv vector (no argv[0]) should not panic.
+        let outcome = parse_args_from(Vec::<String>::new());
+        assert_eq!(
+            outcome,
+            ArgsOutcome::Run {
+                config_path: PathBuf::from("./config/beam.toml"),
+                port_override: None,
+            }
+        );
     }
 }
