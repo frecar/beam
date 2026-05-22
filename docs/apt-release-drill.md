@@ -12,7 +12,7 @@ This runbook covers the public Beam release path:
 - GPG signature verification.
 - `apt update` visibility for the latest version.
 
-Cluster monitoring and production host orchestration belong in the operator's infrastructure repository, not this public repo.
+Monitoring and production host orchestration are out of scope for this repo — they belong in your own deployment infrastructure. This runbook only covers the public release pipeline that produces the signed APT artifacts you then consume.
 
 ## Public Verifier
 

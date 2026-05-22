@@ -27,8 +27,10 @@
 - Install pre-push hook: `make install-hooks`
 
 ## LLM Policy
-- Route model-assisted features through `llm.carlsen.io`.
-- Do not add Claude/OpenAI/Anthropic external API endpoints or runtime fallbacks. `scripts/check_no_external_llm.py` enforces this in pre-commit and CI (asgard#833).
+
+Beam itself does not call LLMs at runtime. If a contributor adds model-assisted tooling (e.g. release notes, log summarization, doc generation), route it through the endpoint configured in the `LLM_ENDPOINT` environment variable — never hard-code a third-party API URL or runtime fallback in source.
+
+`scripts/check_no_external_llm.py` enforces this policy via pre-commit and CI: it scans for hard-coded `api.openai.com`, `api.anthropic.com`, and similar third-party endpoints. Configure your own endpoint via env at build/run time.
 
 ## Deployment
 
@@ -38,8 +40,9 @@
 1. `make release VERSION=X.Y.Z` — runs CI, tags, pushes
 2. Wait for GitHub Actions to build `.deb` and publish to APT repo
 3. Hosts pick up the new package via their normal APT update cycle (e.g.
-   an Ansible playbook calling `apt update && apt install beam=X.Y.Z` from
-   the operator's infra-management repo — out of scope for this project)
+   an Ansible playbook or your deployment tool of choice calling
+   `apt update && apt install beam=X.Y.Z` from your own deployment
+   infrastructure — out of scope for this project)
 4. Verify: check service health on each host
 
 **Development only** (local testing on your own machine):
@@ -99,9 +102,10 @@ make release VERSION=X.Y.Z
 # 5. Monitor GitHub Actions: https://github.com/frecar/beam/actions
 #    Wait for the release workflow to complete (builds .deb, publishes to APT)
 
-# 6. Deploy to production via the operator's infra-management tooling
-#    (out of scope for this repo — typically an Ansible play that
-#    runs `apt update && apt install beam=X.Y.Z` on each target host)
+# 6. Deploy to production via your own deployment tooling
+#    (out of scope for this repo — typically an Ansible play or other
+#    config-management tool that runs `apt update && apt install beam=X.Y.Z`
+#    on each target host)
 
 # 7. Verify deployment on each host (service health, logs, version)
 ```
@@ -110,7 +114,7 @@ make release VERSION=X.Y.Z
 
 **IMPORTANT**: Always use `make release` to tag and push -- never tag manually. This ensures CI passes before a tag is created.
 
-**CRITICAL**: NEVER skip steps 5-7. The release is not done until Ansible has deployed to production and you've verified the service is healthy. Do NOT SSH into hosts and build/deploy manually — that bypasses the entire pipeline.
+**CRITICAL**: NEVER skip steps 5-7. The release is not done until your deployment tooling has rolled out to production and you've verified the service is healthy. Do NOT SSH into hosts and build/deploy manually — that bypasses the entire pipeline.
 
 ### APT Repository
 - Hosted on `gh-pages` branch, served via `raw.githubusercontent.com` (avoids GitHub Pages CDN caching)
