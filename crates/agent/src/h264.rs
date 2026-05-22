@@ -481,4 +481,189 @@ mod tests {
             // (This SPS may or may not have VUI; the test documents the expectation)
         }
     }
+
+    // --- Additional IDR-detection edge cases ---
+
+    #[test]
+    fn idr_after_non_idr_nal() {
+        // Non-IDR slice (type 1) followed by IDR (type 5) — should find the IDR.
+        let data = [
+            0x00, 0x00, 0x00, 0x01, 0x61, 0xAA, // non-IDR slice
+            0x00, 0x00, 0x00, 0x01, 0x65, 0xBB, // IDR
+        ];
+        assert!(h264_contains_idr(&data));
+    }
+
+    #[test]
+    fn idr_3byte_start_at_end_no_payload() {
+        // 3-byte start code with no NAL byte after it — must not panic.
+        let data = [0xFF, 0x00, 0x00, 0x01];
+        assert!(!h264_contains_idr(&data));
+    }
+
+    #[test]
+    fn idr_with_leading_garbage() {
+        // Garbage bytes before the start code — scan should still find IDR.
+        let data = [
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x00, 0x00, 0x00, 0x01, 0x65, 0x80,
+        ];
+        assert!(h264_contains_idr(&data));
+    }
+
+    // --- Additional NAL extraction edge cases ---
+
+    #[test]
+    fn extract_nals_empty_input() {
+        assert!(extract_nals(&[]).is_empty());
+    }
+
+    #[test]
+    fn extract_nals_no_start_codes() {
+        // No start codes at all — should return no NALs.
+        let data = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+        assert!(extract_nals(&data).is_empty());
+    }
+
+    #[test]
+    fn extract_nals_start_at_buffer_end() {
+        // 4-byte start code at end of buffer with no payload — should skip.
+        let data = [0x00, 0x00, 0x00, 0x01];
+        // `start` ends up == data.len(), which is filtered by `start >= data.len()`.
+        // Should not panic.
+        let _ = extract_nals(&data);
+    }
+
+    #[test]
+    fn extract_nals_mixed_start_code_lengths() {
+        // Mix 3-byte and 4-byte start codes in the same stream.
+        let data = [
+            0x00, 0x00, 0x01, 0x67, 0xAA, // 3-byte → SPS
+            0x00, 0x00, 0x00, 0x01, 0x68, 0xBB, // 4-byte → PPS
+            0x00, 0x00, 0x01, 0x65, 0xCC, // 3-byte → IDR
+        ];
+        let nals = extract_nals(&data);
+        assert_eq!(nals.len(), 3);
+        assert_eq!(nals[0].0, 7);
+        assert_eq!(nals[1].0, 8);
+        assert_eq!(nals[2].0, 5);
+    }
+
+    // --- BitReader unit tests (via Exp-Golomb / bit reads) ---
+
+    #[test]
+    fn bit_reader_read_zero_value_ue() {
+        // First bit = 1 → ue value 0. Then validate next read still works.
+        // Byte 0x80 = 1000_0000 — first bit is 1 (ue=0), then 7 more bits.
+        let data = [0x80];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_ue(), Some(0));
+    }
+
+    #[test]
+    fn bit_reader_read_ue_value_one() {
+        // 0b010_xxxxx → leading_zeros=1, suffix=0 → value = (1<<1)-1+0 = 1
+        let data = [0b0100_0000];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_ue(), Some(1));
+    }
+
+    #[test]
+    fn bit_reader_read_ue_returns_none_on_empty() {
+        let data: [u8; 0] = [];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_ue(), None);
+    }
+
+    #[test]
+    fn bit_reader_read_ue_underflow_in_suffix() {
+        // 0b0010_0000 then nothing — leading_zeros=2, but suffix read needs 2 more bits.
+        // Single byte covers exactly: bits = 0,0,1,0,0,0,0,0. After 2 leading zeros + 1
+        // we've read 3 bits; suffix wants 2 more (bits 3-4 = 00). That parses to value 3.
+        // To test underflow, truncate further.
+        let data = [0b0001_0000]; // leading_zeros=3, then need 3 suffix bits → bits 4-6 = 000
+        let mut r = BitReader::new(&data);
+        // 4 + 3 = 7 bits used, value = (1<<3)-1+0 = 7
+        assert_eq!(r.read_ue(), Some(7));
+    }
+
+    #[test]
+    fn bit_reader_read_ue_too_many_leading_zeros() {
+        // All zero bytes → leading_zeros climbs past 31 → None.
+        let data = [0u8; 8];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_ue(), None);
+    }
+
+    #[test]
+    fn bit_reader_read_se_zero() {
+        // ue=0 → se=0
+        let data = [0x80];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_se(), Some(0));
+    }
+
+    #[test]
+    fn bit_reader_read_se_positive() {
+        // ue=1 (odd) → se = +(1/2 + 1) = 1
+        let data = [0b0100_0000];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_se(), Some(1));
+    }
+
+    #[test]
+    fn bit_reader_read_se_negative() {
+        // ue=2 (even, non-zero) → se = -(2/2) = -1
+        // ue=2 encoding: 0b011_xxxxx → leading_zeros=1, suffix=1 → (1<<1)-1+1 = 2
+        let data = [0b0110_0000];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_se(), Some(-1));
+    }
+
+    #[test]
+    fn bit_reader_read_se_on_empty_returns_none() {
+        let data: [u8; 0] = [];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_se(), None);
+    }
+
+    #[test]
+    fn bit_reader_read_bits_multi_byte() {
+        // Read 16 bits spanning two bytes: 0xAB 0xCD → 0xABCD
+        let data = [0xAB, 0xCD];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_bits(16), Some(0xABCD));
+    }
+
+    #[test]
+    fn bit_reader_read_bits_underflow() {
+        // Request 16 bits from a 1-byte buffer → None on the 9th bit.
+        let data = [0xFF];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_bits(16), None);
+    }
+
+    #[test]
+    fn bit_reader_bit_offset_wraps_byte() {
+        // Read 9 bits — forces the bit_offset wrap from 8 → 0 with byte_offset += 1.
+        let data = [0xFF, 0x80];
+        let mut r = BitReader::new(&data);
+        // 0xFF = 1111_1111, 0x80 = 1000_0000 → first 9 bits = 1_1111_1111 = 0x1FF
+        assert_eq!(r.read_bits(9), Some(0x1FF));
+    }
+
+    // --- parse_sps rejects non-SPS NAL types ---
+
+    #[test]
+    fn parse_sps_rejects_idr_slice() {
+        // IDR slice (type 5) is not an SPS.
+        let nal_data = [0x65, 0x88, 0x80, 0x40];
+        assert!(parse_sps(&nal_data).is_none());
+    }
+
+    #[test]
+    fn parse_sps_rejects_aud() {
+        // Access Unit Delimiter (type 9) is not an SPS.
+        let nal_data = [0x09, 0x10];
+        assert!(parse_sps(&nal_data).is_none());
+    }
 }
