@@ -157,12 +157,13 @@ jobs:
           # Ratchet protocol: --fail-under-lines locks current
           # coverage as a floor. Baseline measured in #46 was 55.40%;
           # PR #64 added 49 tests across gpu, client_metrics, and
-          # tls modules — re-measurement showed 60.81% lines. Bumped
-          # to 60 (1pp per PR), leaving 0.81pp of headroom. Every
-          # subsequent PR that raises actual coverage may bump this;
-          # never lower. --ignore-filename-regex 'tests?/' excludes
-          # the test harness modules from the floor so it tracks
-          # real source coverage only.
+          # tls modules — re-measurement showed 60.81% lines. PR #68
+          # added 32 server::web tests, lifting measured coverage to
+          # ~62-63%. Bumped to 61 (1pp per PR), keeping headroom.
+          # Every subsequent PR that raises actual coverage may bump
+          # this; never lower. --ignore-filename-regex 'tests?/'
+          # excludes the test harness modules from the floor so it
+          # tracks real source coverage only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 60
+            --fail-under-lines 61
