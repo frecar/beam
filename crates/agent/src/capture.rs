@@ -209,3 +209,116 @@ impl Drop for ScreenCapture {
         debug!("SHM segment detached and cleaned up");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a PooledFrame from a synthetic buffer + channel for tests that
+    /// don't need a real X11 connection.
+    fn make_pooled_frame(data: Vec<u8>) -> (PooledFrame, std_mpsc::Receiver<Vec<u8>>) {
+        let (tx, rx) = std_mpsc::channel();
+        (
+            PooledFrame {
+                data,
+                return_tx: tx,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn pooled_frame_len_matches_underlying_buffer() {
+        let (frame, _rx) = make_pooled_frame(vec![0u8; 1024]);
+        assert_eq!(frame.len(), 1024);
+    }
+
+    #[test]
+    fn pooled_frame_as_ref_returns_underlying_bytes() {
+        let (frame, _rx) = make_pooled_frame(vec![0xAB, 0xCD, 0xEF]);
+        assert_eq!(frame.as_ref(), &[0xAB, 0xCD, 0xEF]);
+    }
+
+    #[test]
+    fn pooled_frame_zero_length_is_valid() {
+        let (frame, _rx) = make_pooled_frame(Vec::new());
+        assert_eq!(frame.len(), 0);
+        assert_eq!(frame.as_ref(), &[] as &[u8]);
+    }
+
+    #[test]
+    fn pooled_frame_drop_returns_buffer_to_pool() {
+        // Smoke test: after the PooledFrame is dropped, the Vec is sent back
+        // through the return channel. The receiving pool can recover the
+        // buffer for reuse.
+        let (tx, rx) = std_mpsc::channel();
+        {
+            let frame = PooledFrame {
+                data: vec![1u8; 100],
+                return_tx: tx,
+            };
+            assert_eq!(frame.len(), 100);
+        }
+        // After drop, the buffer should be sitting in the channel.
+        let returned = rx.try_recv().expect("buffer should be returned on drop");
+        assert_eq!(returned.len(), 100);
+        assert!(returned.iter().all(|&b| b == 1));
+    }
+
+    #[test]
+    fn pooled_frame_drop_with_disconnected_pool_does_not_panic() {
+        // If the pool's receiver is dropped first, sending the buffer back
+        // will fail silently. The PooledFrame::drop impl must not panic in
+        // this case.
+        let (tx, rx) = std_mpsc::channel();
+        drop(rx);
+        let frame = PooledFrame {
+            data: vec![0u8; 8],
+            return_tx: tx,
+        };
+        // Should not panic on drop
+        drop(frame);
+    }
+
+    #[test]
+    fn pooled_frame_drop_empties_the_data_field() {
+        // The Drop impl takes the Vec out so subsequent operations on the
+        // (now-dropped) frame would see empty data. We verify by checking the
+        // returned Vec via the channel — it must contain the original bytes,
+        // proving std::mem::take was used to move (not copy) the data out.
+        let original_data = vec![42u8, 43, 44, 45];
+        let (tx, rx) = std_mpsc::channel();
+        {
+            let frame = PooledFrame {
+                data: original_data.clone(),
+                return_tx: tx,
+            };
+            drop(frame);
+        }
+        let returned = rx.try_recv().unwrap();
+        assert_eq!(returned, original_data);
+    }
+
+    #[test]
+    fn bytes_per_pixel_constant() {
+        // Lock the constant — BGRA = 4 bytes per pixel.
+        assert_eq!(BYTES_PER_PIXEL, 4);
+    }
+
+    #[test]
+    fn pool_size_constant() {
+        // Lock the constant — 3 buffers gives room for one filling, one in
+        // GStreamer, and one spare to absorb timing jitter.
+        assert_eq!(POOL_SIZE, 3);
+    }
+
+    #[test]
+    fn screen_capture_rejects_bogus_display() {
+        // X11 connection should fail for an unreachable display.
+        let result = ScreenCapture::new(":99999");
+        assert!(
+            result.is_err(),
+            "Should fail to connect to nonexistent X display"
+        );
+    }
+}

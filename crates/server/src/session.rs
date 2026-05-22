@@ -1433,4 +1433,406 @@ mod tests {
         let id = Uuid::new_v4();
         assert_eq!(manager.get_idle_timeout(id, 3600).await, 3600);
     }
+
+    // ---------- Test helpers ----------
+
+    /// Build a `SessionManager` with sensible defaults for tests.
+    fn make_manager() -> SessionManager {
+        SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        )
+    }
+
+    /// Build a `ManagedSession` row for direct insertion into the manager.
+    fn make_session(
+        id: Uuid,
+        username: &str,
+        display: u32,
+        last_activity: u64,
+        idle_timeout_override: Option<u64>,
+    ) -> ManagedSession {
+        ManagedSession {
+            info: SessionInfo {
+                id,
+                username: username.to_string(),
+                display,
+                width: 1920,
+                height: 1080,
+                created_at: 0,
+            },
+            systemd_unit: None,
+            last_activity,
+            agent_token: "tok".to_string(),
+            release_token: "rel".to_string(),
+            grace_generation: Arc::new(AtomicU64::new(0)),
+            restart_count: 0,
+            idle_timeout_override,
+        }
+    }
+
+    async fn insert(manager: &SessionManager, session: ManagedSession) {
+        let id = session.info.id;
+        let mut sessions = manager.sessions.write().await;
+        sessions.insert(id, session);
+    }
+
+    // ---------- list_sessions / get_session / find_by_username ----------
+
+    #[tokio::test]
+    async fn list_sessions_empty_initially() {
+        let manager = make_manager();
+        assert!(manager.list_sessions().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_all() {
+        let manager = make_manager();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        insert(&manager, make_session(id1, "alice", 100, 0, None)).await;
+        insert(&manager, make_session(id2, "bob", 101, 0, None)).await;
+
+        let mut sessions = manager.list_sessions().await;
+        sessions.sort_by(|a, b| a.username.cmp(&b.username));
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].username, "alice");
+        assert_eq!(sessions[1].username, "bob");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_with_activity_includes_timestamp() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 42, None)).await;
+
+        let sessions = manager.list_sessions_with_activity().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].0.username, "alice");
+        assert_eq!(sessions[0].1, 42);
+    }
+
+    #[tokio::test]
+    async fn get_session_returns_info_when_present() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        let info = manager.get_session(id).await.unwrap();
+        assert_eq!(info.id, id);
+        assert_eq!(info.username, "alice");
+        assert_eq!(info.display, 100);
+    }
+
+    #[tokio::test]
+    async fn get_session_returns_none_when_missing() {
+        let manager = make_manager();
+        assert!(manager.get_session(Uuid::new_v4()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_by_username_returns_match() {
+        let manager = make_manager();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        insert(&manager, make_session(id1, "alice", 100, 0, None)).await;
+        insert(&manager, make_session(id2, "bob", 101, 0, None)).await;
+
+        let found = manager.find_by_username("bob").await.unwrap();
+        assert_eq!(found.id, id2);
+        assert_eq!(found.username, "bob");
+    }
+
+    #[tokio::test]
+    async fn find_by_username_returns_none_when_absent() {
+        let manager = make_manager();
+        insert(
+            &manager,
+            make_session(Uuid::new_v4(), "alice", 100, 0, None),
+        )
+        .await;
+        assert!(manager.find_by_username("nobody").await.is_none());
+    }
+
+    // ---------- heartbeat ----------
+
+    #[tokio::test]
+    async fn heartbeat_updates_activity_and_returns_true() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        assert!(manager.heartbeat(id).await);
+
+        let sessions = manager.sessions.read().await;
+        let s = sessions.get(&id).unwrap();
+        // last_activity should be near current time
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        assert!(s.last_activity > now.saturating_sub(5));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_returns_false_for_missing_session() {
+        let manager = make_manager();
+        assert!(!manager.heartbeat(Uuid::new_v4()).await);
+    }
+
+    // ---------- stale_sessions edge cases ----------
+
+    #[tokio::test]
+    async fn stale_sessions_returns_empty_for_empty_manager() {
+        let manager = make_manager();
+        assert!(manager.stale_sessions(60).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_sessions_global_zero_disables_check() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        // Activity 1000 years ago, but max=0 (disabled)
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        assert!(manager.stale_sessions(0).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_sessions_per_session_zero_override_disables() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        // Activity 1000 years ago, override=0 (disabled per session)
+        insert(&manager, make_session(id, "alice", 100, 0, Some(0))).await;
+
+        assert!(manager.stale_sessions(60).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_sessions_fresh_session_not_stale() {
+        let manager = make_manager();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, now, None)).await;
+
+        assert!(!manager.stale_sessions(60).await.contains(&id));
+    }
+
+    // ---------- token tests via direct insertion ----------
+
+    #[tokio::test]
+    async fn verify_agent_token_accepts_correct_token() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 100, 0, None);
+        s.agent_token = "secret-agent-token".to_string();
+        insert(&manager, s).await;
+
+        assert!(manager.verify_agent_token(id, "secret-agent-token").await);
+        assert!(!manager.verify_agent_token(id, "wrong-token").await);
+    }
+
+    #[tokio::test]
+    async fn verify_release_token_accepts_correct_token() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 100, 0, None);
+        s.release_token = "secret-release".to_string();
+        insert(&manager, s).await;
+
+        assert!(manager.verify_release_token(id, "secret-release").await);
+        assert!(!manager.verify_release_token(id, "wrong-release").await);
+    }
+
+    #[tokio::test]
+    async fn get_release_token_returns_value_when_present() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 100, 0, None);
+        s.release_token = "the-release-token".to_string();
+        insert(&manager, s).await;
+
+        assert_eq!(
+            manager.get_release_token(id).await.as_deref(),
+            Some("the-release-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_release_token_returns_none_when_missing() {
+        let manager = make_manager();
+        assert!(manager.get_release_token(Uuid::new_v4()).await.is_none());
+    }
+
+    // ---------- get_systemd_unit ----------
+
+    #[tokio::test]
+    async fn get_systemd_unit_returns_value_when_set() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 100, 0, None);
+        s.systemd_unit = Some("beam-agent@100.service".to_string());
+        insert(&manager, s).await;
+
+        assert_eq!(
+            manager.get_systemd_unit(id).await.as_deref(),
+            Some("beam-agent@100.service")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_systemd_unit_returns_none_when_no_unit() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        // systemd_unit defaults to None in make_session
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        assert!(manager.get_systemd_unit(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_systemd_unit_returns_none_when_session_missing() {
+        let manager = make_manager();
+        assert!(manager.get_systemd_unit(Uuid::new_v4()).await.is_none());
+    }
+
+    // ---------- grace_period ----------
+
+    #[tokio::test]
+    async fn start_grace_period_returns_none_when_missing() {
+        let manager = make_manager();
+        assert!(manager.start_grace_period(Uuid::new_v4()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_grace_period_bumps_generation() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        let (counter1, gen1) = manager.start_grace_period(id).await.unwrap();
+        assert_eq!(gen1, 1);
+        let (_counter2, gen2) = manager.start_grace_period(id).await.unwrap();
+        assert_eq!(gen2, 2);
+        assert_eq!(counter1.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cancel_grace_period_bumps_generation_when_present() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        let (counter, gen1) = manager.start_grace_period(id).await.unwrap();
+        manager.cancel_grace_period(id).await;
+        // gen1 should no longer match
+        assert_ne!(counter.load(Ordering::SeqCst), gen1);
+    }
+
+    #[tokio::test]
+    async fn cancel_grace_period_no_panic_on_missing() {
+        let manager = make_manager();
+        // Should not panic
+        manager.cancel_grace_period(Uuid::new_v4()).await;
+    }
+
+    // ---------- DisplayPool additional ----------
+
+    #[test]
+    fn display_pool_release_unallocated_does_not_panic() {
+        let mut pool = DisplayPool::new(10);
+        // Releasing a display that was never allocated is benign — must not
+        // panic and must still allow normal allocation afterwards.
+        pool.release(99);
+        let n = pool.allocate();
+        // Either the recycled 99 or a new 10 is acceptable
+        assert!(n == 99 || n == 10);
+    }
+
+    #[test]
+    fn display_pool_zero_start() {
+        let mut pool = DisplayPool::new(0);
+        assert_eq!(pool.allocate(), 0);
+        assert_eq!(pool.allocate(), 1);
+    }
+
+    #[test]
+    fn display_pool_release_multiple_then_allocate() {
+        let mut pool = DisplayPool::new(10);
+        let a = pool.allocate();
+        let b = pool.allocate();
+        let c = pool.allocate();
+        pool.release(a);
+        pool.release(b);
+        // c stays held; reallocate should give us back recycled IDs
+        let d = pool.allocate();
+        let e = pool.allocate();
+        // d, e must be among {a, b}
+        let recycled: std::collections::HashSet<u32> = [a, b].into_iter().collect();
+        assert!(recycled.contains(&d));
+        assert!(recycled.contains(&e));
+        assert_ne!(c, d);
+        assert_ne!(c, e);
+    }
+
+    // ---------- find_by_username with multiple of same username ----------
+
+    #[tokio::test]
+    async fn find_by_username_returns_first_when_duplicate() {
+        let manager = make_manager();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        insert(&manager, make_session(id1, "alice", 100, 0, None)).await;
+        insert(&manager, make_session(id2, "alice", 101, 0, None)).await;
+
+        let found = manager.find_by_username("alice").await;
+        assert!(found.is_some());
+        // Could be either depending on HashMap iteration order; just verify
+        // we got an "alice" session and the username matches.
+        let f = found.unwrap();
+        assert_eq!(f.username, "alice");
+        assert!(f.id == id1 || f.id == id2);
+    }
+
+    // ---------- verify_*_token against empty token ----------
+
+    #[tokio::test]
+    async fn verify_agent_token_rejects_empty_when_session_has_real_token() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 100, 0, None);
+        s.agent_token = "real-token".to_string();
+        insert(&manager, s).await;
+        assert!(!manager.verify_agent_token(id, "").await);
+    }
+
+    #[tokio::test]
+    async fn verify_release_token_rejects_empty_when_session_has_real_token() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 100, 0, None);
+        s.release_token = "real-release".to_string();
+        insert(&manager, s).await;
+        assert!(!manager.verify_release_token(id, "").await);
+    }
+
+    // ---------- get_idle_timeout: override of zero falls through ----------
+
+    #[tokio::test]
+    async fn get_idle_timeout_override_zero_returns_zero() {
+        // Zero override is a valid value (disable per-session); get_idle_timeout
+        // should return it, not fall back to global default.
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 0, Some(0))).await;
+
+        assert_eq!(manager.get_idle_timeout(id, 3600).await, 0);
+    }
 }

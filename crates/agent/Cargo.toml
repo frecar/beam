@@ -36,3 +36,6 @@ futures-util = "0.3"
 urlencoding = "2"
 rustls-pemfile = { workspace = true }
 base64 = "0.22"
+
+[dev-dependencies]
+rcgen = { workspace = true }

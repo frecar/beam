@@ -223,6 +223,7 @@ dependencies = [
  "libpulse-binding",
  "libpulse-simple-binding",
  "nix",
+ "rcgen",
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",

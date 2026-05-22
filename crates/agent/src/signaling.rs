@@ -177,3 +177,89 @@ async fn connect_and_handle(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Once;
+
+    static CRYPTO_INIT: Once = Once::new();
+
+    /// Install the rustls default crypto provider once per test process.
+    /// Required for `ClientConfig::builder()` to work without panicking.
+    fn ensure_crypto_provider() {
+        CRYPTO_INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    /// Generate a self-signed PEM cert/key pair for tests. Returns the cert PEM
+    /// as a String so it can be written to a file and passed to
+    /// `build_tls_connector`.
+    fn make_self_signed_cert_pem() -> String {
+        let cert = rcgen::generate_simple_self_signed(vec!["test.local".to_string()]).unwrap();
+        cert.cert.pem()
+    }
+
+    #[test]
+    fn build_tls_connector_works_without_pinned_cert() {
+        ensure_crypto_provider();
+        let connector = build_tls_connector(None);
+        // We can't introspect a Connector easily; just verify it's the Rustls variant.
+        match connector {
+            tokio_tungstenite::Connector::Rustls(_) => {}
+            _ => panic!("Expected Rustls connector"),
+        }
+    }
+
+    #[test]
+    fn build_tls_connector_loads_pinned_cert_from_file() {
+        ensure_crypto_provider();
+        let dir =
+            std::env::temp_dir().join(format!("beam-signaling-cert-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pem_path = dir.join("test-cert.pem");
+        std::fs::write(&pem_path, make_self_signed_cert_pem()).unwrap();
+
+        let connector = build_tls_connector(Some(pem_path.to_str().unwrap()));
+        match connector {
+            tokio_tungstenite::Connector::Rustls(_) => {}
+            _ => panic!("Expected Rustls connector"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tls_connector_falls_back_when_cert_file_missing() {
+        ensure_crypto_provider();
+        // Missing file logs a warning and falls back to system roots; should
+        // still return a Connector without panicking.
+        let connector = build_tls_connector(Some("/tmp/beam-nonexistent-cert-file.pem"));
+        match connector {
+            tokio_tungstenite::Connector::Rustls(_) => {}
+            _ => panic!("Expected Rustls connector"),
+        }
+    }
+
+    #[test]
+    fn build_tls_connector_falls_back_when_cert_file_is_invalid_pem() {
+        ensure_crypto_provider();
+        let dir = std::env::temp_dir().join(format!(
+            "beam-signaling-invalid-cert-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pem_path = dir.join("not-a-cert.pem");
+        std::fs::write(&pem_path, b"this is not a pem file").unwrap();
+
+        // Should not panic; falls back to system roots.
+        let connector = build_tls_connector(Some(pem_path.to_str().unwrap()));
+        match connector {
+            tokio_tungstenite::Connector::Rustls(_) => {}
+            _ => panic!("Expected Rustls connector"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

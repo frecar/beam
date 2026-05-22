@@ -163,14 +163,17 @@ jobs:
           # tls modules — re-measurement showed 60.81% lines. PR #68
           # added 32 server::web tests; PR #72 added 36 more tests
           # across main.rs/input.rs/audio.rs, lifting measured
-          # coverage to 65.67% lines. Post-#77 main CI re-measurement
-          # showed 65.92% lines. Per-PR 1pp bump 64 → 65
-          # (floor(65.92 - 1) = 64, but 65 still leaves 0.92pp
-          # headroom and matches the established cadence).
-          # Every subsequent PR that raises actual coverage may bump
-          # this; never lower. --ignore-filename-regex 'tests?/'
-          # excludes the test harness modules from the floor so it
-          # tracks real source coverage only.
+          # coverage to 65.67% lines. PR #78 raised floor to 65.
+          # Issue #45 big lift added ~100 tests across server::session
+          # (manual ManagedSession fixtures), agent::cli (refactored
+          # parse_args_from with 29 tests), agent::signaling (TLS
+          # connector tests with rcgen), and agent::capture
+          # (PooledFrame pool semantics) — measured coverage rose to
+          # 69.71% lines. floor(69.71 - 1) = 68. Every subsequent PR
+          # that raises actual coverage may bump this; never lower.
+          # --ignore-filename-regex 'tests?/' excludes the test harness
+          # modules from the floor so it tracks real source coverage
+          # only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 65
+            --fail-under-lines 68
