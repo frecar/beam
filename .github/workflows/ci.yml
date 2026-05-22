@@ -156,14 +156,13 @@ jobs:
         run: |
           # Ratchet protocol: --fail-under-lines locks current
           # coverage as a floor. Baseline measured in #46 was 55.40%;
-          # re-measurement on d83025a (PR #62 merge) showed 58.02%
-          # lines. This step adds 18 h264 unit tests covering
-          # BitReader edge cases, extract_nals boundaries, and
-          # parse_sps NAL-type rejection — set to 58. Every
+          # PR #64 added 49 tests across gpu, client_metrics, and
+          # tls modules — re-measurement showed 60.81% lines, leaving
+          # 2.81pp of headroom. Bumped to 59 (1pp per PR). Every
           # subsequent PR that raises actual coverage may bump this;
           # never lower. --ignore-filename-regex 'tests?/' excludes
           # the test harness modules from the floor so it tracks
           # real source coverage only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 58
+            --fail-under-lines 59
