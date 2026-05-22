@@ -1,6 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import * as Sentry from '@sentry/browser';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { scrubBreadcrumb, scrubEvent, scrubSensitiveValue, scrubUrl } from './monitoring';
+import {
+  initMonitoring,
+  scrubBreadcrumb,
+  scrubEvent,
+  scrubSensitiveValue,
+  scrubUrl,
+} from './monitoring';
+
+vi.mock('@sentry/browser', () => ({
+  init: vi.fn(),
+}));
+
+afterEach(() => {
+  if (typeof window !== 'undefined') {
+    delete window.__BEAM_RUNTIME_CONFIG__;
+  }
+  vi.unstubAllGlobals();
+  vi.mocked(Sentry.init).mockClear();
+});
 
 describe('monitoring scrubber', () => {
   it('redacts session identifiers and sensitive query parameters from URLs', () => {
@@ -58,5 +77,41 @@ describe('monitoring scrubber', () => {
 
     expect(breadcrumb.message).toBe('/api/sessions/[session]?release_token=[redacted]');
     expect(breadcrumb.data).toEqual({ session_id: '[redacted]', status: 429 });
+  });
+});
+
+describe('initMonitoring', () => {
+  it('does not initialize sentry without a runtime DSN', () => {
+    vi.stubGlobal('window', {});
+    window.__BEAM_RUNTIME_CONFIG__ = { observability: { sentryDsn: '' } };
+
+    initMonitoring();
+
+    expect(Sentry.init).not.toHaveBeenCalled();
+  });
+
+  it('initializes sentry from runtime config', () => {
+    vi.stubGlobal('window', {});
+    window.__BEAM_RUNTIME_CONFIG__ = {
+      observability: {
+        sentryDsn: ' https://public@example.invalid/1 ',
+        sentryTracesSampleRate: 0.25,
+        sentryEnvironment: 'production',
+        release: '0.3.24',
+      },
+    };
+
+    initMonitoring();
+
+    expect(Sentry.init).toHaveBeenCalledOnce();
+    expect(Sentry.init).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dsn: 'https://public@example.invalid/1',
+        environment: 'production',
+        release: '0.3.24',
+        sendDefaultPii: false,
+        tracesSampleRate: 0.25,
+      })
+    );
   });
 });

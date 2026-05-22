@@ -6,6 +6,8 @@ pub struct BeamConfig {
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
+    pub observability: ObservabilityConfig,
+    #[serde(default)]
     pub video: VideoConfig,
     #[serde(default)]
     pub audio: AudioConfig,
@@ -44,6 +46,18 @@ pub struct ServerConfig {
     /// Users allowed to access /api/admin/* endpoints (empty = admin panel disabled)
     #[serde(default)]
     pub admin_users: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservabilityConfig {
+    /// Browser-safe Sentry DSN. Empty/absent disables browser error reporting.
+    pub sentry_dsn: Option<String>,
+    /// Browser trace sample rate, 0.0 to 1.0. Defaults to disabled.
+    #[serde(default)]
+    pub sentry_traces_sample_rate: f64,
+    /// Environment tag sent with browser events when Sentry is enabled.
+    #[serde(default = "default_environment")]
+    pub sentry_environment: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +129,16 @@ impl Default for ServerConfig {
             metrics_require_auth: true,
             client_metrics_enabled: false,
             admin_users: Vec::new(),
+        }
+    }
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            sentry_dsn: None,
+            sentry_traces_sample_rate: 0.0,
+            sentry_environment: default_environment(),
         }
     }
 }
@@ -308,6 +332,9 @@ impl BeamConfig {
 fn default_web_root() -> String {
     "web/dist".to_string()
 }
+fn default_environment() -> String {
+    "production".to_string()
+}
 fn default_bind() -> String {
     "0.0.0.0".to_string()
 }
@@ -376,6 +403,11 @@ mod tests {
         assert_eq!(config.server.web_root, "web/dist");
         assert!(config.server.metrics_require_auth);
         assert!(!config.server.client_metrics_enabled);
+
+        // Observability defaults
+        assert!(config.observability.sentry_dsn.is_none());
+        assert_eq!(config.observability.sentry_traces_sample_rate, 0.0);
+        assert_eq!(config.observability.sentry_environment, "production");
 
         // Video defaults
         assert_eq!(config.video.bitrate, 50000);
@@ -475,6 +507,11 @@ web_root = "/usr/share/beam/web/dist"
 metrics_require_auth = false
 client_metrics_enabled = true
 
+[observability]
+sentry_dsn = "https://public@example.invalid/1"
+sentry_traces_sample_rate = 0.25
+sentry_environment = "staging"
+
 [video]
 bitrate = 10000
 min_bitrate = 1000
@@ -511,6 +548,14 @@ idle_timeout = 7200
         assert_eq!(config.server.web_root, "/usr/share/beam/web/dist");
         assert!(!config.server.metrics_require_auth);
         assert!(config.server.client_metrics_enabled);
+
+        // Observability
+        assert_eq!(
+            config.observability.sentry_dsn.as_deref(),
+            Some("https://public@example.invalid/1")
+        );
+        assert_eq!(config.observability.sentry_traces_sample_rate, 0.25);
+        assert_eq!(config.observability.sentry_environment, "staging");
 
         // Video
         assert_eq!(config.video.bitrate, 10000);
@@ -553,6 +598,17 @@ idle_timeout = 7200
         assert_eq!(
             server.client_metrics_enabled,
             from_toml.server.client_metrics_enabled
+        );
+
+        let observability = ObservabilityConfig::default();
+        assert_eq!(observability.sentry_dsn, from_toml.observability.sentry_dsn);
+        assert_eq!(
+            observability.sentry_traces_sample_rate,
+            from_toml.observability.sentry_traces_sample_rate
+        );
+        assert_eq!(
+            observability.sentry_environment,
+            from_toml.observability.sentry_environment
         );
 
         let video = VideoConfig::default();

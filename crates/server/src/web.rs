@@ -160,12 +160,45 @@ impl LoginRateLimiter {
 }
 
 /// Middleware that adds security headers to every response.
+fn sentry_connect_src(dsn: &str) -> Option<String> {
+    let trimmed = dsn.trim();
+    let without_scheme = trimmed.strip_prefix("https://")?;
+    let host_and_path = without_scheme
+        .rsplit_once('@')
+        .map_or(without_scheme, |(_, host)| host);
+    let host = host_and_path.split('/').next()?.trim();
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '\'' | '"' | ';'))
+    {
+        return None;
+    }
+    Some(format!("https://{host}"))
+}
+
+fn content_security_policy(config: &BeamConfig) -> String {
+    let sentry_src = config
+        .observability
+        .sentry_dsn
+        .as_deref()
+        .and_then(sentry_connect_src)
+        .map(|src| format!(" {src}"))
+        .unwrap_or_default();
+    format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+         connect-src 'self' wss:{sentry_src}; img-src 'self' data:; media-src 'self' blob:"
+    )
+}
+
 async fn security_headers(
+    State(state): State<Arc<AppState>>,
     request: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    let csp = content_security_policy(&state.config);
 
     headers.insert(
         "strict-transport-security",
@@ -183,10 +216,12 @@ async fn security_headers(
     headers.insert("x-xss-protection", HeaderValue::from_static("0"));
     headers.insert(
         "content-security-policy",
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-             connect-src 'self' wss:; img-src 'self' data:; media-src 'self' blob:",
-        ),
+        HeaderValue::from_str(&csp).unwrap_or_else(|_| {
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+                 connect-src 'self' wss:; img-src 'self' data:; media-src 'self' blob:",
+            )
+        }),
     );
     headers.insert(
         "permissions-policy",
@@ -210,6 +245,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/sessions/{id}", delete(admin_delete_session))
         .route("/api/health", get(health_check))
         .route("/api/health/detailed", get(health_check_detailed))
+        .route("/runtime-config.js", get(runtime_config_js))
         .route("/metrics", get(metrics))
         .route("/ws/agent/{id}", get(agent_ws_upgrade))
         .layer(RequestBodyLimitLayer::new(65_536)) // 64KB max request body
@@ -252,7 +288,37 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     ));
 
     api.fallback_service(serve_dir)
-        .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            security_headers,
+        ))
+}
+
+/// GET /runtime-config.js - browser-safe deployment config for static web assets.
+async fn runtime_config_js(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let payload = json!({
+        "observability": {
+            "sentryDsn": state.config.observability.sentry_dsn.clone(),
+            "sentryTracesSampleRate": state.config.observability.sentry_traces_sample_rate,
+            "sentryEnvironment": state.config.observability.sentry_environment.clone(),
+            "release": env!("CARGO_PKG_VERSION"),
+        }
+    });
+    let body = format!(
+        "window.__BEAM_RUNTIME_CONFIG__ = {};\n",
+        serde_json::to_string(&payload).expect("runtime config should serialize")
+    );
+
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
 }
 
 /// Query parameters for WebSocket upgrade
@@ -1461,6 +1527,24 @@ mod tests {
         assert!(is_valid_username(&"a".repeat(64))); // exactly 64 chars
     }
 
+    #[test]
+    fn content_security_policy_adds_sentry_origin_only_when_configured() {
+        let mut config: BeamConfig = toml::from_str("").expect("default config");
+        assert_eq!(
+            content_security_policy(&config),
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             connect-src 'self' wss:; img-src 'self' data:; media-src 'self' blob:"
+        );
+
+        config.observability.sentry_dsn =
+            Some("https://public@sentry.example.invalid/1".to_string());
+        assert_eq!(
+            content_security_policy(&config),
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             connect-src 'self' wss: https://sentry.example.invalid; img-src 'self' data:; media-src 'self' blob:"
+        );
+    }
+
     // --- HTTP-level integration tests ---
     //
     // These use `tower::ServiceExt::oneshot` to send requests through the axum
@@ -1476,6 +1560,10 @@ mod tests {
     /// Build a test `AppState` with defaults suitable for unit/integration tests.
     fn test_app_state() -> Arc<AppState> {
         let config: BeamConfig = toml::from_str("").expect("default config");
+        test_app_state_with_config(config)
+    }
+
+    fn test_app_state_with_config(config: BeamConfig) -> Arc<AppState> {
         let session_manager = crate::session::SessionManager::new(
             100, // display_start (high to avoid conflicts)
             1920,
@@ -1540,6 +1628,40 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn runtime_config_js_exports_browser_safe_observability() {
+        let config: BeamConfig = toml::from_str(
+            r#"
+[observability]
+sentry_dsn = "https://public@example.invalid/1"
+sentry_traces_sample_rate = 0.25
+sentry_environment = "test"
+"#,
+        )
+        .expect("observability config should deserialize");
+        let state = test_app_state_with_config(config);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/runtime-config.js")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/javascript; charset=utf-8"
+        );
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(body.starts_with("window.__BEAM_RUNTIME_CONFIG__ = "));
+        assert!(body.contains(r#""sentryDsn":"https://public@example.invalid/1""#));
+        assert!(body.contains(r#""sentryTracesSampleRate":0.25"#));
+        assert!(body.contains(r#""sentryEnvironment":"test""#));
     }
 
     #[tokio::test]

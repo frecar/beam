@@ -79,6 +79,11 @@ port = 8444
 # tls_key = "/etc/beam/key.pem"
 # client_metrics_enabled = false         # opt-in anonymous connection-quality metrics
 
+[observability]
+# sentry_dsn = ""                        # empty/absent disables browser error reporting
+# sentry_traces_sample_rate = 0.0        # 0.0 to 1.0
+# sentry_environment = "production"
+
 [video]
 bitrate = 5000      # kbps (initial target)
 framerate = 120
