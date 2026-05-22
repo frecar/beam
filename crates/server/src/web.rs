@@ -1921,4 +1921,650 @@ mod tests {
         let body = std::str::from_utf8(&bytes).unwrap();
         assert!(body.contains("beam_active_sessions"));
     }
+
+    // --- Additional handler-branch coverage ---
+    //
+    // These exercise auth-failure, validation-failure, and not-found branches
+    // on handlers that don't require a live agent process. They lean on the
+    // fact that `extract_claims_from_headers` and the various ownership /
+    // admin checks all short-circuit before any session-manager side effects.
+
+    #[tokio::test]
+    async fn refresh_token_missing_token_returns_401() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/refresh")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let json = body_json(response).await;
+        assert_eq!(json["error"], "Missing token");
+    }
+
+    #[tokio::test]
+    async fn refresh_token_invalid_token_returns_401() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/refresh")
+            .header("authorization", "Bearer not.a.valid.jwt")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let json = body_json(response).await;
+        assert_eq!(json["error"], "Token cannot be refreshed");
+    }
+
+    #[tokio::test]
+    async fn refresh_token_returns_404_when_no_active_session() {
+        // Valid token but no session created for this user
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let token = crate::auth::generate_jwt("ghost_user", TEST_JWT_SECRET).unwrap();
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/refresh")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let json = body_json(response).await;
+        assert_eq!(json["error"], "No active session");
+    }
+
+    #[tokio::test]
+    async fn refresh_token_accepts_query_param_fallback() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        // sendBeacon-style call: token in query string, no auth header
+        let token = crate::auth::generate_jwt("ghost_user", TEST_JWT_SECRET).unwrap();
+        let uri = format!("/api/auth/refresh?token={token}");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+
+        // Token is valid; no session exists -> 404. Confirms the query
+        // fallback path is reached.
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn release_session_empty_body_returns_400() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/release"))
+            .header("content-type", "text/plain")
+            .body(Body::from(""))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn release_session_whitespace_only_treated_as_empty() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        // Browsers / proxies may append \n — make sure trim catches it
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/release"))
+            .header("content-type", "text/plain")
+            .body(Body::from("   \n\t  "))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn release_session_invalid_token_returns_401() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/release"))
+            .header("content-type", "text/plain")
+            .body(Body::from("definitely-not-a-real-release-token"))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn release_session_rate_limit_blocks_after_repeated_failures() {
+        // Rate limiter is per-IP; oneshot synthesizes a missing peer so the
+        // limiter key is "unknown". Burn through it.
+        let state = test_app_state();
+        let app = build_router(state.clone());
+
+        // Force the limiter to the blocking state directly
+        for _ in 0..50 {
+            state.release_limiter.record_failure("unknown");
+        }
+
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/release"))
+            .header("content-type", "text/plain")
+            .body(Body::from("anything"))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn delete_session_missing_auth_returns_401() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/sessions/{session_id}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn delete_session_unknown_id_returns_404() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/sessions/{session_id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_missing_auth_returns_401() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/heartbeat"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_unknown_id_returns_404() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/heartbeat"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // NOTE: browser_ws_upgrade / agent_ws_upgrade handlers can't be exercised
+    // via oneshot — axum's `WebSocketUpgrade` extractor rejects the request
+    // with 426 Upgrade Required before our handler code runs, since
+    // tower::ServiceExt::oneshot doesn't drive an upgrade-capable connection.
+    // The auth/ownership branches inside these handlers are reachable only
+    // from a real HTTP/1.1 upgrade flow, which would need a full hyper server
+    // test harness.
+
+    #[tokio::test]
+    async fn admin_list_sessions_requires_auth() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/api/admin/sessions")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_list_sessions_forbidden_for_non_admin() {
+        let state = test_app_state();
+        // Default config has no admin_users, so any user is non-admin
+        assert!(state.config.server.admin_users.is_empty());
+        let app = build_router(state);
+
+        let token = crate::auth::generate_jwt("regular_user", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .uri("/api/admin/sessions")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let json = body_json(response).await;
+        assert!(json["error"].as_str().unwrap().contains("permission"));
+    }
+
+    #[tokio::test]
+    async fn admin_list_sessions_ok_for_admin() {
+        // Build state with the test user marked as admin
+        let mut config: BeamConfig = toml::from_str("").expect("default config");
+        config.server.admin_users = vec!["admin_user".to_string()];
+
+        let session_manager = crate::session::SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
+        let state = Arc::new(AppState {
+            config,
+            session_manager,
+            channels: crate::signaling::new_channel_registry(),
+            jwt_secret: TEST_JWT_SECRET.to_string(),
+            login_limiter: LoginRateLimiter::new(5, 60),
+            ip_limiter: LoginRateLimiter::new(20, 60),
+            release_limiter: LoginRateLimiter::new(10, 60),
+            started_at: std::time::Instant::now(),
+            metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
+            metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
+            metrics_agent_restarts: std::sync::atomic::AtomicU64::new(0),
+            client_metrics: Arc::new(ClientMetricsStore::default()),
+        });
+        let app = build_router(state);
+
+        let token = crate::auth::generate_jwt("admin_user", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .uri("/api/admin/sessions")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = body_json(response).await;
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_session_requires_auth() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/sessions/{session_id}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_session_forbidden_for_non_admin() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let token = crate::auth::generate_jwt("regular_user", TEST_JWT_SECRET).unwrap();
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/sessions/{session_id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_unknown_session_returns_404() {
+        let mut config: BeamConfig = toml::from_str("").expect("default config");
+        config.server.admin_users = vec!["admin_user".to_string()];
+
+        let session_manager = crate::session::SessionManager::new(
+            100,
+            1920,
+            1080,
+            None,
+            beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
+        );
+        let state = Arc::new(AppState {
+            config,
+            session_manager,
+            channels: crate::signaling::new_channel_registry(),
+            jwt_secret: TEST_JWT_SECRET.to_string(),
+            login_limiter: LoginRateLimiter::new(5, 60),
+            ip_limiter: LoginRateLimiter::new(20, 60),
+            release_limiter: LoginRateLimiter::new(10, 60),
+            started_at: std::time::Instant::now(),
+            metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
+            metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
+            metrics_agent_restarts: std::sync::atomic::AtomicU64::new(0),
+            client_metrics: Arc::new(ClientMetricsStore::default()),
+        });
+        let app = build_router(state);
+
+        let token = crate::auth::generate_jwt("admin_user", TEST_JWT_SECRET).unwrap();
+        let session_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/sessions/{session_id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn login_with_idle_timeout_at_lower_bound_passes_validation() {
+        // idle_timeout=60 is on the boundary; should not be rejected by
+        // validation. PAM auth will fail because there's no such user.
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "username": "boundary_user",
+            "password": "anything",
+            "idle_timeout": 60,
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        // Boundary value accepted -> proceeds to PAM, which fails.
+        // Should NOT be 400 (validation).
+        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn login_with_idle_timeout_at_upper_bound_passes_validation() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "username": "boundary_user",
+            "password": "anything",
+            "idle_timeout": 86400,
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn login_rate_limited_when_ip_limiter_full() {
+        // Saturate the IP limiter (peer is "unknown" for oneshot)
+        let state = test_app_state();
+        for _ in 0..100 {
+            state.ip_limiter.record_failure("unknown");
+        }
+        let app = build_router(state.clone());
+
+        let body = serde_json::json!({
+            "username": "any_valid_user",
+            "password": "irrelevant",
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Retry-After header should be present
+        assert_eq!(
+            response.headers().get("retry-after").map(|v| v.as_bytes()),
+            Some(b"60".as_slice()),
+        );
+
+        let json = body_json(response).await;
+        assert!(json["error"].as_str().unwrap().contains("Too many"));
+    }
+
+    #[tokio::test]
+    async fn login_rate_limited_when_username_limiter_full() {
+        let state = test_app_state();
+        for _ in 0..100 {
+            state.login_limiter.record_failure("targeted_user");
+        }
+        let app = build_router(state.clone());
+
+        let body = serde_json::json!({
+            "username": "targeted_user",
+            "password": "irrelevant",
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn login_invalid_json_returns_4xx() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from("not valid json"))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        // axum's Json extractor returns 422 (UNPROCESSABLE_ENTITY) for
+        // malformed bodies, or 400 depending on version
+        let status = response.status();
+        assert!(
+            status.is_client_error(),
+            "expected 4xx for invalid JSON, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_invalid_jwt_returns_401_when_auth_required() {
+        let state = test_app_state();
+        // metrics_require_auth=true by default
+        assert!(state.config.server.metrics_require_auth);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/metrics")
+            .header("authorization", "Bearer not.a.real.jwt")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn static_file_with_extension_returns_404_when_missing() {
+        // The serve_dir fallback returns 404 (not index.html) for paths
+        // with an extension that aren't on disk, so browsers don't
+        // mis-render index.html as JS/CSS.
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/nonexistent.js")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn static_file_without_extension_attempts_spa_fallback() {
+        // SPA route — no extension. With the default config web_root
+        // pointing at a non-existent path, the fallback's index.html read
+        // fails, returning 404 with "Not found".
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/some/spa/route")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn login_oversize_body_rejected_by_limit_layer() {
+        // RequestBodyLimitLayer is set to 64KB; send 128KB and confirm
+        // the layer rejects before any handler logic runs.
+        let state = test_app_state();
+        let app = build_router(state);
+
+        // 128KB JSON-ish payload
+        let big_payload = format!(
+            r#"{{"username":"alice","password":"{}"}}"#,
+            "a".repeat(128 * 1024)
+        );
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(big_payload))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        // 413 Payload Too Large
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn rate_limiter_clear_unknown_key_is_noop() {
+        let limiter = LoginRateLimiter::new(5, 60);
+        // Should not panic; clearing a key with no entry is a no-op
+        limiter.clear("never-recorded");
+        assert!(limiter.is_allowed("never-recorded"));
+    }
+
+    #[test]
+    fn rate_limiter_record_then_clear_then_record() {
+        let limiter = LoginRateLimiter::new(2, 60);
+        limiter.record_failure("user");
+        limiter.record_failure("user");
+        assert!(!limiter.is_allowed("user"));
+
+        limiter.clear("user");
+        assert!(limiter.is_allowed("user"));
+
+        // After clear, fresh failures should start the counter from zero
+        limiter.record_failure("user");
+        assert!(limiter.is_allowed("user"));
+    }
+
+    #[test]
+    fn normalize_ipv4_unchanged_examples() {
+        use std::net::IpAddr;
+        for s in ["127.0.0.1", "10.0.0.1", "192.168.42.7", "255.255.255.255"] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert_eq!(normalize_ip_for_rate_limit(ip), s);
+        }
+    }
+
+    #[test]
+    fn username_validation_accepts_dots_dashes_underscores() {
+        for s in ["a.b.c", "a-b-c", "a_b_c", "1234", "USER", "user.name-1_2"] {
+            assert!(is_valid_username(s), "expected {s:?} to be valid");
+        }
+    }
+
+    #[test]
+    fn username_validation_rejects_unicode() {
+        // ASCII-only — emoji / non-ASCII letters / control chars all rejected
+        for s in ["alic\u{00e9}", "user\u{1f600}", "héllo", "user\u{007f}"] {
+            assert!(!is_valid_username(s), "expected {s:?} to be invalid");
+        }
+    }
 }
