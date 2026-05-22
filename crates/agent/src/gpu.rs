@@ -375,4 +375,193 @@ Device Minor: \t 2
         );
         assert_eq!(parse_proc_field(info, "Nonexistent"), None);
     }
+
+    // --- parse_proc_field edge cases ---
+
+    #[test]
+    fn parse_proc_field_empty_input() {
+        assert_eq!(parse_proc_field("", "Model"), None);
+    }
+
+    #[test]
+    fn parse_proc_field_prefix_without_colon_is_rejected() {
+        // A line that starts with the field name but has no colon must not match
+        let info = "Model NVIDIA L40S without colon\n";
+        assert_eq!(parse_proc_field(info, "Model"), None);
+    }
+
+    #[test]
+    fn parse_proc_field_returns_first_match() {
+        let info = "Model: \t First\nModel: \t Second\n";
+        assert_eq!(parse_proc_field(info, "Model"), Some("First".to_string()));
+    }
+
+    #[test]
+    fn parse_proc_field_empty_value_after_colon() {
+        let info = "Model: \nNext: x\n";
+        assert_eq!(parse_proc_field(info, "Model"), Some(String::new()));
+    }
+
+    #[test]
+    fn parse_proc_field_value_with_internal_whitespace() {
+        let info = "Model: \t\t NVIDIA RTX A6000 Ada Generation\n";
+        assert_eq!(
+            parse_proc_field(info, "Model"),
+            Some("NVIDIA RTX A6000 Ada Generation".to_string())
+        );
+    }
+
+    // --- normalize_pci edge cases ---
+
+    #[test]
+    fn normalize_pci_already_normalized() {
+        assert_eq!(normalize_pci("bb:00.0"), "bb:00.0");
+    }
+
+    #[test]
+    fn normalize_pci_empty_string() {
+        assert_eq!(normalize_pci(""), "");
+    }
+
+    #[test]
+    fn normalize_pci_mixed_case() {
+        assert_eq!(normalize_pci("0000:Bb:0A.0"), "bb:0a.0");
+    }
+
+    // --- pci_to_xorg_bus_id edge cases ---
+
+    #[test]
+    fn pci_to_xorg_zero_bus() {
+        assert_eq!(pci_to_xorg_bus_id("0000:00:00.0"), "PCI:0:0:0");
+    }
+
+    #[test]
+    fn pci_to_xorg_max_hex_bus() {
+        assert_eq!(pci_to_xorg_bus_id("0000:ff:1f.7"), "PCI:255:31:7");
+    }
+
+    #[test]
+    fn pci_to_xorg_malformed_falls_through() {
+        // Less than 3 parts after split → raw fallback branch
+        let out = pci_to_xorg_bus_id("garbage");
+        assert!(
+            out.starts_with("PCI:"),
+            "Malformed input should still produce a PCI:* string, got {out}"
+        );
+    }
+
+    #[test]
+    fn pci_to_xorg_trims_whitespace() {
+        assert_eq!(pci_to_xorg_bus_id("  0000:bb:00.0  "), "PCI:187:0:0");
+    }
+
+    #[test]
+    fn pci_to_xorg_invalid_hex_yields_zero_components() {
+        // u32::from_str_radix on non-hex returns Err → unwrap_or(0)
+        // Three colon-separated parts that aren't valid hex → "PCI:0:0:0"
+        let out = pci_to_xorg_bus_id("zz:yy.xx");
+        assert_eq!(out, "PCI:0:0:0");
+    }
+
+    // --- detect_gpu mode branches ---
+
+    #[test]
+    fn detect_gpu_dummy_mode_with_various_display_nums() {
+        // dummy mode should ignore display_num / display_start entirely
+        for (display_num, display_start) in &[(0, 0), (10, 10), (42, 5), (u32::MAX, 0)] {
+            let config = detect_gpu("dummy", *display_num, *display_start);
+            assert_eq!(config.driver, "dummy");
+            assert!(config.bus_id.is_none());
+            assert!(config.dfp_output.is_none());
+        }
+    }
+
+    #[test]
+    fn detect_gpu_auto_mode_without_nvidia_falls_back_to_dummy() {
+        // On test hosts without an NVIDIA GPU at /usr/lib/xorg/modules/drivers/nvidia_drv.so,
+        // auto mode should silently fall back to dummy.
+        let nvidia_present =
+            std::path::Path::new("/usr/lib/xorg/modules/drivers/nvidia_drv.so").exists();
+        if !nvidia_present {
+            let config = detect_gpu("auto", 10, 10);
+            assert_eq!(config.driver, "dummy");
+        }
+    }
+
+    #[test]
+    fn detect_gpu_nvidia_mode_without_driver_warns_and_returns_dummy() {
+        // On test hosts without the NVIDIA driver, nvidia mode logs warnings
+        // then returns dummy (the caller bails when Xorg fails to start).
+        let nvidia_present =
+            std::path::Path::new("/usr/lib/xorg/modules/drivers/nvidia_drv.so").exists();
+        if !nvidia_present {
+            let config = detect_gpu("nvidia", 10, 10);
+            assert_eq!(config.driver, "dummy");
+            assert!(config.bus_id.is_none());
+        }
+    }
+
+    // --- write_edid_file_to ---
+
+    #[test]
+    fn write_edid_file_to_writes_exact_bytes() {
+        let dir = std::env::temp_dir().join(format!("beam-edid-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("edid.bin");
+        let path_str = path.to_str().unwrap();
+
+        write_edid_file_to(path_str).unwrap();
+
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(written.len(), 128, "EDID file must be 128 bytes");
+        assert_eq!(written.as_slice(), &EDID_BYTES[..]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_edid_file_to_overwrites_existing() {
+        let dir = std::env::temp_dir().join(format!("beam-edid-overwrite-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("edid.bin");
+
+        std::fs::write(&path, b"junk").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"junk");
+
+        write_edid_file_to(path.to_str().unwrap()).unwrap();
+
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(written.len(), 128);
+        assert_eq!(
+            &written[0..8],
+            &[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_edid_file_to_fails_on_unwritable_path() {
+        // /proc/... is not writable as a regular user
+        let result = write_edid_file_to("/proc/nonexistent/edid.bin");
+        assert!(
+            result.is_err(),
+            "Should fail to write to /proc subdirectory"
+        );
+    }
+
+    // --- EDID structural validation ---
+
+    #[test]
+    fn edid_extension_flag_zero() {
+        // Byte 126: number of extension blocks. We don't ship any.
+        assert_eq!(EDID_BYTES[126], 0, "EDID extension flag should be 0");
+    }
+
+    #[test]
+    fn edid_manufacturer_id_present() {
+        // Bytes 8-9: manufacturer ID. Source declares 0x10AC ("DEL" — Dell).
+        assert_eq!(EDID_BYTES[8], 0x10);
+        assert_eq!(EDID_BYTES[9], 0xAC);
+    }
 }
