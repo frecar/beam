@@ -7,6 +7,21 @@ const SENSITIVE_KEY =
   /(authorization|cookie|jwt|password|release[_-]?token|secret|session[_-]?id|token|username)/i;
 const SENSITIVE_QUERY = /([?&](?:password|release_token|session_id|token|username)=)[^&#]*/gi;
 
+type RuntimeConfig = {
+  observability?: {
+    sentryDsn?: string | null;
+    sentryTracesSampleRate?: number | null;
+    sentryEnvironment?: string | null;
+    release?: string | null;
+  };
+};
+
+declare global {
+  interface Window {
+    __BEAM_RUNTIME_CONFIG__?: RuntimeConfig;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -79,16 +94,29 @@ function numberFromEnv(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function numberFromRuntime(value: number | null | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function runtimeValue(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
 export function initMonitoring(): void {
-  const dsn = import.meta.env.VITE_SENTRY_DSN?.trim();
+  const runtime = window.__BEAM_RUNTIME_CONFIG__?.observability;
+  const dsn = runtimeValue(runtime?.sentryDsn) ?? import.meta.env.VITE_SENTRY_DSN?.trim();
   if (!dsn) return;
 
   Sentry.init({
     dsn,
-    environment: import.meta.env.MODE,
-    release: import.meta.env.VITE_BEAM_RELEASE,
+    environment: runtimeValue(runtime?.sentryEnvironment) ?? import.meta.env.MODE,
+    release: runtimeValue(runtime?.release) ?? import.meta.env.VITE_BEAM_RELEASE,
     sendDefaultPii: false,
-    tracesSampleRate: numberFromEnv(import.meta.env.VITE_SENTRY_TRACES_SAMPLE_RATE) ?? 0,
+    tracesSampleRate:
+      numberFromRuntime(runtime?.sentryTracesSampleRate) ??
+      numberFromEnv(import.meta.env.VITE_SENTRY_TRACES_SAMPLE_RATE) ??
+      0,
     beforeSend: scrubErrorEvent,
     beforeBreadcrumb: scrubBreadcrumb,
   });

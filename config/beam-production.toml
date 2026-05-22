@@ -9,6 +9,11 @@ web_root = "/usr/share/beam/web/dist"
 # tls_key = "/etc/beam/key.pem"      # Auto-generated self-signed if absent
 # client_metrics_enabled = false     # Opt-in browser connection-quality metrics
 
+[observability]
+# sentry_dsn = ""                    # Empty/absent disables browser error reporting
+# sentry_traces_sample_rate = 0.0    # 0.0 to 1.0
+# sentry_environment = "production"
+
 [video]
 bitrate = 5000      # kbps (initial target)
 min_bitrate = 500   # kbps (adaptive lower bound)

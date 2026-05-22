@@ -3,7 +3,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use beam_protocol::BeamConfig;
 
-pub use beam_protocol::{AudioConfig, ServerConfig, SessionConfig, VideoConfig};
+pub use beam_protocol::{
+    AudioConfig, ObservabilityConfig, ServerConfig, SessionConfig, VideoConfig,
+};
 
 /// Load configuration from a TOML file at the given path.
 /// If the file doesn't exist, returns default configuration.
@@ -15,6 +17,7 @@ pub fn load_config(path: &Path) -> Result<BeamConfig> {
         );
         return Ok(BeamConfig {
             server: ServerConfig::default(),
+            observability: ObservabilityConfig::default(),
             video: VideoConfig::default(),
             audio: AudioConfig::default(),
             session: SessionConfig::default(),
@@ -54,6 +57,7 @@ mod tests {
         // The exact defaults are owned by beam-protocol; we just verify the
         // call assembled a complete BeamConfig without panicking.
         let _ = config.server;
+        let _ = config.observability;
         let _ = config.video;
         let _ = config.audio;
         let _ = config.session;
@@ -71,6 +75,7 @@ mod tests {
 
         let config = load_config(&path).expect("Empty TOML should yield defaults");
         let _ = config.server;
+        let _ = config.observability;
         let _ = config.video;
         let _ = config.audio;
         let _ = config.session;
