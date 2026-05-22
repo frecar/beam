@@ -164,12 +164,12 @@ jobs:
           # added 32 server::web tests; PR #72 added 36 more tests
           # across main.rs/input.rs/audio.rs, lifting measured
           # coverage to 65.67% lines on the post-merge CI run.
-          # Two-step bump 61 → 63 (floor(65.67 - 1) = 64 ceiling,
-          # so 63 retains 0.67pp headroom for the next ratchet).
+          # Per-PR 1pp bump 63 → 64 (floor(65.67 - 1) = 64;
+          # this consumes the 0.67pp headroom retained by #73).
           # Every subsequent PR that raises actual coverage may bump
           # this; never lower. --ignore-filename-regex 'tests?/'
           # excludes the test harness modules from the floor so it
           # tracks real source coverage only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 63
+            --fail-under-lines 64
