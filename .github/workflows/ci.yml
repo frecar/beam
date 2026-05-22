@@ -163,13 +163,14 @@ jobs:
           # tls modules — re-measurement showed 60.81% lines. PR #68
           # added 32 server::web tests; PR #72 added 36 more tests
           # across main.rs/input.rs/audio.rs, lifting measured
-          # coverage to 65.67% lines on the post-merge CI run.
-          # Per-PR 1pp bump 63 → 64 (floor(65.67 - 1) = 64;
-          # this consumes the 0.67pp headroom retained by #73).
+          # coverage to 65.67% lines. Post-#77 main CI re-measurement
+          # showed 65.92% lines. Per-PR 1pp bump 64 → 65
+          # (floor(65.92 - 1) = 64, but 65 still leaves 0.92pp
+          # headroom and matches the established cadence).
           # Every subsequent PR that raises actual coverage may bump
           # this; never lower. --ignore-filename-regex 'tests?/'
           # excludes the test harness modules from the floor so it
           # tracks real source coverage only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 64
+            --fail-under-lines 65
