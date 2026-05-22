@@ -16,7 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Cluster LLM policy lint
+      - name: Private reference check
+        run: bash scripts/check-no-internal-refs.sh
+
+      - name: LLM endpoint policy lint
         run: python3 scripts/check_no_external_llm.py
 
       - name: Install system dependencies

@@ -26,11 +26,13 @@
 - Fast pre-push: `make pre-push` (fmt + tsc only; no link, no system deps)
 - Install pre-push hook: `make install-hooks`
 
-## LLM Policy
+## LLM Endpoint Policy
 
 Beam itself does not call LLMs at runtime. If a contributor adds model-assisted tooling (e.g. release notes, log summarization, doc generation), route it through the endpoint configured in the `LLM_ENDPOINT` environment variable — never hard-code a third-party API URL or runtime fallback in source.
 
 `scripts/check_no_external_llm.py` enforces this policy via pre-commit and CI: it scans for hard-coded `api.openai.com`, `api.anthropic.com`, and similar third-party endpoints. Configure your own endpoint via env at build/run time.
+
+`scripts/check-no-internal-refs.sh` also runs in pre-commit and CI. Keep source, docs, and examples standalone; use runtime configuration for private deployment values.
 
 ## Deployment
 
