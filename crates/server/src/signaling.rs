@@ -53,6 +53,77 @@ pub fn new_channel_registry() -> ChannelRegistry {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
+/// Extract the 32-bit magic value from the front of a binary frame.
+/// Returns `None` if the frame is shorter than 4 bytes.
+///
+/// Split out so the magic-check branching can be unit-tested without
+/// owning an in-flight WebSocket connection.
+pub(crate) fn frame_magic(data: &[u8]) -> Option<u32> {
+    if data.len() < 4 {
+        return None;
+    }
+    Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+}
+
+/// Check whether a binary frame's magic header matches the expected
+/// FRAME_MAGIC constant. Returns `false` for short frames AND for valid
+/// frames with the wrong magic (both are dropped before relay).
+pub(crate) fn frame_magic_is_valid(data: &[u8]) -> bool {
+    frame_magic(data).is_some_and(|m| m == FRAME_MAGIC)
+}
+
+/// Outcome of parsing a browser→server text frame.
+#[derive(Debug)]
+pub(crate) enum BrowserMessageOutcome {
+    /// A ClientMetricsPing — reply with a pong (only if metrics are enabled).
+    Pong { id: u32, sent_ms: f64 },
+    /// A ClientMetrics report — update the client metrics store (only if
+    /// metrics are enabled).
+    Metrics(beam_protocol::ClientMetricsReport),
+    /// A regular input event — wrap as AgentCommand and forward to the agent.
+    Forward(AgentCommand),
+    /// Malformed JSON or unknown shape — reply with an error frame whose body
+    /// is this string.
+    InvalidJson(String),
+}
+
+/// Parse a browser→server text frame into one of the [`BrowserMessageOutcome`]
+/// variants. Split out so the dispatch can be unit-tested without driving a
+/// real WebSocket. Error message text is included for diagnostic surfaces.
+pub(crate) fn parse_browser_text(text: &str) -> BrowserMessageOutcome {
+    match serde_json::from_str::<InputEvent>(text) {
+        Ok(InputEvent::ClientMetricsPing { id, sent_ms }) => {
+            BrowserMessageOutcome::Pong { id, sent_ms }
+        }
+        Ok(InputEvent::ClientMetrics(report)) => BrowserMessageOutcome::Metrics(report),
+        Ok(event) => BrowserMessageOutcome::Forward(AgentCommand::Input(event)),
+        Err(e) => BrowserMessageOutcome::InvalidJson(e.to_string()),
+    }
+}
+
+/// Outcome of parsing a server→agent (incoming-from-server) text frame.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) enum AgentTextOutcome {
+    /// Forward the input event to the local injector.
+    Input(InputEvent),
+    /// Shut down the agent (clean exit).
+    Shutdown,
+    /// Malformed JSON or unknown shape — log + ignore.
+    Invalid(String),
+}
+
+/// Parse an agent-side incoming text frame as an [`AgentCommand`]. Split out
+/// for unit testing.
+#[cfg(test)]
+pub(crate) fn parse_agent_command_text(text: &str) -> AgentTextOutcome {
+    match serde_json::from_str::<AgentCommand>(text) {
+        Ok(AgentCommand::Input(event)) => AgentTextOutcome::Input(event),
+        Ok(AgentCommand::Shutdown) => AgentTextOutcome::Shutdown,
+        Err(e) => AgentTextOutcome::Invalid(e.to_string()),
+    }
+}
+
 /// Get or create a signaling channel for the given session.
 pub async fn get_or_create_channel(
     registry: &ChannelRegistry,
@@ -197,32 +268,26 @@ pub async fn handle_browser_ws(
             Some(result) = socket.recv() => {
                 match result {
                     Ok(Message::Text(text)) => {
-                        // Try parsing as InputEvent first (most common)
-                        match serde_json::from_str::<InputEvent>(&text) {
-                            Ok(event) => {
-                                match event {
-                                    InputEvent::ClientMetricsPing { id, sent_ms } => {
-                                        if client_metrics_enabled {
-                                            let msg = SignalingMessage::MetricsPong { id, sent_ms };
-                                            if let Ok(json) = serde_json::to_string(&msg) {
-                                                let _ = socket.send(Message::Text(json.into())).await;
-                                            }
-                                        }
-                                    }
-                                    InputEvent::ClientMetrics(report) => {
-                                        if client_metrics_enabled {
-                                            client_metrics.update(session_id, report);
-                                        }
-                                    }
-                                    event => {
-                                        let cmd = AgentCommand::Input(event);
-                                        if let Err(e) = channel.to_agent.send(cmd) {
-                                            tracing::warn!(%session_id, "No agent listening for input: {e}");
-                                        }
+                        match parse_browser_text(&text) {
+                            BrowserMessageOutcome::Pong { id, sent_ms } => {
+                                if client_metrics_enabled {
+                                    let msg = SignalingMessage::MetricsPong { id, sent_ms };
+                                    if let Ok(json) = serde_json::to_string(&msg) {
+                                        let _ = socket.send(Message::Text(json.into())).await;
                                     }
                                 }
                             }
-                            Err(e) => {
+                            BrowserMessageOutcome::Metrics(report) => {
+                                if client_metrics_enabled {
+                                    client_metrics.update(session_id, report);
+                                }
+                            }
+                            BrowserMessageOutcome::Forward(cmd) => {
+                                if let Err(e) = channel.to_agent.send(cmd) {
+                                    tracing::warn!(%session_id, "No agent listening for input: {e}");
+                                }
+                            }
+                            BrowserMessageOutcome::InvalidJson(e) => {
                                 tracing::warn!(%session_id, "Invalid browser message: {e}");
                                 let err = SignalingMessage::Error {
                                     message: format!("Invalid message format: {e}"),
@@ -320,21 +385,18 @@ pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: 
                     Ok(Message::Binary(data)) => {
                         // Binary frames: validate magic header, relay to browser
                         let len = data.len();
-                        if len >= 4 {
-                            let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                            if magic == FRAME_MAGIC {
-                                let receivers = channel.video_frames.receiver_count();
-                                match channel.video_frames.send(Bytes::from(data.to_vec())) {
-                                    Ok(n) => {
-                                        tracing::trace!(%session_id, len, receivers, sent_to = n, "Relayed binary frame");
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(%session_id, len, receivers, "No browser listening for video: {e}");
-                                    }
+                        if frame_magic_is_valid(&data) {
+                            let receivers = channel.video_frames.receiver_count();
+                            match channel.video_frames.send(Bytes::from(data.to_vec())) {
+                                Ok(n) => {
+                                    tracing::trace!(%session_id, len, receivers, sent_to = n, "Relayed binary frame");
                                 }
-                            } else {
-                                tracing::warn!(%session_id, "Agent sent binary with bad magic: 0x{magic:08x}");
+                                Err(e) => {
+                                    tracing::debug!(%session_id, len, receivers, "No browser listening for video: {e}");
+                                }
                             }
+                        } else if let Some(magic) = frame_magic(&data) {
+                            tracing::warn!(%session_id, "Agent sent binary with bad magic: 0x{magic:08x}");
                         }
                     }
                     Ok(Message::Pong(_)) => {
@@ -588,5 +650,204 @@ mod tests {
             received,
             AgentCommand::Input(InputEvent::VisibilityState { visible: true })
         ));
+    }
+
+    // --- frame_magic / frame_magic_is_valid ---
+
+    #[test]
+    fn frame_magic_returns_none_for_empty() {
+        assert_eq!(frame_magic(&[]), None);
+        assert!(!frame_magic_is_valid(&[]));
+    }
+
+    #[test]
+    fn frame_magic_returns_none_for_short_frame() {
+        // Anything shorter than 4 bytes can't possibly carry a u32 magic.
+        for n in 0..4 {
+            let bytes = vec![0u8; n];
+            assert_eq!(frame_magic(&bytes), None);
+            assert!(!frame_magic_is_valid(&bytes));
+        }
+    }
+
+    #[test]
+    fn frame_magic_decodes_little_endian() {
+        // Magic 0x04030201 in little-endian = bytes [0x01, 0x02, 0x03, 0x04]
+        let bytes = [0x01, 0x02, 0x03, 0x04];
+        assert_eq!(frame_magic(&bytes), Some(0x04030201));
+    }
+
+    #[test]
+    fn frame_magic_ignores_trailing_bytes() {
+        // The function only inspects the first 4 bytes.
+        let mut frame = vec![0x01, 0x02, 0x03, 0x04];
+        frame.extend([0xAA, 0xBB, 0xCC]);
+        assert_eq!(frame_magic(&frame), Some(0x04030201));
+    }
+
+    #[test]
+    fn frame_magic_is_valid_accepts_correct_constant() {
+        // Build a frame whose first 4 bytes are exactly FRAME_MAGIC LE.
+        let magic = FRAME_MAGIC.to_le_bytes();
+        let frame: Vec<u8> = magic.iter().copied().chain(vec![0u8; 20]).collect();
+        assert!(frame_magic_is_valid(&frame));
+    }
+
+    #[test]
+    fn frame_magic_is_valid_rejects_wrong_magic() {
+        let wrong = (FRAME_MAGIC.wrapping_add(1)).to_le_bytes();
+        let frame: Vec<u8> = wrong.iter().copied().chain(vec![0u8; 20]).collect();
+        assert!(!frame_magic_is_valid(&frame));
+    }
+
+    #[test]
+    fn frame_magic_is_valid_rejects_zero_magic() {
+        // All-zero header is the most common garbage frame and must be rejected.
+        let frame = vec![0u8; 24];
+        assert!(!frame_magic_is_valid(&frame));
+    }
+
+    #[test]
+    fn frame_magic_is_valid_handles_min_length() {
+        // Exactly 4 bytes of magic + nothing else is a malformed but
+        // non-rejected-by-magic frame. The full validation (header parsing)
+        // happens later in the relay.
+        let magic = FRAME_MAGIC.to_le_bytes();
+        assert!(frame_magic_is_valid(&magic));
+    }
+
+    // --- parse_browser_text ---
+
+    #[test]
+    fn parse_browser_text_metrics_ping_returns_pong() {
+        let ping = InputEvent::ClientMetricsPing {
+            id: 42,
+            sent_ms: 1000.0,
+        };
+        let text = serde_json::to_string(&ping).unwrap();
+        match parse_browser_text(&text) {
+            BrowserMessageOutcome::Pong { id, sent_ms } => {
+                assert_eq!(id, 42);
+                assert!((sent_ms - 1000.0).abs() < f64::EPSILON);
+            }
+            other => panic!("Expected Pong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_browser_text_input_event_returns_forward() {
+        let event = InputEvent::Key { c: 65, d: true };
+        let text = serde_json::to_string(&event).unwrap();
+        match parse_browser_text(&text) {
+            BrowserMessageOutcome::Forward(AgentCommand::Input(InputEvent::Key { c, d })) => {
+                assert_eq!(c, 65);
+                assert!(d);
+            }
+            other => panic!("Expected Forward, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_browser_text_invalid_json_returns_invalid_json() {
+        match parse_browser_text("not even close to json") {
+            BrowserMessageOutcome::InvalidJson(msg) => {
+                assert!(!msg.is_empty(), "Error message must not be empty");
+            }
+            other => panic!("Expected InvalidJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_browser_text_empty_string_returns_invalid_json() {
+        match parse_browser_text("") {
+            BrowserMessageOutcome::InvalidJson(_) => {}
+            other => panic!("Expected InvalidJson for empty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_browser_text_unknown_event_type_returns_invalid_json() {
+        match parse_browser_text(r#"{"t":"totally_unknown_event"}"#) {
+            BrowserMessageOutcome::InvalidJson(_) => {}
+            other => panic!("Expected InvalidJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_browser_text_mouse_move_returns_forward() {
+        let event = InputEvent::MouseMove { x: 0.5, y: 0.25 };
+        let text = serde_json::to_string(&event).unwrap();
+        match parse_browser_text(&text) {
+            BrowserMessageOutcome::Forward(AgentCommand::Input(InputEvent::MouseMove { x, y })) => {
+                assert!((x - 0.5).abs() < f64::EPSILON);
+                assert!((y - 0.25).abs() < f64::EPSILON);
+            }
+            other => panic!("Expected Forward MouseMove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_browser_text_resize_event_returns_forward() {
+        let event = InputEvent::Resize { w: 2560, h: 1440 };
+        let text = serde_json::to_string(&event).unwrap();
+        match parse_browser_text(&text) {
+            BrowserMessageOutcome::Forward(AgentCommand::Input(InputEvent::Resize { w, h })) => {
+                assert_eq!(w, 2560);
+                assert_eq!(h, 1440);
+            }
+            other => panic!("Expected Forward Resize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_browser_text_metrics_report_returns_metrics() {
+        let report = beam_protocol::ClientMetricsReport::default();
+        let event = InputEvent::ClientMetrics(report);
+        let text = serde_json::to_string(&event).unwrap();
+        match parse_browser_text(&text) {
+            BrowserMessageOutcome::Metrics(_) => {}
+            other => panic!("Expected Metrics, got {other:?}"),
+        }
+    }
+
+    // --- parse_agent_command_text ---
+
+    #[test]
+    fn parse_agent_command_text_shutdown() {
+        let cmd = AgentCommand::Shutdown;
+        let text = serde_json::to_string(&cmd).unwrap();
+        match parse_agent_command_text(&text) {
+            AgentTextOutcome::Shutdown => {}
+            other => panic!("Expected Shutdown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_agent_command_text_input_event() {
+        let cmd = AgentCommand::Input(InputEvent::Key { c: 100, d: false });
+        let text = serde_json::to_string(&cmd).unwrap();
+        match parse_agent_command_text(&text) {
+            AgentTextOutcome::Input(InputEvent::Key { c, d }) => {
+                assert_eq!(c, 100);
+                assert!(!d);
+            }
+            other => panic!("Expected Input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_agent_command_text_invalid() {
+        match parse_agent_command_text("garbage") {
+            AgentTextOutcome::Invalid(_) => {}
+            other => panic!("Expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_agent_command_text_empty() {
+        match parse_agent_command_text("") {
+            AgentTextOutcome::Invalid(_) => {}
+            other => panic!("Expected Invalid, got {other:?}"),
+        }
     }
 }

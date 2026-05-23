@@ -41,8 +41,7 @@ pub(crate) async fn run_signaling(
     }
 
     // Connect to WebSocket with exponential backoff retry
-    let mut backoff = Duration::from_secs(2);
-    let max_backoff = Duration::from_secs(60);
+    let mut backoff = INITIAL_BACKOFF;
     loop {
         info!(url = ctx.server_url, "Connecting to signaling server");
 
@@ -55,7 +54,7 @@ pub(crate) async fn run_signaling(
                 warn!("Signaling connection error: {e:#}");
                 info!("Reconnecting in {} seconds...", backoff.as_secs());
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(max_backoff);
+                backoff = next_backoff(backoff, MAX_BACKOFF);
             }
         }
     }
@@ -98,6 +97,62 @@ fn build_tls_connector(tls_cert_path: Option<&str>) -> tokio_tungstenite::Connec
     tokio_tungstenite::Connector::Rustls(Arc::new(tls_config))
 }
 
+/// Build the websocket URL for connecting an agent to a beam-server.
+///
+/// Split out so the URL formatting + token-encoding logic can be exercised
+/// without a live network connection. URL-encodes the agent token so tokens
+/// containing reserved URL characters don't break the query string.
+pub(crate) fn build_agent_ws_url(
+    server_url: &str,
+    session_id: uuid::Uuid,
+    agent_token: Option<&str>,
+) -> String {
+    match agent_token {
+        Some(token) => format!(
+            "{}/ws/agent/{}?token={}",
+            server_url,
+            session_id,
+            urlencoding::encode(token)
+        ),
+        None => format!("{}/ws/agent/{}", server_url, session_id),
+    }
+}
+
+/// Outcome of parsing a server→agent text frame.
+#[derive(Debug)]
+pub(crate) enum ServerTextOutcome {
+    /// An input event to forward to the local input callback.
+    Input(InputEvent),
+    /// A shutdown command — clean exit.
+    Shutdown,
+    /// Unparseable / unknown JSON — log + ignore.
+    Invalid(String),
+}
+
+/// Parse a server-to-agent text frame as [`AgentCommand`]. Split out so the
+/// dispatch + error handling can be unit-tested without a live WebSocket.
+pub(crate) fn parse_server_text(text: &str) -> ServerTextOutcome {
+    match serde_json::from_str::<AgentCommand>(text) {
+        Ok(AgentCommand::Input(event)) => ServerTextOutcome::Input(event),
+        Ok(AgentCommand::Shutdown) => ServerTextOutcome::Shutdown,
+        Err(e) => ServerTextOutcome::Invalid(e.to_string()),
+    }
+}
+
+/// Exponential backoff step used by the signaling reconnect loop. The
+/// production loop starts at 2s and doubles until 60s; split out so the
+/// doubling + cap logic can be unit-tested independently.
+pub(crate) fn next_backoff(current: Duration, max: Duration) -> Duration {
+    (current * 2).min(max)
+}
+
+/// Initial backoff duration the reconnect loop uses.
+pub(crate) const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Upper bound on the reconnect backoff. We cap here to avoid hour-long
+/// reconnect delays after extended outages.
+pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
 async fn connect_and_handle(
     ctx: &SignalingCtx<'_>,
     ws_outbox_rx: &mut mpsc::Receiver<tokio_tungstenite::tungstenite::Message>,
@@ -105,15 +160,7 @@ async fn connect_and_handle(
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let url = match ctx.agent_token {
-        Some(token) => format!(
-            "{}/ws/agent/{}?token={}",
-            ctx.server_url,
-            ctx.session_id,
-            urlencoding::encode(token)
-        ),
-        None => format!("{}/ws/agent/{}", ctx.server_url, ctx.session_id),
-    };
+    let url = build_agent_ws_url(ctx.server_url, ctx.session_id, ctx.agent_token);
 
     let connector = build_tls_connector(ctx.tls_cert_path);
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
@@ -148,15 +195,15 @@ async fn connect_and_handle(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<AgentCommand>(&text) {
-                            Ok(AgentCommand::Input(event)) => {
+                        match parse_server_text(&text) {
+                            ServerTextOutcome::Input(event) => {
                                 (ctx.input_callback)(event);
                             }
-                            Ok(AgentCommand::Shutdown) => {
+                            ServerTextOutcome::Shutdown => {
                                 info!("Received shutdown command");
                                 return Ok(());
                             }
-                            Err(e) => {
+                            ServerTextOutcome::Invalid(e) => {
                                 warn!("Invalid message from server: {e}");
                             }
                         }
@@ -325,5 +372,209 @@ mod tests {
         assert_eq!(ctx.tls_cert_path, Some("/tmp/cert.pem"));
         assert!(ctx.force_keyframe.load(Ordering::Relaxed));
         assert!(ctx.tab_backgrounded.load(Ordering::Relaxed));
+    }
+
+    // --- build_agent_ws_url ---
+
+    #[test]
+    fn ws_url_without_token_has_no_query_string() {
+        let id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let url = build_agent_ws_url("wss://example.test", id, None);
+        assert_eq!(
+            url,
+            "wss://example.test/ws/agent/00000000-0000-0000-0000-000000000001"
+        );
+        assert!(!url.contains('?'));
+    }
+
+    #[test]
+    fn ws_url_with_token_appends_query_string() {
+        let id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let url = build_agent_ws_url("wss://example.test", id, Some("abc123"));
+        assert_eq!(
+            url,
+            "wss://example.test/ws/agent/00000000-0000-0000-0000-000000000002?token=abc123"
+        );
+    }
+
+    #[test]
+    fn ws_url_url_encodes_token_special_chars() {
+        // Tokens may contain '/', '=', '+', '&' (typical for base64 / URL-safe).
+        // The URL-encoded form must NOT introduce spurious query separators
+        // into the URL.
+        let id = Uuid::nil();
+        let url = build_agent_ws_url("wss://example.test", id, Some("a/b=c&d+e"));
+        // The encoded token portion comes after `?token=`. Verify each suspect
+        // character is percent-encoded.
+        assert!(url.contains("?token="));
+        // '/' -> %2F
+        assert!(url.contains("%2F"), "'/' should be percent-encoded: {url}");
+        // '=' -> %3D
+        assert!(url.contains("%3D"), "'=' should be percent-encoded: {url}");
+        // '&' -> %26 — critical so it doesn't introduce a new query param
+        assert!(url.contains("%26"), "'&' should be percent-encoded: {url}");
+        // '+' -> %2B
+        assert!(url.contains("%2B"), "'+' should be percent-encoded: {url}");
+    }
+
+    #[test]
+    fn ws_url_handles_empty_token() {
+        // Empty token still yields a "?token=" suffix (rather than no query
+        // string), so the server can distinguish "no token provided" from
+        // "token field is empty".
+        let id = Uuid::nil();
+        let url = build_agent_ws_url("wss://example.test", id, Some(""));
+        assert!(url.ends_with("?token="));
+    }
+
+    #[test]
+    fn ws_url_preserves_server_url_path_prefix() {
+        // If the server URL includes a path prefix (e.g., wss://h/proxied),
+        // build_agent_ws_url should preserve it and append the /ws/agent/ path.
+        let id = Uuid::nil();
+        let url = build_agent_ws_url("wss://example.test/proxied", id, None);
+        assert!(url.starts_with("wss://example.test/proxied/ws/agent/"));
+    }
+
+    #[test]
+    fn ws_url_with_port_preserves_port() {
+        let id = Uuid::nil();
+        let url = build_agent_ws_url("wss://example.test:8443", id, None);
+        assert!(url.starts_with("wss://example.test:8443/ws/agent/"));
+    }
+
+    #[test]
+    fn ws_url_uses_ws_path() {
+        // The /ws/agent/ path is the contract with beam-server's signaling
+        // route registration; if it ever drifts, this test catches it.
+        let id = Uuid::nil();
+        let url = build_agent_ws_url("wss://example.test", id, None);
+        assert!(url.contains("/ws/agent/"));
+    }
+
+    // --- parse_server_text ---
+
+    #[test]
+    fn parse_server_text_shutdown_command() {
+        let text = serde_json::to_string(&AgentCommand::Shutdown).unwrap();
+        match parse_server_text(&text) {
+            ServerTextOutcome::Shutdown => {}
+            other => panic!("Expected Shutdown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_server_text_input_command() {
+        // KeyDown event wrapped in AgentCommand::Input.
+        let cmd = AgentCommand::Input(InputEvent::Key { c: 65, d: true });
+        let text = serde_json::to_string(&cmd).unwrap();
+        match parse_server_text(&text) {
+            ServerTextOutcome::Input(InputEvent::Key { c, d }) => {
+                assert_eq!(c, 65);
+                assert!(d);
+            }
+            other => panic!("Expected Input::Key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_server_text_invalid_json_returns_invalid() {
+        match parse_server_text("not json at all") {
+            ServerTextOutcome::Invalid(msg) => {
+                assert!(!msg.is_empty(), "Error message should not be empty");
+            }
+            other => panic!("Expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_server_text_empty_input_returns_invalid() {
+        match parse_server_text("") {
+            ServerTextOutcome::Invalid(_) => {}
+            other => panic!("Expected Invalid for empty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_server_text_wrong_shape_returns_invalid() {
+        // Valid JSON, but not an AgentCommand.
+        match parse_server_text(r#"{"foo": "bar"}"#) {
+            ServerTextOutcome::Invalid(_) => {}
+            other => panic!("Expected Invalid for wrong shape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_server_text_resize_input_event_roundtrip() {
+        let cmd = AgentCommand::Input(InputEvent::Resize { w: 1920, h: 1080 });
+        let text = serde_json::to_string(&cmd).unwrap();
+        match parse_server_text(&text) {
+            ServerTextOutcome::Input(InputEvent::Resize { w, h }) => {
+                assert_eq!(w, 1920);
+                assert_eq!(h, 1080);
+            }
+            other => panic!("Expected Input::Resize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_server_text_visibility_input_event_roundtrip() {
+        let cmd = AgentCommand::Input(InputEvent::VisibilityState { visible: false });
+        let text = serde_json::to_string(&cmd).unwrap();
+        match parse_server_text(&text) {
+            ServerTextOutcome::Input(InputEvent::VisibilityState { visible }) => {
+                assert!(!visible);
+            }
+            other => panic!("Expected VisibilityState, got {other:?}"),
+        }
+    }
+
+    // --- next_backoff ---
+
+    #[test]
+    fn next_backoff_doubles_current() {
+        let result = next_backoff(Duration::from_secs(2), Duration::from_secs(60));
+        assert_eq!(result, Duration::from_secs(4));
+    }
+
+    #[test]
+    fn next_backoff_caps_at_max() {
+        // 32 doubled = 64, but max is 60 → cap at 60.
+        let result = next_backoff(Duration::from_secs(32), Duration::from_secs(60));
+        assert_eq!(result, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn next_backoff_already_at_max_stays_at_max() {
+        // 60 * 2 = 120, capped to 60.
+        let result = next_backoff(Duration::from_secs(60), Duration::from_secs(60));
+        assert_eq!(result, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn next_backoff_grows_through_full_sequence() {
+        // 2s → 4s → 8s → 16s → 32s → 60s (capped) → 60s (capped)
+        let mut backoff = INITIAL_BACKOFF;
+        let expected = [4, 8, 16, 32, 60, 60, 60];
+        for expected_secs in expected {
+            backoff = next_backoff(backoff, MAX_BACKOFF);
+            assert_eq!(backoff, Duration::from_secs(expected_secs));
+        }
+    }
+
+    #[test]
+    fn next_backoff_starts_at_2_seconds() {
+        assert_eq!(INITIAL_BACKOFF, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn next_backoff_max_is_60_seconds() {
+        assert_eq!(MAX_BACKOFF, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn next_backoff_with_zero_returns_zero() {
+        let result = next_backoff(Duration::from_secs(0), Duration::from_secs(60));
+        assert_eq!(result, Duration::from_secs(0));
     }
 }

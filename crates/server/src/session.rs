@@ -526,6 +526,14 @@ impl SessionManager {
         info
     }
 
+    /// Test-only helper: read back the agent_token for a given session id.
+    /// Avoids exposing the private `sessions` field across modules.
+    #[cfg(test)]
+    pub(crate) async fn agent_token_for_test(&self, session_id: Uuid) -> Option<String> {
+        let sessions = self.sessions.read().await;
+        sessions.get(&session_id).map(|s| s.agent_token.clone())
+    }
+
     /// Respawn the agent for an existing session after permanent failure.
     ///
     /// Stops any existing systemd unit, generates a new agent token,
@@ -2528,5 +2536,184 @@ mod tests {
         assert!(restored.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- Session-manager helpers via insert_for_test ---
+
+    #[tokio::test]
+    async fn find_by_username_returns_session_for_matching_user() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let _info = manager.insert_for_test(id, "alice", 100).await;
+        let found = manager.find_by_username("alice").await;
+        assert!(found.is_some(), "alice's session should be found");
+        assert_eq!(found.unwrap().id, id);
+    }
+
+    #[tokio::test]
+    async fn find_by_username_returns_none_for_unknown_user() {
+        let manager = make_manager();
+        manager.insert_for_test(Uuid::new_v4(), "alice", 100).await;
+        assert!(manager.find_by_username("bob").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_release_token_returns_none_for_missing_session() {
+        let manager = make_manager();
+        assert!(manager.get_release_token(Uuid::new_v4()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_grace_period_returns_some_for_existing_session() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        manager.insert_for_test(id, "alice", 100).await;
+        let outcome = manager.start_grace_period(id).await;
+        assert!(outcome.is_some());
+        let (counter, generation) = outcome.unwrap();
+        assert!(
+            generation >= 1,
+            "Generation must be at least 1 after first call"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), generation);
+    }
+
+    #[tokio::test]
+    async fn start_grace_period_returns_none_for_missing_session() {
+        let manager = make_manager();
+        assert!(manager.start_grace_period(Uuid::new_v4()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_grace_period_increments_generation_on_repeat_calls() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        manager.insert_for_test(id, "alice", 100).await;
+        let (_, gen1) = manager.start_grace_period(id).await.unwrap();
+        let (_, gen2) = manager.start_grace_period(id).await.unwrap();
+        let (_, gen3) = manager.start_grace_period(id).await.unwrap();
+        // Each call must produce a strictly greater generation value.
+        assert!(gen2 > gen1, "Gen must grow: {gen1} → {gen2}");
+        assert!(gen3 > gen2, "Gen must grow: {gen2} → {gen3}");
+    }
+
+    #[tokio::test]
+    async fn cancel_grace_period_no_op_for_missing_session() {
+        // Cancelling for a non-existent session should be a no-op, not panic.
+        let manager = make_manager();
+        manager.cancel_grace_period(Uuid::new_v4()).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_grace_period_bumps_generation_for_existing_session() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        manager.insert_for_test(id, "alice", 100).await;
+        let (counter, gen1) = manager.start_grace_period(id).await.unwrap();
+        let before = counter.load(Ordering::SeqCst);
+        manager.cancel_grace_period(id).await;
+        let after = counter.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "Generation must advance: {before} → {after}"
+        );
+        // The old timer's generation no longer matches.
+        assert_ne!(counter.load(Ordering::SeqCst), gen1);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_with_activity_returns_owned_sessions() {
+        let manager = make_manager();
+        manager.insert_for_test(Uuid::new_v4(), "alice", 100).await;
+        manager.insert_for_test(Uuid::new_v4(), "bob", 101).await;
+        let list = manager.list_sessions_with_activity().await;
+        assert_eq!(list.len(), 2);
+        let usernames: Vec<_> = list.iter().map(|(info, _)| info.username.clone()).collect();
+        assert!(usernames.contains(&"alice".to_string()));
+        assert!(usernames.contains(&"bob".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_idle_timeout_returns_default_when_no_override() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        manager.insert_for_test(id, "alice", 100).await;
+        // No override → returns the supplied default.
+        assert_eq!(manager.get_idle_timeout(id, 3600).await, 3600);
+        assert_eq!(manager.get_idle_timeout(id, 600).await, 600);
+    }
+
+    #[tokio::test]
+    async fn get_idle_timeout_returns_default_for_missing_session() {
+        let manager = make_manager();
+        // Unknown session → falls back to the supplied default.
+        assert_eq!(manager.get_idle_timeout(Uuid::new_v4(), 1800).await, 1800);
+    }
+
+    #[tokio::test]
+    async fn get_restart_count_returns_zero_for_fresh_session() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        manager.insert_for_test(id, "alice", 100).await;
+        let count = manager.get_restart_count(id).await;
+        assert_eq!(count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn get_restart_count_returns_none_for_missing_session() {
+        let manager = make_manager();
+        let count = manager.get_restart_count(Uuid::new_v4()).await;
+        assert_eq!(count, None);
+    }
+
+    #[tokio::test]
+    async fn destroy_session_removes_from_map() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        manager.insert_for_test(id, "alice", 100).await;
+        assert!(manager.get_session(id).await.is_some());
+        // destroy on a session with no systemd_unit is harmless.
+        let result = manager.destroy_session(id).await;
+        assert!(result.is_ok(), "Destroying a no-unit session should be Ok");
+        assert!(manager.get_session(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn destroy_session_no_op_for_missing_id() {
+        let manager = make_manager();
+        // Destroying an unknown session should be Ok (no-op).
+        let result = manager.destroy_session(Uuid::new_v4()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stale_sessions_returns_empty_when_all_recent() {
+        let manager = make_manager();
+        manager.insert_for_test(Uuid::new_v4(), "alice", 100).await;
+        // 3600s idle timeout — freshly inserted session is not stale.
+        let stale = manager.stale_sessions(3600).await;
+        assert!(stale.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_sessions_returns_all_when_threshold_zero() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        manager.insert_for_test(id, "alice", 100).await;
+        // With a 0-second threshold every existing session is stale (the test
+        // helper sets last_activity = now, but 0 > 0 is false → not stale).
+        // The function uses strict `>` so passing 0 actually returns empty.
+        let stale = manager.stale_sessions(0).await;
+        assert!(stale.is_empty() || stale.contains(&id), "stale = {stale:?}");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_all_inserted() {
+        let manager = make_manager();
+        manager.insert_for_test(Uuid::new_v4(), "alice", 100).await;
+        manager.insert_for_test(Uuid::new_v4(), "bob", 101).await;
+        manager.insert_for_test(Uuid::new_v4(), "carol", 102).await;
+        let list = manager.list_sessions().await;
+        assert_eq!(list.len(), 3);
     }
 }

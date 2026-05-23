@@ -52,10 +52,7 @@ impl Encoder {
         //   refuses to decode it (black screen / EncodingError). BGRA avoids this.
         //   nvcudah264enc can't accept BGRA directly, so videoconvert handles BGRA→NV12.
         // Other encoders: use BGRx with videoconvert for correct conversion.
-        let format = match encoder_type {
-            EncoderType::Nvidia | EncoderType::NvidiaCuda => "BGRA",
-            _ => "BGRx",
-        };
+        let format = appsrc_format_for(encoder_type);
         let appsrc_elem = ElementFactory::make("appsrc")
             .name("src")
             .build()
@@ -362,6 +359,34 @@ impl Drop for Encoder {
     }
 }
 
+/// Map an [`EncoderType`] to the raw-video format string fed to the GStreamer
+/// appsrc capsfilter. NVIDIA encoders use BGRA (which capture_frame fills with
+/// 0xFF alpha), everything else uses BGRx + videoconvert.
+///
+/// Split out so the BGRA / BGRx routing logic can be unit-tested without
+/// instantiating a full pipeline.
+pub(crate) fn appsrc_format_for(encoder_type: EncoderType) -> &'static str {
+    match encoder_type {
+        EncoderType::Nvidia | EncoderType::NvidiaCuda => "BGRA",
+        _ => "BGRx",
+    }
+}
+
+/// Map a preferred encoder element name to its [`EncoderType`]. Returns the
+/// type for the four supported encoders and an error message for unknown
+/// names. Split out so the dispatch can be unit-tested.
+pub(crate) fn encoder_type_for_name(name: &str) -> Result<EncoderType, String> {
+    match name {
+        "nvh264enc" => Ok(EncoderType::Nvidia),
+        "nvcudah264enc" => Ok(EncoderType::NvidiaCuda),
+        "vah264enc" => Ok(EncoderType::VaApi),
+        "x264enc" => Ok(EncoderType::Software),
+        other => Err(format!(
+            "Unknown encoder: {other}. Use nvh264enc, nvcudah264enc, vah264enc, or x264enc."
+        )),
+    }
+}
+
 /// Try to instantiate a GStreamer element to verify the hardware is actually
 /// available. `ElementFactory::find()` only checks the plugin registry (the
 /// `.so` is present), but the element may fail to create if the hardware
@@ -385,15 +410,7 @@ pub fn detect_encoder_type(preferred: Option<&str>) -> anyhow::Result<(EncoderTy
 fn detect_encoder(preferred: Option<&str>) -> anyhow::Result<(EncoderType, String)> {
     // If user specified a preferred encoder, try it first
     if let Some(pref) = preferred {
-        let enc_type = match pref {
-            "nvh264enc" => EncoderType::Nvidia,
-            "nvcudah264enc" => EncoderType::NvidiaCuda,
-            "vah264enc" => EncoderType::VaApi,
-            "x264enc" => EncoderType::Software,
-            _ => bail!(
-                "Unknown encoder: {pref}. Use nvh264enc, nvcudah264enc, vah264enc, or x264enc."
-            ),
-        };
+        let enc_type = encoder_type_for_name(pref).map_err(|e| anyhow::anyhow!(e))?;
         if can_instantiate(pref) {
             info!(encoder = pref, "Using preferred encoder from config");
             return Ok((enc_type, pref.to_string()));
@@ -699,19 +716,40 @@ mod tests {
             };
         assert!(!encoder.has_error());
 
-        // Push one black frame (640x480 BGRx = 4 bytes per pixel)
+        // Push several black frames (640x480 BGRx = 4 bytes per pixel) so the
+        // x264enc encoder has enough input to actually produce a NAL unit
+        // (zerolatency tuning emits a frame per input but needs the pipeline
+        // primed first).
         let frame_bytes = 640usize * 480 * 4;
-        let frame = crate::capture::synthetic_pooled_frame(vec![0u8; frame_bytes]);
-        encoder.encode_frame(frame, 0).unwrap();
+        for pts in 0..5 {
+            let frame = crate::capture::synthetic_pooled_frame(vec![0u8; frame_bytes]);
+            encoder.encode_frame(frame, pts * 33_333_333).unwrap();
+        }
 
         // force_keyframe should not panic on a healthy pipeline.
         encoder.force_keyframe();
 
-        // Encoder may need multiple frames before producing output; the test
-        // verifies the API surface (push/pull/force/has_error) works without
-        // panic. Actually pulling encoded data depends on x264enc behavior and
-        // is timing-sensitive, so we don't gate the test on it.
-        let _ = encoder.pull_encoded();
+        // Wait briefly for the encoder to emit output via the appsink callback.
+        let mut got_output = false;
+        for _ in 0..50 {
+            match encoder.pull_encoded() {
+                Ok(Some(data)) => {
+                    assert!(!data.is_empty(), "encoded buffer must not be empty");
+                    got_output = true;
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                Err(e) => panic!("pull_encoded error: {e:#}"),
+            }
+        }
+        // Best-effort assertion — some lightweight CI hosts may not produce
+        // output within 1s. The push/force/pull API still must not panic.
+        if !got_output {
+            eprintln!(
+                "encoder_x264_lifecycle_encodes_one_frame: no output captured \
+                 (acceptable on slow CI)"
+            );
+        }
     }
 
     #[test]
@@ -852,6 +890,100 @@ mod tests {
             (Ok(a), Ok(b)) => assert_eq!(a, b),
             (Err(a), Err(b)) => assert_eq!(a, b),
             _ => panic!("detect_encoder_type and detect_encoder diverged"),
+        }
+    }
+
+    // --- appsrc_format_for ---
+
+    #[test]
+    fn appsrc_format_nvidia_legacy_is_bgra() {
+        assert_eq!(appsrc_format_for(EncoderType::Nvidia), "BGRA");
+    }
+
+    #[test]
+    fn appsrc_format_nvidia_cuda_is_bgra() {
+        assert_eq!(appsrc_format_for(EncoderType::NvidiaCuda), "BGRA");
+    }
+
+    #[test]
+    fn appsrc_format_vaapi_is_bgrx() {
+        assert_eq!(appsrc_format_for(EncoderType::VaApi), "BGRx");
+    }
+
+    #[test]
+    fn appsrc_format_software_is_bgrx() {
+        assert_eq!(appsrc_format_for(EncoderType::Software), "BGRx");
+    }
+
+    #[test]
+    fn appsrc_format_all_variants_return_known_format() {
+        // Lock the exhaustive table so a new encoder variant forces a decision.
+        for (enc_type, expected) in [
+            (EncoderType::Nvidia, "BGRA"),
+            (EncoderType::NvidiaCuda, "BGRA"),
+            (EncoderType::VaApi, "BGRx"),
+            (EncoderType::Software, "BGRx"),
+        ] {
+            assert_eq!(appsrc_format_for(enc_type), expected);
+        }
+    }
+
+    // --- encoder_type_for_name ---
+
+    #[test]
+    fn encoder_type_for_name_known_encoders() {
+        assert_eq!(
+            encoder_type_for_name("nvh264enc").unwrap(),
+            EncoderType::Nvidia
+        );
+        assert_eq!(
+            encoder_type_for_name("nvcudah264enc").unwrap(),
+            EncoderType::NvidiaCuda
+        );
+        assert_eq!(
+            encoder_type_for_name("vah264enc").unwrap(),
+            EncoderType::VaApi
+        );
+        assert_eq!(
+            encoder_type_for_name("x264enc").unwrap(),
+            EncoderType::Software
+        );
+    }
+
+    #[test]
+    fn encoder_type_for_name_unknown_returns_error() {
+        let err = encoder_type_for_name("nvfooenc").unwrap_err();
+        assert!(
+            err.contains("Unknown encoder"),
+            "Should mention unknown encoder: {err}"
+        );
+        assert!(err.contains("nvfooenc"), "Should echo the bad name: {err}");
+    }
+
+    #[test]
+    fn encoder_type_for_name_empty_returns_error() {
+        let err = encoder_type_for_name("").unwrap_err();
+        assert!(err.contains("Unknown encoder"));
+    }
+
+    #[test]
+    fn encoder_type_for_name_case_sensitive() {
+        // GStreamer element names are case-sensitive. "X264ENC" is not the
+        // same as "x264enc" — the function must reject it.
+        assert!(encoder_type_for_name("X264ENC").is_err());
+        assert!(encoder_type_for_name("Nvh264Enc").is_err());
+    }
+
+    #[test]
+    fn encoder_type_for_name_error_lists_all_supported() {
+        // The error message should list all 4 supported encoders so the user
+        // can fix their config.
+        let err = encoder_type_for_name("invalid").unwrap_err();
+        for expected in ["nvh264enc", "nvcudah264enc", "vah264enc", "x264enc"] {
+            assert!(
+                err.contains(expected),
+                "Error should list '{expected}': {err}"
+            );
         }
     }
 }

@@ -15,7 +15,7 @@ Canonical agent instructions for this repository per [agents.md](https://agents.
 - Type check Web: `cd web && npx tsc --noEmit`
 
 ### Coverage (#45 ratchet protocol)
-- Rust: `cargo llvm-cov --workspace --ignore-filename-regex 'tests?/'` — CI floor `--fail-under-lines 54` (baseline 55.40% on 2026-05-17, set in #46).
+- Rust: `cargo llvm-cov --workspace --ignore-filename-regex 'tests?/'` — CI floor `--fail-under-lines 82` (baseline 55.40% on 2026-05-17, set in #46; most recent measured: 83.47% lines).
 - Web: `cd web && npm run test:coverage` — vitest's v8 provider, threshold `lines: 25` in `vite.config.ts` (baseline 26.61% on 2026-05-17 measuring all `src/**/*.ts`, not just imported files).
 - Ratchet rule: every PR that raises actual coverage may bump the floor to `floor(actual - 1)`. Never lower. Target end-state: 85% lines on both sides.
 
