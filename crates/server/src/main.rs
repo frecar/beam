@@ -148,8 +148,11 @@ pub(crate) enum JwtSecretSource {
 }
 
 /// Classify each `config.validate()` issue as either `ERROR:` or `WARN:`
-/// and return the pair `(error_count, warning_count)`. Used by the
-/// startup banner and by tests asserting the counter behavior.
+/// and return the pair `(error_count, warning_count)`. Test-only helper
+/// — extracted from the inline counting logic in `startup_banner_line`
+/// so test assertions can drive the classification rules directly. The
+/// production banner consumes the pair via that path.
+#[cfg(test)]
 pub(crate) fn count_validation_severities(issues: &[String]) -> (usize, usize) {
     let mut errors = 0;
     let mut warnings = 0;
