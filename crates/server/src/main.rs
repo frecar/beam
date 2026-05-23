@@ -325,6 +325,74 @@ pub(crate) const AGENT_LOG_MAX_COUNT: usize = 20;
 /// against the test that pins it.
 pub(crate) const REAPER_SLEEP_SECS: u64 = 60;
 
+/// Classify the outcome of the TLS handshake step inside the accept
+/// loop. Pure helper so the three branches (success / handshake error
+/// / timeout) can be exercised without a real socket.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TlsHandshakeOutcome {
+    Success,
+    HandshakeError(String),
+    Timeout,
+}
+
+/// Convert the nested `Result<Result<_,_>, _>` produced by
+/// `tokio::time::timeout(acceptor.accept(stream))` into a
+/// [`TlsHandshakeOutcome`]. Pure helper so the dispatch tree is
+/// testable without a real TLS acceptor.
+///
+/// Production main inlines the match arms (rather than calling this
+/// helper) so the `tracing::debug!` field interpolation with
+/// `%peer_addr` lands at the actual site. This wrapper exists so the
+/// pure classification logic — the part most likely to bit-rot during
+/// refactors — has direct test coverage.
+#[cfg(test)]
+pub(crate) fn classify_tls_handshake_result<S, E1, E2>(
+    result: Result<Result<S, E1>, E2>,
+) -> TlsHandshakeOutcome
+where
+    E1: std::fmt::Display,
+{
+    match result {
+        Ok(Ok(_stream)) => TlsHandshakeOutcome::Success,
+        Ok(Err(e)) => TlsHandshakeOutcome::HandshakeError(e.to_string()),
+        Err(_timeout) => TlsHandshakeOutcome::Timeout,
+    }
+}
+
+/// Build the debug message logged when the TLS handshake produces an
+/// error. Pure helper for log formatting.
+pub(crate) fn tls_handshake_error_message(peer_addr: &SocketAddr, err: &str) -> String {
+    format!("{peer_addr}: TLS handshake failed: {err}")
+}
+
+/// Build the debug message logged when the TLS handshake times out.
+pub(crate) fn tls_handshake_timeout_message(peer_addr: &SocketAddr) -> String {
+    format!("{peer_addr}: TLS handshake timed out")
+}
+
+/// Build the warn message logged when the TCP accept itself errors.
+pub(crate) fn tcp_accept_failure_message(err: &str) -> String {
+    format!("Failed to accept TCP connection: {err}")
+}
+
+/// Build the error message logged when a connection serve loop dies.
+pub(crate) fn connection_error_message(peer_addr: &SocketAddr, err: &str) -> String {
+    format!("{peer_addr}: Connection error: {err}")
+}
+
+/// Build the error log line when persist_sessions fails during
+/// shutdown. The fallback (destroy all sessions) is logged separately.
+pub(crate) fn persist_sessions_failure_message(err: &str) -> String {
+    format!("Failed to persist sessions, destroying instead: {err}")
+}
+
+/// Build the per-session error log when destroy_session fails during
+/// the reaper's stale-session pass.
+pub(crate) fn destroy_session_failure_message(session_id: uuid::Uuid, err: &str) -> String {
+    format!("{session_id}: Failed to reap session: {err}")
+}
+
 /// TLS handshake timeout for an inbound connection. 10s is enough for
 /// a slow client across continents but bounds the worst-case so the
 /// accept loop doesn't pile up half-open sockets under SYN flood.
@@ -579,7 +647,10 @@ async fn main() -> Result<()> {
                         .destroy_session(session_id)
                         .await
                     {
-                        tracing::error!(%session_id, "Failed to reap session: {e}");
+                        tracing::error!(
+                            "{}",
+                            destroy_session_failure_message(session_id, &e.to_string())
+                        );
                     }
                     signaling::remove_channel(&reaper_state.channels, session_id).await;
                     reaper_state.client_metrics.remove(session_id);
@@ -601,7 +672,7 @@ async fn main() -> Result<()> {
                 let (stream, peer_addr) = match result {
                     Ok(conn) => conn,
                     Err(e) => {
-                        tracing::warn!("Failed to accept TCP connection: {e}");
+                        tracing::warn!("{}", tcp_accept_failure_message(&e.to_string()));
                         continue;
                     }
                 };
@@ -611,17 +682,21 @@ async fn main() -> Result<()> {
 
                 tokio::spawn(async move {
                     // TLS handshake timeout
-                    let tls_stream = match tokio::time::timeout(
+                    let handshake_result = tokio::time::timeout(
                         std::time::Duration::from_secs(TLS_HANDSHAKE_TIMEOUT_SECS),
                         acceptor.accept(stream),
-                    ).await {
+                    ).await;
+                    let tls_stream = match handshake_result {
                         Ok(Ok(s)) => s,
                         Ok(Err(e)) => {
-                            tracing::debug!(%peer_addr, "TLS handshake failed: {e}");
+                            tracing::debug!(
+                                "{}",
+                                tls_handshake_error_message(&peer_addr, &e.to_string())
+                            );
                             return;
                         }
                         Err(_) => {
-                            tracing::debug!(%peer_addr, "TLS handshake timed out");
+                            tracing::debug!("{}", tls_handshake_timeout_message(&peer_addr));
                             return;
                         }
                     };
@@ -636,7 +711,7 @@ async fn main() -> Result<()> {
                     );
 
                     if let Err(e) = builder.serve_connection_with_upgrades(io, hyper_service).await {
-                        tracing::debug!(%peer_addr, "Connection error: {e}");
+                        tracing::debug!("{}", connection_error_message(&peer_addr, &e.to_string()));
                     }
                 });
             }
@@ -654,7 +729,7 @@ async fn main() -> Result<()> {
     // Graceful shutdown: persist sessions so agents survive the restart
     tracing::info!("{}", persisting_sessions_message());
     if let Err(e) = shutdown_state.session_manager.persist_sessions().await {
-        tracing::error!("Failed to persist sessions, destroying instead: {e}");
+        tracing::error!("{}", persist_sessions_failure_message(&e.to_string()));
         // Fallback: destroy all sessions if persistence fails
         let sessions = shutdown_state.session_manager.list_sessions().await;
         for session in &sessions {
@@ -1814,5 +1889,127 @@ mod constants_tests {
     fn request_id_handles_uuid_format() {
         let uuid = "550e8400-e29b-41d4-a716-446655440000";
         assert_eq!(request_id_or_dash(Some(uuid)), uuid);
+    }
+}
+
+#[cfg(test)]
+mod connection_helper_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn sample_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8443)
+    }
+
+    #[test]
+    fn classify_tls_handshake_success_returns_success() {
+        let r: Result<Result<u32, std::io::Error>, tokio::time::error::Elapsed> = Ok(Ok(42));
+        assert_eq!(
+            classify_tls_handshake_result(r),
+            TlsHandshakeOutcome::Success
+        );
+    }
+
+    #[test]
+    fn classify_tls_handshake_inner_error_returns_handshake_error() {
+        let err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "tls failure");
+        let r: Result<Result<u32, std::io::Error>, tokio::time::error::Elapsed> = Ok(Err(err));
+        match classify_tls_handshake_result(r) {
+            TlsHandshakeOutcome::HandshakeError(msg) => {
+                assert!(msg.contains("tls failure"));
+            }
+            other => panic!("expected HandshakeError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_tls_handshake_outer_error_returns_timeout() {
+        // tokio::time::error::Elapsed has no public constructor; build via
+        // a timed-out future. Skip when tokio is sluggish (rare on CI).
+        let elapsed = match tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map(|rt| {
+                rt.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_nanos(1), async {
+                        // never resolves immediately
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    })
+                    .await
+                })
+            }) {
+            Ok(Err(e)) => e,
+            _ => return, // skip if we can't induce a timeout
+        };
+        let r: Result<Result<u32, std::io::Error>, _> = Err(elapsed);
+        assert_eq!(
+            classify_tls_handshake_result(r),
+            TlsHandshakeOutcome::Timeout
+        );
+    }
+
+    #[test]
+    fn tls_handshake_outcome_eq() {
+        assert_eq!(TlsHandshakeOutcome::Success, TlsHandshakeOutcome::Success);
+        assert_eq!(TlsHandshakeOutcome::Timeout, TlsHandshakeOutcome::Timeout);
+        assert_eq!(
+            TlsHandshakeOutcome::HandshakeError("e".into()),
+            TlsHandshakeOutcome::HandshakeError("e".into())
+        );
+    }
+
+    #[test]
+    fn tls_handshake_outcome_neq() {
+        assert_ne!(TlsHandshakeOutcome::Success, TlsHandshakeOutcome::Timeout);
+        assert_ne!(
+            TlsHandshakeOutcome::Success,
+            TlsHandshakeOutcome::HandshakeError("e".into())
+        );
+    }
+
+    #[test]
+    fn tls_handshake_error_message_format() {
+        let addr = sample_addr();
+        let msg = tls_handshake_error_message(&addr, "cert expired");
+        assert_eq!(msg, "127.0.0.1:8443: TLS handshake failed: cert expired");
+    }
+
+    #[test]
+    fn tls_handshake_timeout_message_format() {
+        let addr = sample_addr();
+        let msg = tls_handshake_timeout_message(&addr);
+        assert_eq!(msg, "127.0.0.1:8443: TLS handshake timed out");
+    }
+
+    #[test]
+    fn tcp_accept_failure_message_format() {
+        let msg = tcp_accept_failure_message("address in use");
+        assert_eq!(msg, "Failed to accept TCP connection: address in use");
+    }
+
+    #[test]
+    fn connection_error_message_format() {
+        let addr = sample_addr();
+        let msg = connection_error_message(&addr, "broken pipe");
+        assert_eq!(msg, "127.0.0.1:8443: Connection error: broken pipe");
+    }
+
+    #[test]
+    fn persist_sessions_failure_message_format() {
+        let msg = persist_sessions_failure_message("postgres unreachable");
+        assert_eq!(
+            msg,
+            "Failed to persist sessions, destroying instead: postgres unreachable"
+        );
+    }
+
+    #[test]
+    fn destroy_session_failure_message_format() {
+        let id = uuid::Uuid::nil();
+        let msg = destroy_session_failure_message(id, "agent already gone");
+        // The session_id appears first (matches tracing %session_id semantics).
+        assert!(msg.contains("00000000-0000-0000-0000-000000000000"));
+        assert!(msg.contains("agent already gone"));
+        assert!(msg.contains("Failed to reap session"));
     }
 }

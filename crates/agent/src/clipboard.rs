@@ -2,6 +2,29 @@ use anyhow::Context;
 use std::process::Command;
 use tracing::debug;
 
+/// Trait over the clipboard write surface that the input callback uses.
+///
+/// Production uses [`ClipboardBridge`] which spawns `xclip`. Tests can
+/// supply a recording mock that captures the text + selection without
+/// requiring xclip on the test host.
+pub trait ClipboardWrite: Send {
+    /// Write `text` to the X11 CLIPBOARD selection.
+    fn set_text(&self, text: &str) -> anyhow::Result<()>;
+    /// Write `text` to the X11 PRIMARY selection (middle-click paste).
+    fn set_primary_text(&self, text: &str) -> anyhow::Result<()>;
+}
+
+/// Trait over the clipboard read surface that the clipboard-sync loop
+/// uses. Production uses [`ClipboardBridge::get_text`] (xclip -o); tests
+/// can supply a fake that returns canned strings/errors so the sync
+/// dispatch branches can be exercised without X11.
+pub trait ClipboardRead: Send {
+    /// Read the current X11 CLIPBOARD selection. Returns Ok(None) when
+    /// the selection is empty or xclip fails to connect; Err only when
+    /// the read pipe yields invalid UTF-8.
+    fn get_text(&self) -> anyhow::Result<Option<String>>;
+}
+
 pub struct ClipboardBridge {
     x_display: String,
 }
@@ -86,6 +109,22 @@ impl ClipboardBridge {
         let text =
             String::from_utf8(output.stdout).context("Clipboard content is not valid UTF-8")?;
         Ok(Some(text))
+    }
+}
+
+impl ClipboardWrite for ClipboardBridge {
+    fn set_text(&self, text: &str) -> anyhow::Result<()> {
+        ClipboardBridge::set_text(self, text)
+    }
+
+    fn set_primary_text(&self, text: &str) -> anyhow::Result<()> {
+        ClipboardBridge::set_primary_text(self, text)
+    }
+}
+
+impl ClipboardRead for ClipboardBridge {
+    fn get_text(&self) -> anyhow::Result<Option<String>> {
+        ClipboardBridge::get_text(self)
     }
 }
 
@@ -471,6 +510,31 @@ mod tests {
     }
 
     // --- sanitize end-to-end through set_selection-style payloads ---
+
+    // --- ClipboardWrite trait impl exercise (against ClipboardBridge) ---
+
+    #[test]
+    fn clipboard_write_trait_set_text_delegates_to_inherent() {
+        // The trait impl is a thin pass-through; call through dyn dispatch
+        // to ensure the trait impl method body is exercised.
+        let Some(bridge) = try_make_bridge() else {
+            return;
+        };
+        let w: &dyn ClipboardWrite = &bridge;
+        let result = w.set_text("trait-path-test");
+        // Bogus :99999 display → set_selection bails → trait method bubbles up Err.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn clipboard_write_trait_set_primary_text_delegates_to_inherent() {
+        let Some(bridge) = try_make_bridge() else {
+            return;
+        };
+        let w: &dyn ClipboardWrite = &bridge;
+        let result = w.set_primary_text("trait-primary-test");
+        assert!(result.is_err());
+    }
 
     #[test]
     fn sanitize_path_runs_before_xclip_spawn() {

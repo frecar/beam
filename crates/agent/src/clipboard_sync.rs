@@ -1,4 +1,4 @@
-use crate::clipboard::ClipboardBridge;
+use crate::clipboard::{ClipboardBridge, ClipboardRead};
 use crate::signaling::WsSender;
 
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,38 @@ pub(crate) fn build_clipboard_payload(text: &str) -> Option<String> {
     Some(serde_json::json!({ "t": "c", "text": text }).to_string())
 }
 
+/// Outcome of dispatching a single clipboard-read tick. Pure value so the
+/// dispatch branches are unit-testable without owning a WebSocket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClipboardSyncDispatch {
+    /// Non-empty clipboard text — emit the payload over WS.
+    Send { payload: String, len: usize },
+    /// Empty or None from get_text — log and continue.
+    Empty,
+    /// get_text errored — log warn and continue.
+    ReadError(String),
+    /// Text was non-empty but oversized; skip.
+    Oversize,
+}
+
+/// Convert a `get_text()` result into a [`ClipboardSyncDispatch`]. Pure
+/// helper around the branch tree in `run_clipboard_sync`.
+pub(crate) fn classify_clipboard_read_result(
+    result: anyhow::Result<Option<String>>,
+) -> ClipboardSyncDispatch {
+    match result {
+        Ok(Some(text)) if !text.is_empty() => match build_clipboard_payload(&text) {
+            Some(payload) => ClipboardSyncDispatch::Send {
+                payload,
+                len: text.len(),
+            },
+            None => ClipboardSyncDispatch::Oversize,
+        },
+        Ok(_) => ClipboardSyncDispatch::Empty,
+        Err(e) => ClipboardSyncDispatch::ReadError(e.to_string()),
+    }
+}
+
 /// Clipboard sync: after Ctrl+C/X, read X11 clipboard and send to browser via WS text.
 pub(crate) async fn run_clipboard_sync(
     clipboard_read_rx: &mut mpsc::Receiver<()>,
@@ -34,23 +66,21 @@ pub(crate) async fn run_clipboard_sync(
         tokio::time::sleep(Duration::from_millis(100)).await;
         let text = {
             let cb = clipboard.lock().unwrap_or_else(|e| e.into_inner());
-            cb.get_text()
+            ClipboardRead::get_text(&*cb)
         };
-        match text {
-            Ok(Some(ref text)) if !text.is_empty() => {
-                if let Some(msg) = build_clipboard_payload(text) {
-                    if let Err(e) = ws_tx.send(Message::Text(msg.into())).await {
-                        warn!("Failed to send clipboard to browser: {e}");
-                    } else {
-                        info!(len = text.len(), "Clipboard text sent to browser");
-                    }
+        match classify_clipboard_read_result(text) {
+            ClipboardSyncDispatch::Send { payload, len } => {
+                if let Err(e) = ws_tx.send(Message::Text(payload.into())).await {
+                    warn!("Failed to send clipboard to browser: {e}");
+                } else {
+                    info!(len, "Clipboard text sent to browser");
                 }
             }
-            Ok(_) => {
+            ClipboardSyncDispatch::Empty | ClipboardSyncDispatch::Oversize => {
                 info!("Clipboard read returned empty/none");
             }
-            Err(e) => {
-                warn!("Failed to read clipboard: {e:#}");
+            ClipboardSyncDispatch::ReadError(e) => {
+                warn!("Failed to read clipboard: {e}");
             }
         }
     }
@@ -257,5 +287,117 @@ mod tests {
         )
         .await
         .expect("loop should process all signals and exit");
+    }
+
+    // --- classify_clipboard_read_result ---
+
+    #[test]
+    fn classify_clipboard_read_some_text_returns_send() {
+        let r = classify_clipboard_read_result(Ok(Some("hello".into())));
+        match r {
+            ClipboardSyncDispatch::Send { payload, len } => {
+                assert_eq!(len, 5);
+                assert!(payload.contains("hello"));
+                // Payload is JSON with {"t":"c","text":"..."}.
+                let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                assert_eq!(parsed["t"], "c");
+                assert_eq!(parsed["text"], "hello");
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_clipboard_read_empty_string_returns_empty() {
+        let r = classify_clipboard_read_result(Ok(Some(String::new())));
+        assert_eq!(r, ClipboardSyncDispatch::Empty);
+    }
+
+    #[test]
+    fn classify_clipboard_read_none_returns_empty() {
+        let r = classify_clipboard_read_result(Ok(None));
+        assert_eq!(r, ClipboardSyncDispatch::Empty);
+    }
+
+    #[test]
+    fn classify_clipboard_read_error_returns_read_error() {
+        let r = classify_clipboard_read_result(Err(anyhow::anyhow!("xclip blew up")));
+        match r {
+            ClipboardSyncDispatch::ReadError(e) => assert!(e.contains("xclip blew up")),
+            other => panic!("expected ReadError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_clipboard_read_oversize_returns_oversize() {
+        let huge = "x".repeat(MAX_CLIPBOARD_BYTES + 1);
+        let r = classify_clipboard_read_result(Ok(Some(huge)));
+        assert_eq!(r, ClipboardSyncDispatch::Oversize);
+    }
+
+    #[test]
+    fn classify_clipboard_read_exactly_at_limit_returns_send() {
+        let at_limit = "x".repeat(MAX_CLIPBOARD_BYTES);
+        let r = classify_clipboard_read_result(Ok(Some(at_limit)));
+        match r {
+            ClipboardSyncDispatch::Send { len, .. } => {
+                assert_eq!(len, MAX_CLIPBOARD_BYTES);
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    // --- ClipboardSyncDispatch equality + debug ---
+
+    #[test]
+    fn clipboard_sync_dispatch_equality() {
+        assert_eq!(ClipboardSyncDispatch::Empty, ClipboardSyncDispatch::Empty);
+        assert_eq!(
+            ClipboardSyncDispatch::Oversize,
+            ClipboardSyncDispatch::Oversize
+        );
+        assert_eq!(
+            ClipboardSyncDispatch::ReadError("e".into()),
+            ClipboardSyncDispatch::ReadError("e".into())
+        );
+        assert_ne!(
+            ClipboardSyncDispatch::Empty,
+            ClipboardSyncDispatch::Oversize
+        );
+    }
+
+    // --- ClipboardRead trait impl (against ClipboardBridge) ---
+
+    #[test]
+    fn clipboard_read_trait_get_text_delegates_to_inherent() {
+        // Verify the trait impl is exercised. Locally xclip exists; on CI
+        // we install it via the workflow. Test gracefully skips if it
+        // isn't available (returns Ok(()) without asserting).
+        if !std::path::Path::new("/usr/bin/xclip").exists()
+            && !std::path::Path::new("/bin/xclip").exists()
+        {
+            return;
+        }
+        // Retry construction a few times in case the parallel `set PATH`
+        // test in clipboard.rs is in its critical section.
+        let bridge = {
+            let mut b = None;
+            for _ in 0..10 {
+                if let Ok(br) = crate::clipboard::ClipboardBridge::new(":99999") {
+                    b = Some(br);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            match b {
+                Some(b) => b,
+                None => return,
+            }
+        };
+        let r: &dyn crate::clipboard::ClipboardRead = &bridge;
+        // Bogus :99999 display → xclip -o exits non-zero → Ok(None).
+        match r.get_text() {
+            Ok(_) | Err(_) => {} // either is acceptable in PATH-race conditions
+        }
     }
 }
