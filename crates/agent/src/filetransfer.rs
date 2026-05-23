@@ -626,4 +626,462 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
     }
+
+    // --- handle_file_start error branches ---
+
+    #[test]
+    fn handle_file_start_rejects_duplicate_id() {
+        // A second start with the same id while the first is still active must
+        // fail rather than overwrite the in-flight transfer's File handle.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        mgr.handle_file_start("dup-id", "a.txt", 10).unwrap();
+        let result = mgr.handle_file_start("dup-id", "b.txt", 10);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already in progress"),
+            "Error must mention the in-progress collision",
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn handle_file_start_rejects_when_concurrent_limit_reached() {
+        // MAX_CONCURRENT_TRANSFERS is 8; the 9th start should be rejected.
+        // We stop at the gate before any disk write — temp files for the first
+        // 8 will be cleaned up by the dir teardown.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        // Fill the slot table to capacity. Use unique ids per loop iteration.
+        for i in 0..MAX_CONCURRENT_TRANSFERS {
+            let id = format!("concur-{i}");
+            mgr.handle_file_start(&id, &format!("f{i}.bin"), 10)
+                .unwrap();
+        }
+        let result = mgr.handle_file_start("one-too-many", "extra.bin", 10);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Too many concurrent")
+        );
+
+        // Cleanup: drop manager (Drop impl removes temp files).
+        drop(mgr);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn handle_file_start_rejects_invalid_filename() {
+        // Hidden filenames are rejected by sanitize_filename; the error must
+        // surface from handle_file_start.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        let result = mgr.handle_file_start("hidden-id", ".secret", 10);
+        assert!(result.is_err());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- handle_file_chunk error branches ---
+
+    #[test]
+    fn handle_file_chunk_rejects_unknown_id() {
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"data");
+        let result = mgr.handle_file_chunk("unknown", &b64);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No active transfer")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn handle_file_chunk_rejects_invalid_base64() {
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        mgr.handle_file_start("b64-id", "file.bin", 10).unwrap();
+        // "!!!" is not valid base64 input
+        let result = mgr.handle_file_chunk("b64-id", "!!!not-valid-base64!!!");
+        assert!(result.is_err());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn handle_file_chunk_rejects_payload_exceeding_declared_size() {
+        // The size limit is enforced cumulatively: declared 5 bytes but a
+        // single chunk of 10 bytes overshoots → bail + remove temp file.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        mgr.handle_file_start("over", "file.bin", 5).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"too-many-bytes");
+        let result = mgr.handle_file_chunk("over", &b64);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("more data than declared"),
+            "Expected over-size error, got: {err}"
+        );
+
+        // The transfer must be evicted after the overshoot so subsequent chunks
+        // also fail with "No active transfer".
+        let b64_b = base64::engine::general_purpose::STANDARD.encode(b"x");
+        let followup = mgr.handle_file_chunk("over", &b64_b);
+        assert!(followup.is_err());
+        assert!(
+            followup
+                .unwrap_err()
+                .to_string()
+                .contains("No active transfer"),
+            "Transfer should have been evicted after overshoot"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- handle_file_done error branch ---
+
+    #[test]
+    fn handle_file_done_rejects_unknown_id() {
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        let result = mgr.handle_file_done("unknown-done");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No active transfer")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- cleanup / Drop ---
+
+    #[test]
+    fn drop_cleans_up_incomplete_transfers() {
+        // Starting a transfer and then dropping the manager must remove the
+        // temp file so /tmp doesn't accumulate orphans across crashes.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let temp_id = format!("drop-test-{}", uuid::Uuid::new_v4());
+        let temp_path = PathBuf::from(format!("/tmp/beam-transfer-{temp_id}"));
+        // Pre-clean in case a previous run left a stale file
+        let _ = fs::remove_file(&temp_path);
+
+        {
+            let mut mgr = FileTransferManager::new(dir.clone());
+            mgr.handle_file_start(&temp_id, "f.bin", 10).unwrap();
+            assert!(temp_path.exists(), "temp file should exist after start");
+        } // Drop runs cleanup()
+
+        assert!(
+            !temp_path.exists(),
+            "temp file must be removed by Drop::cleanup()"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explicit_cleanup_removes_all_pending() {
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        let ids: Vec<String> = (0..3)
+            .map(|i| format!("explicit-cleanup-{}-{i}", uuid::Uuid::new_v4()))
+            .collect();
+        for id in &ids {
+            mgr.handle_file_start(id, "f.bin", 10).unwrap();
+        }
+        let temp_paths: Vec<PathBuf> = ids
+            .iter()
+            .map(|id| PathBuf::from(format!("/tmp/beam-transfer-{id}")))
+            .collect();
+        for p in &temp_paths {
+            assert!(p.exists());
+        }
+
+        mgr.cleanup();
+
+        for p in &temp_paths {
+            assert!(!p.exists(), "cleanup should remove every pending temp file");
+        }
+        // The transfers map should be empty so subsequent operations succeed
+        // for the same id (no "already in progress" error).
+        mgr.handle_file_start(&ids[0], "f.bin", 10).unwrap();
+        // Cleanup remaining
+        drop(mgr);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- validate_download_path: empty + null cases ---
+
+    #[test]
+    fn download_validate_rejects_empty_path() {
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mgr = FileTransferManager::new(dir.clone());
+        let result = mgr.validate_download_path("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Empty path"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn download_validate_rejects_path_with_null_byte() {
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mgr = FileTransferManager::new(dir.clone());
+        let result = mgr.validate_download_path("file\0name.txt");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("null byte"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn download_validate_rejects_oversized_file() {
+        // A file larger than MAX_FILE_SIZE must be rejected. Use a sparse file
+        // to avoid actually writing 100MB.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let big = dir.join("big.bin");
+        let f = fs::File::create(&big).unwrap();
+        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+        drop(f);
+
+        let mgr = FileTransferManager::new(dir.clone());
+        let result = mgr.validate_download_path(big.to_str().unwrap());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("too large"),
+            "Expected size-limit error, got: {err}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- unique_path: collision branches ---
+
+    #[test]
+    fn unique_path_with_collision_appends_numeric_suffix() {
+        // First file exists at name.txt → unique_path returns name(1).txt.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        // Seed existing
+        let original = dir.join("doc.txt");
+        fs::write(&original, b"existing").unwrap();
+
+        let result = unique_path(&dir, "doc.txt");
+        assert_eq!(result, dir.join("doc(1).txt"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_path_with_extension_preserves_extension() {
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("photo.jpg"), b"a").unwrap();
+        fs::write(dir.join("photo(1).jpg"), b"b").unwrap();
+
+        let result = unique_path(&dir, "photo.jpg");
+        assert_eq!(result, dir.join("photo(2).jpg"));
+        // Extension must be preserved on all suffix candidates.
+        assert!(result.extension().is_some());
+        assert_eq!(result.extension().unwrap(), "jpg");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_path_no_extension_skips_dot_in_suffix() {
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("README"), b"a").unwrap();
+        let result = unique_path(&dir, "README");
+        // Extension branch in unique_path returns "{stem}({i})" with no dot.
+        assert_eq!(result, dir.join("README(1)"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_path_999_collisions_falls_back_to_uuid_suffix() {
+        // Seed 999 colliding files. The 1000th attempt blows past the numeric
+        // suffix range and must fall back to the UUID branch.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("x.bin"), b"a").unwrap();
+        for i in 1..=999 {
+            fs::write(dir.join(format!("x({i}).bin")), b"a").unwrap();
+        }
+
+        let result = unique_path(&dir, "x.bin");
+        let result_name = result.file_name().unwrap().to_str().unwrap();
+        // The fallback shape is "x-<uuid>.bin" — verify the prefix and suffix
+        // and that the candidate slot doesn't already exist.
+        assert!(
+            result_name.starts_with("x-"),
+            "Expected uuid-suffixed name, got: {result_name}"
+        );
+        assert!(
+            result_name.ends_with(".bin"),
+            "UUID fallback must keep the extension, got: {result_name}"
+        );
+        assert!(
+            !result.exists(),
+            "Returned path must not collide with anything on disk"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_path_999_collisions_no_extension_falls_back_to_uuid_suffix() {
+        // Same as above but for files with no extension — the UUID fallback
+        // must take the "no ext" arm of the match.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("note"), b"a").unwrap();
+        for i in 1..=999 {
+            fs::write(dir.join(format!("note({i})")), b"a").unwrap();
+        }
+
+        let result = unique_path(&dir, "note");
+        let result_name = result.file_name().unwrap().to_str().unwrap();
+        assert!(
+            result_name.starts_with("note-"),
+            "Expected uuid-suffixed name, got: {result_name}"
+        );
+        // No extension means no trailing ".ext"
+        assert!(
+            !result_name.contains('.'),
+            "UUID fallback for extensionless file must not invent an extension, got: {result_name}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- handle_file_done: rename to Downloads with collision ---
+
+    #[test]
+    fn handle_file_done_renames_with_unique_path_when_destination_exists() {
+        // Seed Downloads/test.txt before completing a transfer to "test.txt".
+        // unique_path appends (1) so the original file isn't overwritten.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let downloads = dir.join("Downloads");
+        fs::create_dir_all(&downloads).unwrap();
+        fs::write(downloads.join("test.txt"), b"PRE-EXISTING").unwrap();
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        let content = b"new content";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(content);
+        mgr.handle_file_start("collide", "test.txt", content.len() as u64)
+            .unwrap();
+        mgr.handle_file_chunk("collide", &b64).unwrap();
+        mgr.handle_file_done("collide").unwrap();
+
+        // Pre-existing file untouched
+        let pre = fs::read(downloads.join("test.txt")).unwrap();
+        assert_eq!(pre, b"PRE-EXISTING");
+
+        // New file landed at test(1).txt
+        let new = fs::read(downloads.join("test(1).txt")).unwrap();
+        assert_eq!(new, content);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- sanitize_filename: edge cases ---
+
+    #[test]
+    fn sanitize_rejects_pure_path_separator() {
+        // A single "/" has no basename after strip → invalid filename.
+        let result = sanitize_filename("/");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_filename_with_embedded_separator() {
+        // Path::file_name strips the dirname, so "a/b.txt" → "b.txt"
+        // is a valid pass-through. The literal "b\\.txt" (backslash, not a
+        // separator on Unix) is what tests the embedded-slash-or-backslash
+        // bail path — but since Path::file_name treats it as one component
+        // on Unix, the bail clause for embedded separators rejects it.
+        let result = sanitize_filename("evil\\name.txt");
+        // On Unix, "\\" is a literal char in a single component; the bail
+        // arm rejects it because basename.contains('\\').
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_accepts_max_length_filename() {
+        // Exactly MAX_FILENAME_LEN chars is accepted; one more is rejected.
+        let at_limit = "a".repeat(MAX_FILENAME_LEN);
+        assert!(sanitize_filename(&at_limit).is_ok());
+        let over_limit = "a".repeat(MAX_FILENAME_LEN + 1);
+        assert!(sanitize_filename(&over_limit).is_err());
+    }
+
+    #[test]
+    fn handle_file_start_creates_temp_file_at_well_known_path() {
+        // The temp file lands at /tmp/beam-transfer-<id> — the exact path is
+        // load-bearing for the move-or-copy fallback in handle_file_done.
+        let dir = std::env::temp_dir().join(format!("beam-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let unique_id = format!("path-test-{}", uuid::Uuid::new_v4());
+
+        let mut mgr = FileTransferManager::new(dir.clone());
+        mgr.handle_file_start(&unique_id, "f.bin", 10).unwrap();
+        let expected = PathBuf::from(format!("/tmp/beam-transfer-{unique_id}"));
+        assert!(
+            expected.exists(),
+            "Temp file should exist at well-known path"
+        );
+
+        drop(mgr); // cleanup
+        fs::remove_dir_all(&dir).ok();
+    }
 }

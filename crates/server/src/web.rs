@@ -2689,4 +2689,355 @@ sentry_environment = "test"
             assert!(!is_valid_username(s), "expected {s:?} to be invalid");
         }
     }
+
+    // --- HTTP handler tests using insert_for_test ---
+
+    #[tokio::test]
+    async fn refresh_token_returns_new_token_when_session_exists() {
+        // With an active session in the manager, refresh_token must mint a new
+        // JWT and return 200. This exercises the success branch (lines 686-690)
+        // that prior tests didn't reach because they never created a session.
+        let state = test_app_state();
+        let user = "refresh_user";
+        state
+            .session_manager
+            .insert_for_test(Uuid::new_v4(), user, 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt(user, TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/refresh")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        let new_token = json["token"].as_str().expect("token in response");
+        assert!(
+            !new_token.is_empty(),
+            "Refresh must return a non-empty token"
+        );
+        // The freshly-minted token should be parseable as a JWT for the same
+        // subject.
+        let claims = crate::auth::validate_jwt(new_token, TEST_JWT_SECRET).unwrap();
+        assert_eq!(claims.sub, user);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_only_caller_sessions() {
+        // list_sessions filters by claims.sub. With sessions for two users,
+        // the caller should only see their own.
+        let state = test_app_state();
+        state
+            .session_manager
+            .insert_for_test(Uuid::new_v4(), "alice", 100)
+            .await;
+        state
+            .session_manager
+            .insert_for_test(Uuid::new_v4(), "bob", 101)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        let list = json.as_array().expect("array body");
+        assert_eq!(list.len(), 1, "alice should see exactly 1 session");
+        assert_eq!(list[0]["username"], "alice");
+    }
+
+    #[tokio::test]
+    async fn session_heartbeat_with_owner_succeeds() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/heartbeat"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_heartbeat_rejects_non_owner_with_403() {
+        // alice's session, bob's token → 403 ownership mismatch.
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("bob", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/heartbeat"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_session_with_owner_returns_ok() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/sessions/{session_id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Session should be gone afterward
+        assert!(
+            state
+                .session_manager
+                .get_session(session_id)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_session_rejects_non_owner_with_403() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("bob", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/sessions/{session_id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_list_sessions_returns_all_sessions() {
+        // Admin sees every session regardless of owner.
+        let mut config: BeamConfig = toml::from_str("").expect("default config");
+        config.server.admin_users = vec!["admin_user".to_string()];
+        let state = test_app_state_with_config(config);
+
+        state
+            .session_manager
+            .insert_for_test(Uuid::new_v4(), "alice", 100)
+            .await;
+        state
+            .session_manager
+            .insert_for_test(Uuid::new_v4(), "bob", 101)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("admin_user", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .uri("/api/admin/sessions")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        let list = json.as_array().expect("array body");
+        assert_eq!(list.len(), 2);
+        // Each entry has the activity-list fields
+        for entry in list {
+            assert!(entry["id"].is_string());
+            assert!(entry["username"].is_string());
+            assert!(entry["display"].is_number());
+            assert!(entry["created_at"].is_number());
+            assert!(entry["last_activity"].is_number());
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_delete_session_destroys_any_session() {
+        let mut config: BeamConfig = toml::from_str("").expect("default config");
+        config.server.admin_users = vec!["admin_user".to_string()];
+        let state = test_app_state_with_config(config);
+
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("admin_user", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/sessions/{session_id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            state
+                .session_manager
+                .get_session(session_id)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn release_session_with_valid_token_starts_grace_period() {
+        // The release endpoint is invoked via navigator.sendBeacon(), which
+        // sends content-type: text/plain with the raw token in the body
+        // (not JSON). Verifying the success path runs the grace-period spawn
+        // branch (lines 1052-1085).
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        let _info = state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let release_token = state
+            .session_manager
+            .get_release_token(session_id)
+            .await
+            .expect("release token");
+        let app = build_router(Arc::clone(&state));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/release"))
+            .body(Body::from(release_token))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // --- security headers middleware ---
+
+    #[tokio::test]
+    async fn security_headers_are_applied_to_responses() {
+        let state = test_app_state();
+        let app = build_router(state);
+        let request = Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        // Every documented header should be present.
+        assert!(headers.contains_key("strict-transport-security"));
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["x-frame-options"], "DENY");
+        assert_eq!(
+            headers["referrer-policy"],
+            "strict-origin-when-cross-origin"
+        );
+        assert_eq!(headers["x-xss-protection"], "0");
+        let csp = headers["content-security-policy"].to_str().unwrap();
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("connect-src 'self' wss:"));
+        // permissions-policy must lock out camera / mic / geolocation
+        let perms = headers["permissions-policy"].to_str().unwrap();
+        assert!(perms.contains("camera=()"));
+        assert!(perms.contains("microphone=()"));
+        assert!(perms.contains("geolocation=()"));
+    }
+
+    // --- sentry_connect_src edge cases ---
+
+    #[test]
+    fn sentry_connect_src_rejects_dsn_without_scheme() {
+        assert_eq!(sentry_connect_src("public@host.example/1"), None);
+    }
+
+    #[test]
+    fn sentry_connect_src_strips_public_key_segment() {
+        // The DSN format is https://<public-key>@<host>/<project-id>
+        // The connect-src directive only needs https://<host>.
+        let src = sentry_connect_src("https://abc123@sentry.io/42").unwrap();
+        assert_eq!(src, "https://sentry.io");
+    }
+
+    #[test]
+    fn sentry_connect_src_handles_dsn_without_public_key() {
+        // Legacy DSN with no "@" — host begins right after the scheme.
+        let src = sentry_connect_src("https://sentry.io/42").unwrap();
+        assert_eq!(src, "https://sentry.io");
+    }
+
+    #[test]
+    fn sentry_connect_src_rejects_empty_host() {
+        // "https://@/1" → empty host segment must be rejected.
+        assert_eq!(sentry_connect_src("https://@/1"), None);
+    }
+
+    #[test]
+    fn sentry_connect_src_rejects_host_with_whitespace_or_quotes() {
+        // CSP injection guards: a DSN must not be allowed to break out of the
+        // connect-src directive.
+        assert_eq!(sentry_connect_src("https://bad host.example/1"), None);
+        assert_eq!(sentry_connect_src("https://'evil.example/1"), None);
+        assert_eq!(sentry_connect_src("https://\"evil.example/1"), None);
+        assert_eq!(sentry_connect_src("https://evil;.example/1"), None);
+    }
+
+    #[test]
+    fn sentry_connect_src_trims_whitespace() {
+        // Leading + trailing whitespace around the DSN — strip it before
+        // the URL parser sees it. (The validation arm rejects mid-string
+        // whitespace, this asserts the trim arm.)
+        let src = sentry_connect_src("  https://pub@trim.example/1  ").unwrap();
+        assert_eq!(src, "https://trim.example");
+    }
+
+    #[test]
+    fn sentry_connect_src_preserves_host_port() {
+        // A custom port in the host segment should be preserved verbatim so
+        // the CSP allowlist matches the actual Sentry endpoint.
+        let src = sentry_connect_src("https://pub@self-hosted.example:9000/1").unwrap();
+        assert_eq!(src, "https://self-hosted.example:9000");
+    }
 }

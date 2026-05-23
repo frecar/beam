@@ -487,6 +487,45 @@ impl SessionManager {
         sessions.get(&session_id).map(|s| s.restart_count)
     }
 
+    /// Test-only helper: register a fully-formed session directly in the
+    /// internal map, bypassing the systemd-run spawn step. Used by sibling
+    /// crate tests (web.rs HTTP-level tests) that need to exercise handler
+    /// branches gated on `find_by_username` / `get_session` returning Some.
+    #[cfg(test)]
+    pub(crate) async fn insert_for_test(
+        &self,
+        session_id: Uuid,
+        username: &str,
+        display: u32,
+    ) -> SessionInfo {
+        let info = SessionInfo {
+            id: session_id,
+            username: username.to_string(),
+            display,
+            width: 1920,
+            height: 1080,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        let managed = ManagedSession {
+            info: info.clone(),
+            systemd_unit: Some(format!("beam-agent-{session_id}")),
+            last_activity: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            agent_token: generate_agent_token(),
+            release_token: generate_release_token(),
+            grace_generation: Arc::new(AtomicU64::new(0)),
+            restart_count: 0,
+            idle_timeout_override: None,
+        };
+        self.sessions.write().await.insert(session_id, managed);
+        info
+    }
+
     /// Respawn the agent for an existing session after permanent failure.
     ///
     /// Stops any existing systemd unit, generates a new agent token,
@@ -683,7 +722,13 @@ impl SessionManager {
     /// Save all active sessions to disk for graceful restart.
     /// Agents are left running — the new server process re-adopts them.
     pub async fn persist_sessions(&self) -> Result<()> {
-        let dir = Path::new(SESSION_DIR);
+        self.persist_sessions_in(Path::new(SESSION_DIR)).await
+    }
+
+    /// Inner persist helper that accepts an explicit directory. Tests use
+    /// this directly with a temp dir; the public `persist_sessions` delegates
+    /// here with the production `SESSION_DIR`.
+    async fn persist_sessions_in(&self, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir).context("Failed to create session persistence directory")?;
 
         // Clean old files
@@ -739,7 +784,13 @@ impl SessionManager {
     /// Checks each session's systemd unit (or legacy PID) to verify the agent
     /// is still alive. Returns session IDs for sessions successfully restored.
     pub async fn restore_sessions(&self) -> Vec<Uuid> {
-        let dir = Path::new(SESSION_DIR);
+        self.restore_sessions_in(Path::new(SESSION_DIR)).await
+    }
+
+    /// Inner restore helper that accepts an explicit directory. Tests use
+    /// this directly with a temp dir; the public `restore_sessions` delegates
+    /// here with the production `SESSION_DIR`.
+    async fn restore_sessions_in(&self, dir: &Path) -> Vec<Uuid> {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return Vec::new(),
@@ -2238,5 +2289,244 @@ mod tests {
         // grace-period timer notices it shouldn't fire.
         let post = gen_arc.load(Ordering::Relaxed);
         assert!(post > pre, "cancel must bump the generation");
+    }
+
+    // ---------- persist_sessions_in / restore_sessions_in ----------
+
+    fn temp_session_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "beam-session-test-{}-{}-{label}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[tokio::test]
+    async fn persist_sessions_in_writes_one_file_per_session_with_systemd_unit() {
+        let manager = make_manager();
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        let id_c = Uuid::new_v4();
+
+        // Two sessions with systemd_unit set, one without (legacy state).
+        let mut s_a = make_session(id_a, "alice", 100, 0, None);
+        s_a.systemd_unit = Some(format!("beam-agent-{id_a}"));
+        let mut s_b = make_session(id_b, "bob", 101, 0, None);
+        s_b.systemd_unit = Some(format!("beam-agent-{id_b}"));
+        let s_c = make_session(id_c, "charlie", 102, 0, None); // no unit
+
+        insert(&manager, s_a).await;
+        insert(&manager, s_b).await;
+        insert(&manager, s_c).await;
+
+        let dir = temp_session_dir("persist-two");
+        manager.persist_sessions_in(&dir).await.unwrap();
+
+        // Two files for the systemd-managed sessions; charlie is skipped.
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|s| s == "json")
+            })
+            .collect();
+        assert_eq!(
+            entries.len(),
+            2,
+            "Only systemd-managed sessions are persisted"
+        );
+
+        // File mode should be 0o600 (sessions contain agent tokens).
+        for entry in &entries {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = entry.metadata().unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "Session files must be 0600 (contains token)");
+        }
+
+        // Content shape: each file is a valid PersistedSession JSON.
+        for entry in &entries {
+            let data = std::fs::read_to_string(entry.path()).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&data).unwrap();
+            assert!(v["session_id"].is_string());
+            assert!(v["username"].is_string());
+            assert!(v["display"].is_number());
+            assert!(v["agent_token"].is_string());
+            assert!(v["release_token"].is_string());
+            assert!(v["systemd_unit"].is_string());
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn persist_sessions_in_cleans_stale_files_first() {
+        let manager = make_manager();
+        let dir = temp_session_dir("persist-clean");
+
+        // Seed the dir with an orphan file from a previous run.
+        let stale = dir.join("orphan.json");
+        std::fs::write(&stale, "{}").unwrap();
+        assert!(stale.exists());
+
+        // No sessions to persist — but the dir should be cleaned.
+        manager.persist_sessions_in(&dir).await.unwrap();
+        assert!(
+            !stale.exists(),
+            "Stale files must be removed before persist"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn persist_sessions_in_creates_missing_dir() {
+        let manager = make_manager();
+        // Don't pre-create the dir — persist must create it.
+        let dir = std::env::temp_dir().join(format!(
+            "beam-session-create-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        assert!(!dir.exists());
+
+        manager.persist_sessions_in(&dir).await.unwrap();
+        assert!(dir.exists(), "persist must create the target dir");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn restore_sessions_in_returns_empty_for_missing_dir() {
+        let manager = make_manager();
+        let bogus = std::path::PathBuf::from(format!(
+            "/tmp/beam-restore-missing-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let restored = manager.restore_sessions_in(&bogus).await;
+        assert!(
+            restored.is_empty(),
+            "Missing dir should produce empty restore list, not panic"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_sessions_in_ignores_non_json_files() {
+        let manager = make_manager();
+        let dir = temp_session_dir("restore-skip-non-json");
+
+        // Put a non-JSON file in the dir; restore should silently ignore it.
+        std::fs::write(dir.join("README.txt"), "not a session").unwrap();
+        std::fs::write(dir.join("metadata.yml"), "yaml file").unwrap();
+
+        let restored = manager.restore_sessions_in(&dir).await;
+        assert!(restored.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn restore_sessions_in_removes_corrupted_files() {
+        let manager = make_manager();
+        let dir = temp_session_dir("restore-corrupt");
+
+        let corrupt_path = dir.join("corrupt.json");
+        std::fs::write(&corrupt_path, "{not valid json").unwrap();
+        assert!(corrupt_path.exists());
+
+        let restored = manager.restore_sessions_in(&dir).await;
+        assert!(restored.is_empty(), "Corrupt files don't restore");
+        assert!(
+            !corrupt_path.exists(),
+            "Corrupt files should be removed during restore"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn restore_sessions_in_skips_session_whose_agent_is_dead() {
+        let manager = make_manager();
+        let dir = temp_session_dir("restore-dead");
+
+        // PersistedSession with a systemd unit name that definitely doesn't
+        // resolve (random uuid). systemctl is-active will fail, agent_pid=0
+        // means the legacy fallback also fails → session skipped.
+        let session_id = Uuid::new_v4();
+        let persisted = PersistedSession {
+            session_id,
+            username: "alice".to_string(),
+            display: 999,
+            width: 1920,
+            height: 1080,
+            created_at: 1_700_000_000,
+            agent_pid: 0,
+            agent_token: "tok".to_string(),
+            release_token: "rel".to_string(),
+            systemd_unit: Some(format!("beam-agent-nonexistent-{session_id}")),
+        };
+        let path = dir.join(format!("{session_id}.json"));
+        std::fs::write(&path, serde_json::to_string_pretty(&persisted).unwrap()).unwrap();
+
+        let restored = manager.restore_sessions_in(&dir).await;
+        assert!(restored.is_empty(), "Dead-agent sessions must not restore");
+        assert!(
+            !path.exists(),
+            "Restore should clean up files for dead-agent sessions"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn persist_then_restore_roundtrips_session_metadata() {
+        // Build a session, persist it, then restore on a fresh manager and
+        // verify the metadata survives. The agent appears dead (no real
+        // systemd unit), so the restored list will be empty — but the persist
+        // step alone exercises the write path.
+        let original = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 200, 0, None);
+        s.systemd_unit = Some(format!("beam-agent-{id}"));
+        s.agent_token = "deterministic-agent-token".to_string();
+        s.release_token = "deterministic-release-token".to_string();
+        insert(&original, s).await;
+
+        let dir = temp_session_dir("persist-restore");
+        original.persist_sessions_in(&dir).await.unwrap();
+
+        // Verify file content directly
+        let path = dir.join(format!("{id}.json"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["username"], "alice");
+        assert_eq!(v["display"], 200);
+        assert_eq!(v["agent_token"], "deterministic-agent-token");
+        assert_eq!(v["release_token"], "deterministic-release-token");
+
+        // Restore: the agent is dead (no real systemd unit) so the session is
+        // not restored, but the path runs (parse + agent-check + cleanup).
+        let restored = original.restore_sessions_in(&dir).await;
+        assert!(restored.is_empty(), "Dead agent → no restore");
+        assert!(!path.exists(), "Dead-agent session file should be removed");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn restore_sessions_in_returns_empty_when_dir_is_empty() {
+        let manager = make_manager();
+        let dir = temp_session_dir("restore-empty");
+
+        let restored = manager.restore_sessions_in(&dir).await;
+        assert!(restored.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

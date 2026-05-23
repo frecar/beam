@@ -14,11 +14,25 @@ pub struct TlsConfigResult {
     pub cert_pem_path: String,
 }
 
+/// Production state dir for self-signed certs.
+const STATE_DIR: &str = "/var/lib/beam";
+
 /// Build a `rustls::ServerConfig` from either configured cert/key paths
 /// or by generating a self-signed certificate.
 pub fn build_tls_config(
     cert_path: Option<&str>,
     key_path: Option<&str>,
+) -> Result<TlsConfigResult> {
+    build_tls_config_in(cert_path, key_path, STATE_DIR)
+}
+
+/// Inner helper that accepts an explicit state directory for the self-signed
+/// cert+key pair. Tests use this directly with a temp dir; the public
+/// `build_tls_config` delegates here with the production `/var/lib/beam`.
+fn build_tls_config_in(
+    cert_path: Option<&str>,
+    key_path: Option<&str>,
+    state_dir: &str,
 ) -> Result<TlsConfigResult> {
     let (certs, key, cert_pem_path) = match (cert_path, key_path) {
         (Some(cert), Some(key)) => {
@@ -26,16 +40,19 @@ pub fn build_tls_config(
             (certs, priv_key, cert.to_string())
         }
         _ => {
-            let cert_pem_path = "/var/lib/beam/server-cert.pem";
-            let key_pem_path = "/var/lib/beam/server-key.pem";
+            let cert_pem_path_string = format!("{state_dir}/server-cert.pem");
+            let key_pem_path_string = format!("{state_dir}/server-key.pem");
+            let cert_pem_path = cert_pem_path_string.as_str();
+            let key_pem_path = key_pem_path_string.as_str();
 
-            std::fs::create_dir_all("/var/lib/beam").context("Failed to create /var/lib/beam")?;
+            std::fs::create_dir_all(state_dir)
+                .with_context(|| format!("Failed to create {state_dir}"))?;
             // Override UMask=0077: agents need to traverse this directory
             // to read the public cert after dropping root privileges.
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions("/var/lib/beam", std::fs::Permissions::from_mode(0o755))
-                    .context("Failed to set /var/lib/beam permissions")?;
+                std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(0o755))
+                    .with_context(|| format!("Failed to set {state_dir} permissions"))?;
             }
 
             // Reuse existing self-signed cert+key if both files exist, are valid,
@@ -538,5 +555,136 @@ mod tests {
             certs_a[0], certs_b[0],
             "Two generated self-signed certs should differ"
         );
+    }
+
+    // --- build_tls_config_in: self-signed branch with a custom state dir ---
+
+    fn temp_state_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "beam-tls-state-{}-{}-{label}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn build_tls_config_in_generates_and_persists_self_signed_when_none() {
+        init_crypto();
+        let dir = temp_state_dir("first-gen");
+        // Initial run: no cert/key files exist → generate fresh.
+        let cfg = build_tls_config_in(None, None, dir.to_str().unwrap()).unwrap();
+        assert_eq!(
+            cfg.cert_pem_path,
+            format!("{}/server-cert.pem", dir.display())
+        );
+        // Both files must exist after the call
+        assert!(dir.join("server-cert.pem").exists());
+        assert!(dir.join("server-key.pem").exists());
+        // Cert must be world-readable (0644) so unprivileged agents can pin it.
+        // Key must NOT be readable (0600) since it's a secret.
+        use std::os::unix::fs::PermissionsExt;
+        let cert_mode = std::fs::metadata(dir.join("server-cert.pem"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(cert_mode, 0o644);
+        let key_mode = std::fs::metadata(dir.join("server-key.pem"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(key_mode, 0o600);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tls_config_in_reuses_existing_cert_on_second_call() {
+        init_crypto();
+        let dir = temp_state_dir("reuse");
+
+        // First call generates the cert+key
+        let _ = build_tls_config_in(None, None, dir.to_str().unwrap()).unwrap();
+        let cert_bytes_first = std::fs::read(dir.join("server-cert.pem")).unwrap();
+
+        // Second call should reuse; the file bytes should be identical (no
+        // regeneration). The mtime check is for >365 days, so a fresh file
+        // takes the load branch.
+        let _ = build_tls_config_in(None, None, dir.to_str().unwrap()).unwrap();
+        let cert_bytes_second = std::fs::read(dir.join("server-cert.pem")).unwrap();
+        assert_eq!(
+            cert_bytes_first, cert_bytes_second,
+            "Second call should reuse the same on-disk cert"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tls_config_in_regenerates_when_existing_cert_is_corrupt() {
+        init_crypto();
+        let dir = temp_state_dir("regen-corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Pre-seed the dir with corrupted cert + key files (existing, but
+        // unreadable as PEM). The load arm must fall through to regenerate.
+        std::fs::write(
+            dir.join("server-cert.pem"),
+            "-----BEGIN CERTIFICATE-----\ngarbage\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("server-key.pem"), "garbage").unwrap();
+
+        let cfg = build_tls_config_in(None, None, dir.to_str().unwrap()).unwrap();
+        // The function regenerated and overwrote — the cert should now be
+        // valid (round-trip through load_certs_from_files succeeds).
+        let loaded = load_certs_from_files(
+            cfg.cert_pem_path.as_str(),
+            dir.join("server-key.pem").to_str().unwrap(),
+        );
+        assert!(loaded.is_ok(), "Regenerated cert+key must be valid");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tls_config_in_returns_error_when_state_dir_unwritable() {
+        // /proc/nonexistent-* is a path that's not a valid directory and can't
+        // be created (mkdir fails). build_tls_config_in must surface an Err.
+        let result = build_tls_config_in(
+            None,
+            None,
+            &format!("/proc/nonexistent-{}", uuid::Uuid::new_v4()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_tls_config_in_with_user_cert_ignores_state_dir() {
+        // When user provides cert+key paths, the state dir argument is unused
+        // (the self-signed branch is bypassed entirely).
+        init_crypto();
+        let (cert_path, key_path, source_dir) = write_temp_cert_pair("bypass");
+        let unused_state = temp_state_dir("unused");
+        // unused_state intentionally doesn't exist — function shouldn't touch it.
+        assert!(!unused_state.exists());
+
+        let cfg = build_tls_config_in(
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
+            unused_state.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg.cert_pem_path, cert_path.to_str().unwrap());
+
+        // State dir was never created
+        assert!(
+            !unused_state.exists(),
+            "User-cert branch must not create state dir"
+        );
+
+        let _ = std::fs::remove_dir_all(&source_dir);
     }
 }
