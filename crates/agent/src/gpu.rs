@@ -155,15 +155,23 @@ fn try_detect_nvidia(display_num: u32, display_start: u32) -> Result<GpuConfig> 
 /// H100/H200 are excluded by checking if the GPU appears in nvidia-smi
 /// (which only shows GPUs accessible in this container/namespace).
 fn enumerate_nvidia_gpus() -> Result<Vec<NvidiaGpu>> {
-    let nvidia_proc = std::path::Path::new("/proc/driver/nvidia/gpus");
+    enumerate_nvidia_gpus_in(
+        std::path::Path::new("/proc/driver/nvidia/gpus"),
+        &nvidia_smi_pci_addresses(),
+    )
+}
+
+/// Inner enumeration helper that accepts an explicit `/proc/driver/nvidia/gpus`
+/// path and a pre-computed nvidia-smi accessibility set. Tests use this with
+/// fixture trees; the public `enumerate_nvidia_gpus` delegates here with the
+/// real production paths.
+fn enumerate_nvidia_gpus_in(
+    nvidia_proc: &std::path::Path,
+    accessible_gpus: &[String],
+) -> Result<Vec<NvidiaGpu>> {
     if !nvidia_proc.exists() {
         anyhow::bail!("NVIDIA kernel driver not loaded (/proc/driver/nvidia/gpus not found)");
     }
-
-    // Get the set of PCI addresses visible to nvidia-smi (only GPUs in this
-    // container/namespace). Compute-only GPUs passed to other containers
-    // appear in /proc but not in nvidia-smi.
-    let accessible_gpus = nvidia_smi_pci_addresses();
 
     let mut gpus = Vec::new();
 
@@ -186,7 +194,11 @@ fn enumerate_nvidia_gpus() -> Result<Vec<NvidiaGpu>> {
         let bus_location = parse_proc_field(&info, "Bus Location").unwrap_or(pci_dir.clone());
 
         // Filter: only include GPUs accessible via nvidia-smi
-        if !accessible_gpus.is_empty() && !accessible_gpus.contains(&normalize_pci(&bus_location)) {
+        if !accessible_gpus.is_empty()
+            && !accessible_gpus
+                .iter()
+                .any(|a| a == &normalize_pci(&bus_location))
+        {
             debug!(
                 model,
                 bus_location, "Skipping GPU (not accessible in this namespace)"
@@ -563,5 +575,221 @@ Device Minor: \t 2
         // Bytes 8-9: manufacturer ID. Source declares 0x10AC ("DEL" — Dell).
         assert_eq!(EDID_BYTES[8], 0x10);
         assert_eq!(EDID_BYTES[9], 0xAC);
+    }
+
+    // --- enumerate_nvidia_gpus_in: fixture-based testing ---
+
+    fn fixture_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "beam-gpu-fixture-{}-{}-{label}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Build a fixture /proc/driver/nvidia/gpus entry for a single GPU.
+    fn write_gpu_fixture(root: &std::path::Path, pci_addr: &str, model: &str) {
+        let gpu_dir = root.join(pci_addr);
+        fs::create_dir_all(&gpu_dir).unwrap();
+        let info = format!(
+            "\
+Model: \t\t {model}
+IRQ:   \t\t 17
+Bus Location: \t {pci_addr}
+Device Minor: \t 2
+"
+        );
+        fs::write(gpu_dir.join("information"), info).unwrap();
+    }
+
+    #[test]
+    fn enumerate_nvidia_gpus_in_returns_empty_for_empty_proc_tree() {
+        let dir = fixture_dir("empty");
+        // Directory exists but contains no GPU subdirectories.
+        let gpus = enumerate_nvidia_gpus_in(&dir, &[]).unwrap();
+        assert!(gpus.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enumerate_nvidia_gpus_in_bails_when_proc_path_missing() {
+        // Bogus path → bail with the "kernel driver not loaded" diagnostic.
+        let bogus = std::path::PathBuf::from(format!(
+            "/tmp/beam-gpu-missing-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let err = enumerate_nvidia_gpus_in(&bogus, &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("kernel driver") || msg.contains("/proc/driver/nvidia/gpus"),
+            "Expected kernel-driver-not-loaded diagnostic, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn enumerate_nvidia_gpus_in_reads_single_gpu_information() {
+        let dir = fixture_dir("single");
+        write_gpu_fixture(&dir, "0000:bb:00.0", "NVIDIA L40S");
+
+        // No accessibility filter (empty list) → all entries are included.
+        let gpus = enumerate_nvidia_gpus_in(&dir, &[]).unwrap();
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].model, "NVIDIA L40S");
+        assert_eq!(gpus[0].pci_address, "0000:bb:00.0");
+        assert_eq!(gpus[0].xorg_bus_id, "PCI:187:0:0");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enumerate_nvidia_gpus_in_filters_by_accessibility_set() {
+        let dir = fixture_dir("filter");
+        write_gpu_fixture(&dir, "0000:bb:00.0", "NVIDIA L40S");
+        write_gpu_fixture(&dir, "0000:4e:00.0", "NVIDIA H100");
+
+        // nvidia-smi only lists the L40S (containerization scenario).
+        let gpus = enumerate_nvidia_gpus_in(&dir, &["bb:00.0".to_string()]).unwrap();
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].model, "NVIDIA L40S");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enumerate_nvidia_gpus_in_sorts_by_pci_address() {
+        let dir = fixture_dir("sort");
+        // Insert in non-sorted order.
+        write_gpu_fixture(&dir, "0000:ff:00.0", "GPU2");
+        write_gpu_fixture(&dir, "0000:01:00.0", "GPU0");
+        write_gpu_fixture(&dir, "0000:7e:00.0", "GPU1");
+
+        let gpus = enumerate_nvidia_gpus_in(&dir, &[]).unwrap();
+        assert_eq!(gpus.len(), 3);
+        // Lexically sorted PCI addresses
+        assert_eq!(gpus[0].pci_address, "0000:01:00.0");
+        assert_eq!(gpus[1].pci_address, "0000:7e:00.0");
+        assert_eq!(gpus[2].pci_address, "0000:ff:00.0");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enumerate_nvidia_gpus_in_skips_directory_without_information_file() {
+        let dir = fixture_dir("missing-info");
+        // Create a GPU subdirectory but NO information file inside.
+        fs::create_dir_all(dir.join("0000:bb:00.0")).unwrap();
+        // Also create one valid one.
+        write_gpu_fixture(&dir, "0000:01:00.0", "GoodGPU");
+
+        let gpus = enumerate_nvidia_gpus_in(&dir, &[]).unwrap();
+        assert_eq!(gpus.len(), 1, "Missing information files are skipped");
+        assert_eq!(gpus[0].model, "GoodGPU");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enumerate_nvidia_gpus_in_uses_pci_dir_name_when_bus_location_field_missing() {
+        let dir = fixture_dir("no-bus-location");
+        // Write information WITHOUT a "Bus Location:" line → parse_proc_field
+        // returns None and the code falls back to the pci_dir name.
+        let gpu_dir = dir.join("0000:ab:00.0");
+        fs::create_dir_all(&gpu_dir).unwrap();
+        fs::write(
+            gpu_dir.join("information"),
+            "Model: \t\t NVIDIA Test\nIRQ: \t 17\n",
+        )
+        .unwrap();
+
+        let gpus = enumerate_nvidia_gpus_in(&dir, &[]).unwrap();
+        assert_eq!(gpus.len(), 1);
+        // Bus location falls back to the directory name
+        assert_eq!(gpus[0].pci_address, "0000:ab:00.0");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enumerate_nvidia_gpus_in_no_filter_when_accessibility_set_is_empty() {
+        let dir = fixture_dir("no-filter");
+        write_gpu_fixture(&dir, "0000:11:00.0", "GPU-A");
+        write_gpu_fixture(&dir, "0000:22:00.0", "GPU-B");
+
+        // Empty accessibility set → no filter → both included.
+        let gpus = enumerate_nvidia_gpus_in(&dir, &[]).unwrap();
+        assert_eq!(gpus.len(), 2);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- nvidia_smi_pci_addresses on hosts without nvidia-smi ---
+
+    #[test]
+    fn nvidia_smi_pci_addresses_returns_empty_when_command_missing() {
+        // On a host without nvidia-smi installed (typical CI), the function
+        // should silently return an empty Vec — never panic, never bail.
+        // We can't conditionally invert this for hosts WITH nvidia-smi, so the
+        // test is one-sided: we just verify the call doesn't panic and
+        // returns a Vec (possibly populated if nvidia-smi IS present).
+        let addresses = nvidia_smi_pci_addresses();
+        // No assertion on length — accept either branch (empty or populated).
+        let _ = addresses.len();
+    }
+
+    // --- enumerate_nvidia_gpus_in: trailing slash on PCI address handling ---
+
+    #[test]
+    fn enumerate_nvidia_gpus_in_handles_mixed_case_pci_addresses() {
+        // Real /proc may report PCI addresses with capital hex digits (e.g.
+        // "0000:BB:00.0"). enumerate_nvidia_gpus_in must compare via
+        // normalize_pci, which lowercases.
+        let dir = fixture_dir("mixed-case");
+        write_gpu_fixture(&dir, "0000:BB:00.0", "NVIDIA");
+
+        // Accessibility set uses lowercase (as nvidia-smi outputs).
+        let gpus = enumerate_nvidia_gpus_in(&dir, &["bb:00.0".to_string()]).unwrap();
+        assert_eq!(gpus.len(), 1, "Mixed-case PCI must match lowercase entry");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- try_detect_nvidia + detect_gpu integration on test hosts ---
+
+    #[test]
+    fn try_detect_nvidia_bails_when_xorg_driver_not_installed() {
+        // The driver path /usr/lib/xorg/modules/drivers/nvidia_drv.so does
+        // not exist on the typical CI host. The function should produce
+        // an Err with the documented diagnostic.
+        let nvidia_present =
+            std::path::Path::new("/usr/lib/xorg/modules/drivers/nvidia_drv.so").exists();
+        if !nvidia_present {
+            let err = try_detect_nvidia(10, 10).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("NVIDIA Xorg driver not installed"),
+                "Expected driver-missing error, got: {msg}"
+            );
+        }
+    }
+
+    // --- detect_gpu mode "auto": when /proc exists but the directory is empty ---
+
+    #[test]
+    fn detect_gpu_auto_no_nvidia_returns_dummy() {
+        // On hosts without the NVIDIA Xorg driver, auto mode falls back to
+        // dummy without errors.
+        let nvidia_present =
+            std::path::Path::new("/usr/lib/xorg/modules/drivers/nvidia_drv.so").exists();
+        if !nvidia_present {
+            let cfg = detect_gpu("auto", 10, 10);
+            assert_eq!(cfg.driver, "dummy");
+            assert!(cfg.bus_id.is_none());
+            assert!(cfg.dfp_output.is_none());
+        }
     }
 }

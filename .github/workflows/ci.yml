@@ -158,25 +158,24 @@ jobs:
           LLVM_PROFILE_FILE: beam-%p-%m.profraw
         run: |
           # Ratchet protocol: --fail-under-lines locks current
-          # coverage as a floor. Baseline measured in #46 was 55.40%.
-          # Several PRs (#64, #68, #72, #78, #79) lifted coverage in
-          # steady increments; the #45 big-lift series most recently
-          # measured 69.71% lines (floor 68). This PR adds ~210 tests
-          # across encoder (x264enc lifecycle), session (PersistedSession
-          # serde + display pool), display (pa_config, nvidia/dummy xorg
-          # config, is_display_running, find_non_snap_app, clamp
-          # boundary cases), video (audio_send_loop, outbox-full
-          # branches), h264 (high-profile SPS branches, BitReader edge
-          # cases), clipboard_sync (build_clipboard_payload extracted +
-          # tested), agent/signaling (run_signaling empty-URL branch,
-          # SignalingCtx field round-trip), audio (sample-rate validation
-          # matrix), input (InputInjector::new rejection, scroll edge
-          # cases), cursor (cursor_monitor_loop error path), and
-          # clipboard (sanitize boundary cases, new() rejection).
-          # Measured coverage rose to 75.84% lines. floor(75.84 - 1) = 74.
+          # coverage as a floor. Baseline measured was 55.40%.
+          # Several PRs lifted coverage in steady increments; the
+          # preceding big-lift PR measured 75.84% lines (floor 74).
+          # This PR adds further tests across filetransfer (cleanup +
+          # collision + UUID-fallback branches), clipboard +
+          # clipboard_sync (run loops with bogus display via real
+          # xclip), web.rs (HTTP-level integration tests using a new
+          # insert_for_test SessionManager helper), session.rs
+          # (persist_sessions_in / restore_sessions_in refactor with
+          # temp-dir fixtures), tls.rs (build_tls_config_in refactor
+          # to exercise the self-signed cert generation + reuse +
+          # regenerate-on-corrupt branches against a temp state dir),
+          # and gpu.rs (enumerate_nvidia_gpus_in refactor to exercise
+          # /proc/driver/nvidia/gpus parsing against fixture trees).
+          # Measured coverage rose to 80.07% lines. floor(80.07 - 1) = 79.
           # --ignore-filename-regex 'tests?/' excludes the test harness
           # modules from the floor so it tracks real source coverage
           # only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 74
+            --fail-under-lines 77

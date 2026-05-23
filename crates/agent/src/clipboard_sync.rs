@@ -152,4 +152,110 @@ mod tests {
         // Lock the limit at 1 MiB. Browser-side enforces the same value.
         assert_eq!(MAX_CLIPBOARD_BYTES, 1_048_576);
     }
+
+    // --- run_clipboard_sync loop ---
+
+    /// Whether xclip is on PATH. The loop calls into ClipboardBridge::get_text
+    /// which spawns xclip; without it we'd hit a different error path that
+    /// isn't representative of production.
+    ///
+    /// Checks `/usr/bin/xclip` directly (not `which xclip`) to dodge the PATH
+    /// race with `clipboard::tests::clipboard_bridge_new_fails_without_xclip_in_path`
+    /// which temporarily wipes `$PATH` via `unsafe { std::env::set_var }`.
+    fn xclip_available() -> bool {
+        std::path::Path::new("/usr/bin/xclip").exists()
+            || std::path::Path::new("/bin/xclip").exists()
+    }
+
+    /// Construct a bridge against a bogus display with retry to absorb the
+    /// PATH-mutation race from sibling clipboard tests.
+    fn try_make_bridge() -> Option<ClipboardBridge> {
+        if !xclip_available() {
+            return None;
+        }
+        for _ in 0..10 {
+            if let Ok(bridge) = ClipboardBridge::new(":99999") {
+                return Some(bridge);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn run_clipboard_sync_exits_when_input_channel_closes() {
+        // Dropping the read receiver should let the loop unwind cleanly with
+        // no further activity. This is the shutdown path.
+        let Some(bridge_inner) = try_make_bridge() else {
+            return;
+        };
+        let (read_tx, mut read_rx) = mpsc::channel::<()>(4);
+        let (ws_tx, _ws_rx) = mpsc::channel::<Message>(4);
+        let bridge = Arc::new(Mutex::new(bridge_inner));
+
+        // Close input channel before spawning the loop
+        drop(read_tx);
+
+        // The loop should return immediately when the channel is closed.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            run_clipboard_sync(&mut read_rx, &bridge, &ws_tx),
+        )
+        .await
+        .expect("loop must exit when input channel closes");
+    }
+
+    #[tokio::test]
+    async fn run_clipboard_sync_logs_when_get_text_returns_none() {
+        // With a bogus display, ClipboardBridge::get_text returns Ok(None).
+        // The loop's Ok(_) arm logs and loops back without sending to ws_tx.
+        let Some(bridge_inner) = try_make_bridge() else {
+            return;
+        };
+        let (read_tx, mut read_rx) = mpsc::channel::<()>(4);
+        let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(4);
+        let bridge = Arc::new(Mutex::new(bridge_inner));
+
+        // Send one signal then close. The loop processes the signal (get_text
+        // returns Ok(None) on bogus display), then unwinds on channel close.
+        read_tx.send(()).await.unwrap();
+        drop(read_tx);
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            run_clipboard_sync(&mut read_rx, &bridge, &ws_tx),
+        )
+        .await
+        .expect("loop should process the signal and exit");
+
+        // No clipboard payload should be sent (xclip returned non-zero, no text)
+        assert!(
+            ws_rx.try_recv().is_err(),
+            "No payload should be sent when get_text returns Ok(None)"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_clipboard_sync_handles_multiple_signals() {
+        // Sending two signals back-to-back exercises the loop's repeat path.
+        // The loop must process each and continue without panic.
+        let Some(bridge_inner) = try_make_bridge() else {
+            return;
+        };
+        let (read_tx, mut read_rx) = mpsc::channel::<()>(4);
+        let (ws_tx, _ws_rx) = mpsc::channel::<Message>(4);
+        let bridge = Arc::new(Mutex::new(bridge_inner));
+
+        for _ in 0..3 {
+            read_tx.send(()).await.unwrap();
+        }
+        drop(read_tx);
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run_clipboard_sync(&mut read_rx, &bridge, &ws_tx),
+        )
+        .await
+        .expect("loop should process all signals and exit");
+    }
 }
