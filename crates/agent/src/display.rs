@@ -2313,11 +2313,8 @@ mod tests {
 
     #[test]
     fn nvidia_config_includes_custom_edid() {
-        let cfg = generate_nvidia_xorg_config(
-            "PCI:0:0:0",
-            "DFP-1",
-            "/etc/X11/beam/beam-edid-10.bin",
-        );
+        let cfg =
+            generate_nvidia_xorg_config("PCI:0:0:0", "DFP-1", "/etc/X11/beam/beam-edid-10.bin");
         assert!(cfg.contains("CustomEDID"));
         assert!(cfg.contains("/etc/X11/beam/beam-edid-10.bin"));
     }

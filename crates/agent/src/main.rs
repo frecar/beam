@@ -192,11 +192,7 @@ pub(crate) enum InputAction {
     /// the capture thread; `visible=false` just flips the backgrounded flag.
     Visibility { visible: bool },
     /// File transfer start. Forwarded to FileTransferManager.
-    FileStart {
-        id: String,
-        name: String,
-        size: u64,
-    },
+    FileStart { id: String, name: String, size: u64 },
     /// File transfer chunk. Forwarded to FileTransferManager.
     FileChunk { id: String, data: String },
     /// File transfer complete. Forwarded to FileTransferManager.
@@ -251,10 +247,7 @@ pub(crate) fn should_log_capture_error(consecutive: u64) -> bool {
 /// recreate the encoder, or whether we're still in the cooldown window
 /// where a force-keyframe is the cheaper alternative. Returns `true`
 /// when the cooldown has elapsed (free to recreate).
-pub(crate) fn encoder_reset_cooldown_elapsed(
-    last_reset_elapsed_ms: u64,
-    cooldown_ms: u64,
-) -> bool {
+pub(crate) fn encoder_reset_cooldown_elapsed(last_reset_elapsed_ms: u64, cooldown_ms: u64) -> bool {
     last_reset_elapsed_ms >= cooldown_ms
 }
 
@@ -373,10 +366,7 @@ pub(crate) fn classify_input_event(
                 InputAction::Ignore
             }
         }
-        InputEvent::Button { b, d } => InputAction::InjectButton {
-            b: *b,
-            pressed: *d,
-        },
+        InputEvent::Button { b, d } => InputAction::InjectButton { b: *b, pressed: *d },
         InputEvent::Scroll { dx, dy } => {
             if is_finite_bounded_delta(*dx, *dy) {
                 InputAction::InjectScroll { dx: *dx, dy: *dy }
@@ -429,7 +419,9 @@ pub(crate) fn classify_input_event(
             data: data.clone(),
         },
         InputEvent::FileDone { id } => InputAction::FileDone { id: id.clone() },
-        InputEvent::FileDownloadRequest { path } => InputAction::FileDownload { path: path.clone() },
+        InputEvent::FileDownloadRequest { path } => {
+            InputAction::FileDownload { path: path.clone() }
+        }
     }
 }
 
@@ -2655,10 +2647,7 @@ mod tests {
         // CSS strings can contain quotes that JSON must escape.
         let msg = build_cursor_message(r#"url("data:image/png;base64,X") 0 0, default"#);
         let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
-        assert_eq!(
-            v["css"],
-            r#"url("data:image/png;base64,X") 0 0, default"#
-        );
+        assert_eq!(v["css"], r#"url("data:image/png;base64,X") 0 0, default"#);
     }
 
     #[test]
@@ -2828,10 +2817,7 @@ mod tests {
         let kf = AtomicBool::new(false);
         let (tx, _rx) = std::sync::mpsc::channel::<CaptureCommand>();
         let triggered = handle_visibility_change(false, &bg, &kf, &tx);
-        assert!(
-            !triggered,
-            "visible=false should NOT trigger encoder reset"
-        );
+        assert!(!triggered, "visible=false should NOT trigger encoder reset");
         assert!(bg.load(Ordering::Relaxed), "backgrounded set");
         assert!(
             !kf.load(Ordering::Relaxed),

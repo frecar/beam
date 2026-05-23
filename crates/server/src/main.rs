@@ -1107,11 +1107,10 @@ mod resolve_jwt_secret_tests {
         // Even if a path exists, an explicit config override skips disk.
         let path = unique_path("configured-wins");
         std::fs::write(&path, "from-disk-12345").unwrap();
-        let (secret, source) = resolve_jwt_secret(
-            Some("from-config-67890".to_string()),
-            &path,
-            || panic!("generator should not run when config is set"),
-        );
+        let (secret, source) =
+            resolve_jwt_secret(Some("from-config-67890".to_string()), &path, || {
+                panic!("generator should not run when config is set")
+            });
         assert_eq!(secret, "from-config-67890");
         assert_eq!(source, JwtSecretSource::LoadedFromDisk);
         let _ = std::fs::remove_file(&path);
@@ -1146,8 +1145,7 @@ mod resolve_jwt_secret_tests {
     fn ephemeral_when_persist_fails() {
         // /proc/foo is unwritable — persist_jwt_secret returns Err.
         let path = std::path::PathBuf::from("/proc/nonexistent-beam-jwt-resolve");
-        let (secret, source) =
-            resolve_jwt_secret(None, &path, || "ephemeral-secret".to_string());
+        let (secret, source) = resolve_jwt_secret(None, &path, || "ephemeral-secret".to_string());
         assert_eq!(secret, "ephemeral-secret");
         assert!(matches!(source, JwtSecretSource::GeneratedEphemeral(_)));
     }
@@ -1182,11 +1180,9 @@ mod resolve_jwt_secret_tests {
         // deterministic about Option semantics.)
         let path = unique_path("empty-config");
         std::fs::write(&path, "real-disk-secret").unwrap();
-        let (secret, source) = resolve_jwt_secret(
-            Some(String::new()),
-            &path,
-            || panic!("generator should not run"),
-        );
+        let (secret, source) = resolve_jwt_secret(Some(String::new()), &path, || {
+            panic!("generator should not run")
+        });
         assert_eq!(secret, String::new());
         assert_eq!(source, JwtSecretSource::LoadedFromDisk);
         let _ = std::fs::remove_file(&path);
@@ -1196,8 +1192,8 @@ mod resolve_jwt_secret_tests {
 #[cfg(test)]
 mod startup_helper_tests {
     use super::{
-        count_validation_severities, pam_missing_warning, startup_banner_line,
-        web_root_is_usable, web_root_missing_warning,
+        count_validation_severities, pam_missing_warning, startup_banner_line, web_root_is_usable,
+        web_root_missing_warning,
     };
     use std::net::SocketAddr;
 
@@ -1293,7 +1289,9 @@ mod startup_helper_tests {
 
     #[test]
     fn web_root_usable_false_for_nonexistent() {
-        assert!(!web_root_is_usable("/tmp/beam-nonexistent-web-root-test-q9r2"));
+        assert!(!web_root_is_usable(
+            "/tmp/beam-nonexistent-web-root-test-q9r2"
+        ));
     }
 
     #[test]
