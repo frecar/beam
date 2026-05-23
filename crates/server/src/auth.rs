@@ -184,6 +184,86 @@ mod tests {
     }
 
     #[test]
+    fn jwt_refresh_accepts_within_grace_window() {
+        // A token expired ~1 minute ago is within the 5-minute grace window;
+        // validate_jwt_for_refresh should return the claims rather than bail.
+        let secret = "grace-test-secret";
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = Claims {
+            sub: "graceuser".to_string(),
+            // Expired 60 seconds ago, well within the 5-minute grace window.
+            iat: now - TOKEN_EXPIRY_SECS - 60,
+            exp: now - 60,
+        };
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        let refreshed = validate_jwt_for_refresh(&token, secret)
+            .expect("Token within grace window should refresh");
+        assert_eq!(refreshed.sub, "graceuser");
+    }
+
+    #[test]
+    fn jwt_refresh_rejects_past_grace_boundary() {
+        // A token expired ~10 minutes ago is past the 5-minute grace window;
+        // validate_jwt_for_refresh must bail rather than return claims.
+        let secret = "boundary-test-secret";
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = Claims {
+            sub: "boundaryuser".to_string(),
+            // Expired 10 minutes ago — past the 5-minute grace window.
+            iat: now - TOKEN_EXPIRY_SECS - 600,
+            exp: now - 600,
+        };
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        assert!(
+            validate_jwt_for_refresh(&token, secret).is_err(),
+            "Past-grace token must be rejected"
+        );
+    }
+
+    #[test]
+    fn jwt_refresh_within_grace_returns_original_sub() {
+        // Even for tokens that have expired but fall within grace, the
+        // subject (username) from the claims must come back unchanged.
+        let secret = "within-grace-test";
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // exp = now - 1 → just barely expired.
+        let claims = Claims {
+            sub: "alice".to_string(),
+            iat: now - TOKEN_EXPIRY_SECS,
+            exp: now - 1,
+        };
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        let refreshed = validate_jwt_for_refresh(&token, secret).unwrap();
+        assert_eq!(refreshed.sub, "alice");
+        // iat preserved too — refresh doesn't rewrite the original timestamps.
+        assert_eq!(refreshed.iat, now - TOKEN_EXPIRY_SECS);
+    }
+
+    #[test]
     fn generate_secret_is_64_hex_chars() {
         let secret = generate_secret();
         assert_eq!(secret.len(), 64);

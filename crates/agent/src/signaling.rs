@@ -139,6 +139,47 @@ pub(crate) fn parse_server_text(text: &str) -> ServerTextOutcome {
     }
 }
 
+/// Classification of a `ws_rx.next()` result the connect-and-handle loop
+/// hands off to its dispatcher. Splitting this out lets the entire branch
+/// table (close, error, text-payload outcomes, ignored frame types) be
+/// unit-tested without spinning up a real WebSocket.
+#[derive(Debug)]
+pub(crate) enum WsIncomingAction {
+    /// Forward an input event to the agent's input callback.
+    Input(InputEvent),
+    /// Server told us to shut down — exit the connect-and-handle loop cleanly.
+    Shutdown,
+    /// The server text was unparseable / unknown — log it and keep going.
+    InvalidText(String),
+    /// Connection closed cleanly (Close frame or stream end) — exit the loop
+    /// with Ok so the outer reconnect loop terminates.
+    CloseCleanly,
+    /// WebSocket error — exit the loop with Err so the outer reconnect loop
+    /// backs off and retries.
+    Error(String),
+    /// Ping/Pong/Frame (anything else) — ignore and keep reading.
+    Ignore,
+}
+
+/// Classify what to do with the result of `ws_rx.next()` from the
+/// agent's signaling WebSocket. Pure mapping so the dispatch logic can
+/// be unit-tested without a real connection or a runtime.
+pub(crate) fn classify_ws_incoming<E: std::fmt::Display>(
+    msg: Option<Result<tokio_tungstenite::tungstenite::Message, E>>,
+) -> WsIncomingAction {
+    use tokio_tungstenite::tungstenite::Message;
+    match msg {
+        Some(Ok(Message::Text(text))) => match parse_server_text(&text) {
+            ServerTextOutcome::Input(event) => WsIncomingAction::Input(event),
+            ServerTextOutcome::Shutdown => WsIncomingAction::Shutdown,
+            ServerTextOutcome::Invalid(e) => WsIncomingAction::InvalidText(e),
+        },
+        Some(Ok(Message::Close(_))) | None => WsIncomingAction::CloseCleanly,
+        Some(Err(e)) => WsIncomingAction::Error(format!("{e}")),
+        _ => WsIncomingAction::Ignore,
+    }
+}
+
 /// Exponential backoff step used by the signaling reconnect loop. The
 /// production loop starts at 2s and doubles until 60s; split out so the
 /// doubling + cap logic can be unit-tested independently.
@@ -186,7 +227,6 @@ async fn connect_and_handle(
     ws_outbox_rx: &mut mpsc::Receiver<tokio_tungstenite::tungstenite::Message>,
 ) -> anyhow::Result<()> {
     use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
 
     let url = build_agent_ws_url(ctx.server_url, ctx.session_id, ctx.agent_token);
 
@@ -221,28 +261,24 @@ async fn connect_and_handle(
 
             // Incoming messages from server
             msg = ws_rx.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        match parse_server_text(&text) {
-                            ServerTextOutcome::Input(event) => {
-                                (ctx.input_callback)(event);
-                            }
-                            ServerTextOutcome::Shutdown => {
-                                info!("Received shutdown command");
-                                return Ok(());
-                            }
-                            ServerTextOutcome::Invalid(e) => {
-                                warn!("Invalid message from server: {e}");
-                            }
-                        }
+                match classify_ws_incoming(msg) {
+                    WsIncomingAction::Input(event) => {
+                        (ctx.input_callback)(event);
                     }
-                    Some(Ok(Message::Close(_))) | None => {
+                    WsIncomingAction::Shutdown => {
+                        info!("Received shutdown command");
                         return Ok(());
                     }
-                    Some(Err(e)) => {
-                        return Err(e.into());
+                    WsIncomingAction::InvalidText(e) => {
+                        warn!("Invalid message from server: {e}");
                     }
-                    _ => {}
+                    WsIncomingAction::CloseCleanly => {
+                        return Ok(());
+                    }
+                    WsIncomingAction::Error(e) => {
+                        return Err(anyhow::anyhow!(e));
+                    }
+                    WsIncomingAction::Ignore => {}
                 }
             }
             // Outgoing messages from video/audio/clipboard/cursor tasks
@@ -661,5 +697,161 @@ mod tests {
     fn reconnecting_message_handles_large_value() {
         let m = reconnecting_message(86_400);
         assert!(m.contains("86400 seconds"));
+    }
+
+    // --- classify_ws_incoming ---
+
+    /// Dummy error type used to feed `classify_ws_incoming` an
+    /// `Err(...)` branch without dragging in tokio_tungstenite's error
+    /// machinery.
+    #[derive(Debug)]
+    struct DummyErr(&'static str);
+    impl std::fmt::Display for DummyErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_text_input_event_returns_input() {
+        use tokio_tungstenite::tungstenite::Message;
+        let cmd = AgentCommand::Input(InputEvent::Key { c: 12, d: true });
+        let text = serde_json::to_string(&cmd).unwrap();
+        let msg: Option<Result<Message, DummyErr>> = Some(Ok(Message::Text(text.into())));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::Input(InputEvent::Key { c, d }) => {
+                assert_eq!(c, 12);
+                assert!(d);
+            }
+            other => panic!("Expected Input(Key), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_text_shutdown_returns_shutdown() {
+        use tokio_tungstenite::tungstenite::Message;
+        let text = serde_json::to_string(&AgentCommand::Shutdown).unwrap();
+        let msg: Option<Result<Message, DummyErr>> = Some(Ok(Message::Text(text.into())));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::Shutdown => {}
+            other => panic!("Expected Shutdown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_text_invalid_json_returns_invalid_text() {
+        use tokio_tungstenite::tungstenite::Message;
+        let msg: Option<Result<Message, DummyErr>> =
+            Some(Ok(Message::Text("not even json".into())));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::InvalidText(s) => {
+                assert!(!s.is_empty(), "Invalid text should carry serde error");
+            }
+            other => panic!("Expected InvalidText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_close_frame_returns_close_cleanly() {
+        use tokio_tungstenite::tungstenite::Message;
+        let msg: Option<Result<Message, DummyErr>> = Some(Ok(Message::Close(None)));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::CloseCleanly => {}
+            other => panic!("Expected CloseCleanly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_stream_end_returns_close_cleanly() {
+        use tokio_tungstenite::tungstenite::Message;
+        // Stream end → `None`. Same as a Close frame: clean exit.
+        let msg: Option<Result<Message, DummyErr>> = None;
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::CloseCleanly => {}
+            other => panic!("Expected CloseCleanly for None, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_err_returns_error_with_message() {
+        use tokio_tungstenite::tungstenite::Message;
+        let msg: Option<Result<Message, DummyErr>> = Some(Err(DummyErr("connection reset")));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::Error(e) => {
+                assert!(
+                    e.contains("connection reset"),
+                    "Error must surface the underlying message: {e}"
+                );
+            }
+            other => panic!("Expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_ping_frame_returns_ignore() {
+        use tokio_tungstenite::tungstenite::Message;
+        let msg: Option<Result<Message, DummyErr>> = Some(Ok(Message::Ping(vec![1, 2, 3].into())));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::Ignore => {}
+            other => panic!("Expected Ignore for Ping, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_pong_frame_returns_ignore() {
+        use tokio_tungstenite::tungstenite::Message;
+        let msg: Option<Result<Message, DummyErr>> = Some(Ok(Message::Pong(vec![].into())));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::Ignore => {}
+            other => panic!("Expected Ignore for Pong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_binary_frame_returns_ignore() {
+        // Server doesn't send binary frames to the agent, but if it ever
+        // does, we ignore them rather than crashing.
+        use tokio_tungstenite::tungstenite::Message;
+        let msg: Option<Result<Message, DummyErr>> =
+            Some(Ok(Message::Binary(vec![0xFF; 8].into())));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::Ignore => {}
+            other => panic!("Expected Ignore for Binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_close_with_frame_returns_close_cleanly() {
+        // A Close frame may carry an optional CloseFrame payload (code +
+        // reason). Either form maps to CloseCleanly.
+        use tokio_tungstenite::tungstenite::Message;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        let frame = CloseFrame {
+            code: CloseCode::Normal,
+            reason: "ok".into(),
+        };
+        let msg: Option<Result<Message, DummyErr>> = Some(Ok(Message::Close(Some(frame))));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::CloseCleanly => {}
+            other => panic!("Expected CloseCleanly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ws_incoming_resize_event_returns_input() {
+        // Verify the full Input variant round-trip for one of the
+        // larger event payloads (Resize), not just the Key event.
+        use tokio_tungstenite::tungstenite::Message;
+        let cmd = AgentCommand::Input(InputEvent::Resize { w: 3840, h: 2160 });
+        let text = serde_json::to_string(&cmd).unwrap();
+        let msg: Option<Result<Message, DummyErr>> = Some(Ok(Message::Text(text.into())));
+        match classify_ws_incoming(msg) {
+            WsIncomingAction::Input(InputEvent::Resize { w, h }) => {
+                assert_eq!(w, 3840);
+                assert_eq!(h, 2160);
+            }
+            other => panic!("Expected Input(Resize), got {other:?}"),
+        }
     }
 }

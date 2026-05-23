@@ -5,10 +5,88 @@ use crate::signaling::WsSender;
 use beam_protocol::VideoFrameHeader;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
+
+/// Decision the IDR-wait state machine emits per encoded frame, before the
+/// first valid IDR has been observed. Split out so the branch table can be
+/// unit-tested without owning a real encoder or pipeline.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IdrWaitStep {
+    /// Skip the current frame, no other side effects.
+    SkipFrame,
+    /// Skip the current frame AND set the force_keyframe flag so the encoder
+    /// emits another IDR soon. Used when an undersized IDR arrives (blank
+    /// desktop produces tiny IDRs that Chrome rejects).
+    SkipAndForceKeyframe,
+    /// Skip the current frame AND set force_keyframe AND reset the wait clock.
+    /// Used between attempts when the wait timeout fires but we haven't yet
+    /// hit the encoder-reset threshold.
+    SkipForceKeyframeAndResetClock,
+    /// Skip the current frame AND request the encoder reset AND reset the
+    /// wait clock + attempt counter. Used after `idr_wait_attempts > 5` and
+    /// `encoder_reset_count < MAX_ENCODER_RESETS`.
+    SkipResetEncoderAndCounters,
+    /// Stop waiting and proceed with P-frames. Used after the encoder reset
+    /// threshold is exhausted — fallback so the stream is never permanently
+    /// stuck.
+    ProceedWithPFrames,
+    /// Accept this IDR as the first frame and proceed normally.
+    AcceptIdr,
+    /// Not in waiting state — pass through to the regular send path.
+    NotWaiting,
+}
+
+/// Snapshot of the IDR-wait state machine's inputs for `classify_idr_wait_step`.
+/// Bundled into a struct so the helper has a tractable signature.
+#[derive(Debug)]
+pub(crate) struct IdrWaitInputs {
+    pub waiting_for_idr: bool,
+    pub is_idr: bool,
+    pub data_len: usize,
+    pub min_idr_size: usize,
+    pub elapsed_ms: u64,
+    pub wait_timeout_ms: u64,
+    pub idr_wait_attempts: u32,
+    pub attempt_threshold: u32,
+    pub encoder_reset_count: u32,
+    pub max_encoder_resets: u32,
+}
+
+/// Classify the IDR-wait state-machine step for one encoded frame. Pure
+/// function over the relevant state — the production loop applies the
+/// returned action and the side-effect flags (force_keyframe, reset
+/// counters) live outside this helper for testability.
+pub(crate) fn classify_idr_wait_step(inputs: &IdrWaitInputs) -> IdrWaitStep {
+    if !inputs.waiting_for_idr {
+        return IdrWaitStep::NotWaiting;
+    }
+    let undersized_idr = inputs.is_idr && inputs.data_len < inputs.min_idr_size;
+    let needs_wait = !inputs.is_idr || inputs.data_len < inputs.min_idr_size;
+    if !needs_wait {
+        return IdrWaitStep::AcceptIdr;
+    }
+    // We're going to skip this frame; pick the strongest applicable action.
+    let timeout_elapsed = inputs.elapsed_ms > inputs.wait_timeout_ms;
+    if timeout_elapsed {
+        // The wait clock has fired. Pick between reset-encoder vs
+        // force-keyframe paths based on attempt counter.
+        let attempts_after_inc = inputs.idr_wait_attempts + 1;
+        if attempts_after_inc > inputs.attempt_threshold {
+            if inputs.encoder_reset_count < inputs.max_encoder_resets {
+                return IdrWaitStep::SkipResetEncoderAndCounters;
+            }
+            return IdrWaitStep::ProceedWithPFrames;
+        }
+        return IdrWaitStep::SkipForceKeyframeAndResetClock;
+    }
+    if undersized_idr {
+        return IdrWaitStep::SkipAndForceKeyframe;
+    }
+    IdrWaitStep::SkipFrame
+}
 
 /// Write encoded video frames as WebSocket binary messages.
 /// Each frame is prefixed with a 24-byte VideoFrameHeader.
@@ -53,58 +131,77 @@ pub(crate) async fn run_video_send_loop(
         // VideoDecoder rejects with EncodingError. Wait for real desktop content
         // which produces IDRs of at least 1KB.
         const MIN_IDR_SIZE: usize = 1024;
+        const ATTEMPT_THRESHOLD: u32 = 5;
         if waiting_for_idr {
-            if !is_idr || data.len() < MIN_IDR_SIZE {
-                if is_idr && data.len() < MIN_IDR_SIZE {
+            let elapsed_ms = idr_wait_start.elapsed().as_millis() as u64;
+            let step = classify_idr_wait_step(&IdrWaitInputs {
+                waiting_for_idr: true,
+                is_idr,
+                data_len: data.len(),
+                min_idr_size: MIN_IDR_SIZE,
+                elapsed_ms,
+                wait_timeout_ms: 500,
+                idr_wait_attempts,
+                attempt_threshold: ATTEMPT_THRESHOLD,
+                encoder_reset_count,
+                max_encoder_resets: MAX_ENCODER_RESETS,
+            });
+            match step {
+                IdrWaitStep::SkipFrame => continue,
+                IdrWaitStep::SkipAndForceKeyframe => {
                     debug!(
                         size = data.len(),
                         min = MIN_IDR_SIZE,
                         "Skipping undersized IDR (desktop likely still blank)"
                     );
-                    // Force another keyframe soon
                     force_keyframe.store(true, Ordering::Relaxed);
-                }
-                if idr_wait_start.elapsed() > Duration::from_millis(500) {
-                    idr_wait_attempts += 1;
-                    if idr_wait_attempts > 5 {
-                        if encoder_reset_count < MAX_ENCODER_RESETS {
-                            encoder_reset_count += 1;
-                            warn!(
-                                attempts = idr_wait_attempts,
-                                reset = encoder_reset_count,
-                                max_resets = MAX_ENCODER_RESETS,
-                                "Failed to get IDR, resetting encoder pipeline"
-                            );
-                            let _ = capture_cmd_tx.send(CaptureCommand::ResetEncoder);
-                            idr_wait_start = Instant::now();
-                            idr_wait_attempts = 0;
-                        } else {
-                            error!(
-                                resets = encoder_reset_count,
-                                "Exhausted encoder resets, proceeding with P-frames"
-                            );
-                            waiting_for_idr = false;
-                        }
-                    } else {
-                        info!(
-                            attempt = idr_wait_attempts,
-                            waited_ms = idr_wait_start.elapsed().as_millis() as u64,
-                            "IDR wait timeout, forcing another keyframe"
-                        );
-                        force_keyframe.store(true, Ordering::Relaxed);
-                        idr_wait_start = Instant::now();
-                    }
-                }
-                if waiting_for_idr {
                     continue;
                 }
+                IdrWaitStep::SkipForceKeyframeAndResetClock => {
+                    idr_wait_attempts += 1;
+                    info!(
+                        attempt = idr_wait_attempts,
+                        waited_ms = elapsed_ms,
+                        "IDR wait timeout, forcing another keyframe"
+                    );
+                    force_keyframe.store(true, Ordering::Relaxed);
+                    idr_wait_start = Instant::now();
+                    continue;
+                }
+                IdrWaitStep::SkipResetEncoderAndCounters => {
+                    idr_wait_attempts += 1;
+                    encoder_reset_count += 1;
+                    warn!(
+                        attempts = idr_wait_attempts,
+                        reset = encoder_reset_count,
+                        max_resets = MAX_ENCODER_RESETS,
+                        "Failed to get IDR, resetting encoder pipeline"
+                    );
+                    let _ = capture_cmd_tx.send(CaptureCommand::ResetEncoder);
+                    idr_wait_start = Instant::now();
+                    idr_wait_attempts = 0;
+                    continue;
+                }
+                IdrWaitStep::ProceedWithPFrames => {
+                    error!(
+                        resets = encoder_reset_count,
+                        "Exhausted encoder resets, proceeding with P-frames"
+                    );
+                    waiting_for_idr = false;
+                }
+                IdrWaitStep::AcceptIdr => {
+                    info!(
+                        size = data.len(),
+                        waited_ms = elapsed_ms,
+                        "First IDR frame, starting video stream"
+                    );
+                    waiting_for_idr = false;
+                }
+                IdrWaitStep::NotWaiting => {
+                    // Unreachable: we just checked `waiting_for_idr` above.
+                    waiting_for_idr = false;
+                }
             }
-            info!(
-                size = data.len(),
-                waited_ms = idr_wait_start.elapsed().as_millis() as u64,
-                "First IDR frame, starting video stream"
-            );
-            waiting_for_idr = false;
         }
 
         // Build binary frame: VideoFrameHeader + H.264 payload
@@ -674,5 +771,194 @@ mod tests {
         }
         // Tiny IDR skipped, real IDR + P-frame sent = 2 frames
         assert_eq!(count, 2, "Undersized IDR should be skipped");
+    }
+
+    // --- classify_idr_wait_step ---
+
+    /// Builder helper: defaults are "in the waiting state, no timeout, no
+    /// attempts, threshold 5, no resets yet, max 3, min_idr_size 1024".
+    /// Individual tests override only the field they care about.
+    fn wait_inputs() -> IdrWaitInputs {
+        IdrWaitInputs {
+            waiting_for_idr: true,
+            is_idr: false,
+            data_len: 200,
+            min_idr_size: 1024,
+            elapsed_ms: 0,
+            wait_timeout_ms: 500,
+            idr_wait_attempts: 0,
+            attempt_threshold: 5,
+            encoder_reset_count: 0,
+            max_encoder_resets: 3,
+        }
+    }
+
+    #[test]
+    fn idr_wait_not_waiting_passes_through() {
+        // When waiting_for_idr=false, the helper short-circuits.
+        let mut i = wait_inputs();
+        i.waiting_for_idr = false;
+        assert_eq!(classify_idr_wait_step(&i), IdrWaitStep::NotWaiting);
+    }
+
+    #[test]
+    fn idr_wait_accept_real_idr() {
+        // A real IDR (size >= MIN_IDR_SIZE) accepts immediately.
+        let mut i = wait_inputs();
+        i.is_idr = true;
+        i.data_len = 2048;
+        assert_eq!(classify_idr_wait_step(&i), IdrWaitStep::AcceptIdr);
+    }
+
+    #[test]
+    fn idr_wait_p_frame_skipped_silently_within_timeout() {
+        // P-frame before timeout: just skip, no side effects.
+        let mut i = wait_inputs();
+        i.elapsed_ms = 100;
+        assert_eq!(classify_idr_wait_step(&i), IdrWaitStep::SkipFrame);
+    }
+
+    #[test]
+    fn idr_wait_undersized_idr_within_timeout_forces_keyframe() {
+        // Undersized IDR triggers a force-keyframe request.
+        let mut i = wait_inputs();
+        i.is_idr = true;
+        i.data_len = 500;
+        i.elapsed_ms = 100;
+        assert_eq!(
+            classify_idr_wait_step(&i),
+            IdrWaitStep::SkipAndForceKeyframe
+        );
+    }
+
+    #[test]
+    fn idr_wait_timeout_under_attempt_threshold_forces_and_resets_clock() {
+        // Timeout but only attempt 1 (< threshold 5) — force keyframe + reset clock.
+        let mut i = wait_inputs();
+        i.elapsed_ms = 600;
+        assert_eq!(
+            classify_idr_wait_step(&i),
+            IdrWaitStep::SkipForceKeyframeAndResetClock
+        );
+    }
+
+    #[test]
+    fn idr_wait_attempts_exceed_threshold_triggers_encoder_reset() {
+        // attempts=5, increments to 6 → > threshold 5; encoder_reset_count=0 < 3
+        // → reset path.
+        let mut i = wait_inputs();
+        i.elapsed_ms = 600;
+        i.idr_wait_attempts = 5;
+        assert_eq!(
+            classify_idr_wait_step(&i),
+            IdrWaitStep::SkipResetEncoderAndCounters
+        );
+    }
+
+    #[test]
+    fn idr_wait_exhausted_resets_proceeds_with_p_frames() {
+        // attempts > threshold AND encoder_reset_count == max → fallback to
+        // P-frames. (Same as 'gave up' state in the production loop.)
+        let mut i = wait_inputs();
+        i.elapsed_ms = 600;
+        i.idr_wait_attempts = 6;
+        i.encoder_reset_count = 3;
+        assert_eq!(classify_idr_wait_step(&i), IdrWaitStep::ProceedWithPFrames);
+    }
+
+    #[test]
+    fn idr_wait_exhausted_one_over_max_also_proceeds() {
+        // encoder_reset_count > max also exits to P-frames.
+        let mut i = wait_inputs();
+        i.elapsed_ms = 600;
+        i.idr_wait_attempts = 7;
+        i.encoder_reset_count = 4;
+        assert_eq!(classify_idr_wait_step(&i), IdrWaitStep::ProceedWithPFrames);
+    }
+
+    #[test]
+    fn idr_wait_timeout_exact_boundary_does_not_trigger() {
+        // elapsed_ms == wait_timeout_ms uses `>`, so equality does NOT trigger.
+        let mut i = wait_inputs();
+        i.elapsed_ms = 500;
+        assert_eq!(classify_idr_wait_step(&i), IdrWaitStep::SkipFrame);
+    }
+
+    #[test]
+    fn idr_wait_timeout_just_over_boundary_triggers() {
+        // 501ms > 500ms — triggers the timeout path.
+        let mut i = wait_inputs();
+        i.elapsed_ms = 501;
+        assert_eq!(
+            classify_idr_wait_step(&i),
+            IdrWaitStep::SkipForceKeyframeAndResetClock
+        );
+    }
+
+    #[test]
+    fn idr_wait_step_enum_has_unique_variants() {
+        // Smoke test the Debug + PartialEq derives are healthy.
+        let steps = [
+            IdrWaitStep::SkipFrame,
+            IdrWaitStep::SkipAndForceKeyframe,
+            IdrWaitStep::SkipForceKeyframeAndResetClock,
+            IdrWaitStep::SkipResetEncoderAndCounters,
+            IdrWaitStep::ProceedWithPFrames,
+            IdrWaitStep::AcceptIdr,
+            IdrWaitStep::NotWaiting,
+        ];
+        // Each variant should be distinguishable from the others.
+        for (i, a) in steps.iter().enumerate() {
+            for (j, b) in steps.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn idr_wait_idr_at_min_idr_size_is_accepted() {
+        // data_len == min_idr_size uses `<`, so equality DOES NOT undersize.
+        let mut i = wait_inputs();
+        i.is_idr = true;
+        i.data_len = 1024;
+        assert_eq!(classify_idr_wait_step(&i), IdrWaitStep::AcceptIdr);
+    }
+
+    #[test]
+    fn idr_wait_idr_one_byte_below_min_is_undersized() {
+        let mut i = wait_inputs();
+        i.is_idr = true;
+        i.data_len = 1023;
+        assert_eq!(
+            classify_idr_wait_step(&i),
+            IdrWaitStep::SkipAndForceKeyframe
+        );
+    }
+
+    #[test]
+    fn idr_wait_p_frame_at_exact_attempt_threshold_still_force_keyframe() {
+        // attempts = threshold (5) → increments to 6 → > threshold 5 → reset path.
+        // Test the boundary: attempts = threshold - 1 = 4 → increments to 5,
+        // which is NOT > 5, so we get the force-keyframe path.
+        let mut i = wait_inputs();
+        i.elapsed_ms = 600;
+        i.idr_wait_attempts = 4;
+        assert_eq!(
+            classify_idr_wait_step(&i),
+            IdrWaitStep::SkipForceKeyframeAndResetClock
+        );
+    }
+
+    #[test]
+    fn idr_wait_inputs_struct_debug_works() {
+        // The struct is `#[derive(Debug)]` so log messages can pin it.
+        let i = wait_inputs();
+        let dbg = format!("{i:?}");
+        assert!(dbg.contains("IdrWaitInputs"));
+        assert!(dbg.contains("waiting_for_idr"));
     }
 }
