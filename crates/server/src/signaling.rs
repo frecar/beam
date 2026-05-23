@@ -90,6 +90,31 @@ pub(crate) enum BrowserMessageOutcome {
 /// Parse a browser→server text frame into one of the [`BrowserMessageOutcome`]
 /// variants. Split out so the dispatch can be unit-tested without driving a
 /// real WebSocket. Error message text is included for diagnostic surfaces.
+/// Decide whether the browser-WS loop should log the "first frames"
+/// info line for this video frame count. Production logs the first 3
+/// frames to confirm the pipeline started, then goes silent. Pure
+/// helper around the threshold.
+pub(crate) fn should_log_initial_video_frame(count: u64) -> bool {
+    count <= 3
+}
+
+/// Decide whether the agent-WS pong-timeout has elapsed. Pure helper
+/// for the timeout-vs-keepalive decision.
+pub(crate) fn pong_timeout_elapsed(elapsed_ms: u64, timeout_ms: u64) -> bool {
+    elapsed_ms > timeout_ms
+}
+
+/// Build the "browser replaced by new connection" log line. Pure helper.
+pub(crate) fn browser_replaced_message() -> &'static str {
+    "Browser replaced by new connection"
+}
+
+/// Build the "invalid browser message" format string. Pure helper —
+/// includes the error so the browser sees what went wrong.
+pub(crate) fn invalid_browser_message_format(err: &str) -> String {
+    format!("Invalid message format: {err}")
+}
+
 pub(crate) fn parse_browser_text(text: &str) -> BrowserMessageOutcome {
     match serde_json::from_str::<InputEvent>(text) {
         Ok(InputEvent::ClientMetricsPing { id, sent_ms }) => {
@@ -110,7 +135,7 @@ pub(crate) enum AgentTextOutcome {
     /// Shut down the agent (clean exit).
     Shutdown,
     /// Malformed JSON or unknown shape — log + ignore.
-    Invalid(String),
+    Invalid(#[allow(dead_code)] String),
 }
 
 /// Parse an agent-side incoming text frame as an [`AgentCommand`]. Split out
@@ -205,7 +230,7 @@ pub async fn handle_browser_ws(
         tokio::select! {
             // Kicked by a newer browser connection
             _ = &mut kicked => {
-                tracing::info!(%session_id, "Browser replaced by new connection");
+                tracing::info!(%session_id, "{}", browser_replaced_message());
                 // Tell the old browser why it's being disconnected
                 let msg = SignalingMessage::Error {
                     message: "replaced".to_string(),
@@ -217,7 +242,10 @@ pub async fn handle_browser_ws(
             }
             // Send periodic WebSocket ping frames
             _ = ping_interval.tick() => {
-                if last_pong.elapsed() > WS_PONG_TIMEOUT {
+                if pong_timeout_elapsed(
+                    last_pong.elapsed().as_millis() as u64,
+                    WS_PONG_TIMEOUT.as_millis() as u64,
+                ) {
                     tracing::debug!(%session_id, "Browser WebSocket ping timeout, closing");
                     break;
                 }
@@ -246,7 +274,7 @@ pub async fn handle_browser_ws(
                 match result {
                     Ok(frame) => {
                         video_frames_relayed += 1;
-                        if video_frames_relayed <= 3 {
+                        if should_log_initial_video_frame(video_frames_relayed) {
                             tracing::info!(%session_id, size = frame.len(), frame = video_frames_relayed, "Relaying binary frame to browser");
                         }
                         if socket.send(Message::Binary(frame.to_vec().into())).await.is_err() {
@@ -290,7 +318,7 @@ pub async fn handle_browser_ws(
                             BrowserMessageOutcome::InvalidJson(e) => {
                                 tracing::warn!(%session_id, "Invalid browser message: {e}");
                                 let err = SignalingMessage::Error {
-                                    message: format!("Invalid message format: {e}"),
+                                    message: invalid_browser_message_format(&e),
                                 };
                                 let json = serde_json::to_string(&err).unwrap_or_default();
                                 let _ = socket.send(Message::Text(json.into())).await;
@@ -339,7 +367,10 @@ pub async fn handle_agent_ws(mut socket: WebSocket, session_id: Uuid, registry: 
         tokio::select! {
             // Send periodic WebSocket ping frames
             _ = ping_interval.tick() => {
-                if last_pong.elapsed() > WS_PONG_TIMEOUT {
+                if pong_timeout_elapsed(
+                    last_pong.elapsed().as_millis() as u64,
+                    WS_PONG_TIMEOUT.as_millis() as u64,
+                ) {
                     tracing::debug!(%session_id, "Agent WebSocket ping timeout, closing");
                     break;
                 }
@@ -849,5 +880,72 @@ mod tests {
             AgentTextOutcome::Invalid(_) => {}
             other => panic!("Expected Invalid, got {other:?}"),
         }
+    }
+
+    // --- should_log_initial_video_frame ---
+
+    #[test]
+    fn initial_frame_logs_first_three() {
+        assert!(should_log_initial_video_frame(1));
+        assert!(should_log_initial_video_frame(2));
+        assert!(should_log_initial_video_frame(3));
+    }
+
+    #[test]
+    fn initial_frame_skips_from_fourth_onwards() {
+        assert!(!should_log_initial_video_frame(4));
+        assert!(!should_log_initial_video_frame(100));
+        assert!(!should_log_initial_video_frame(u64::MAX));
+    }
+
+    #[test]
+    fn initial_frame_logs_at_zero_count() {
+        // Defensive — the production code never asks at count=0, but
+        // the helper must not panic.
+        assert!(should_log_initial_video_frame(0));
+    }
+
+    // --- pong_timeout_elapsed ---
+
+    #[test]
+    fn pong_timeout_elapsed_true_when_exceeded() {
+        assert!(pong_timeout_elapsed(31_000, 30_000));
+        assert!(pong_timeout_elapsed(u64::MAX, 30_000));
+    }
+
+    #[test]
+    fn pong_timeout_elapsed_false_when_under() {
+        assert!(!pong_timeout_elapsed(29_000, 30_000));
+        assert!(!pong_timeout_elapsed(0, 30_000));
+    }
+
+    #[test]
+    fn pong_timeout_elapsed_strict_greater_than() {
+        // Exactly at timeout is NOT yet "elapsed".
+        assert!(!pong_timeout_elapsed(30_000, 30_000));
+    }
+
+    // --- browser_replaced_message ---
+
+    #[test]
+    fn browser_replaced_message_static() {
+        let m = browser_replaced_message();
+        assert!(m.contains("Browser replaced"));
+        assert!(m.contains("new connection"));
+    }
+
+    // --- invalid_browser_message_format ---
+
+    #[test]
+    fn invalid_browser_message_includes_error() {
+        let m = invalid_browser_message_format("expected `,` at line 1");
+        assert!(m.contains("Invalid message format"));
+        assert!(m.contains("expected `,`"));
+    }
+
+    #[test]
+    fn invalid_browser_message_handles_empty_error() {
+        let m = invalid_browser_message_format("");
+        assert!(m.starts_with("Invalid message format"));
     }
 }

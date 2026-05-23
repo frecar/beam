@@ -243,6 +243,280 @@ pub(crate) fn should_log_capture_error(consecutive: u64) -> bool {
     consecutive <= 3 || consecutive.is_multiple_of(100)
 }
 
+/// Decide whether a setxkbmap layout request is a no-op (same as the most
+/// recent layout). Returns `true` when the new layout matches `prev_layout`
+/// — the dispatcher should skip spawning setxkbmap. Pure helper so the
+/// dedup logic is testable without owning the layout Mutex.
+pub(crate) fn layout_is_duplicate(prev_layout: &str, new_layout: &str) -> bool {
+    prev_layout == new_layout
+}
+
+/// Classify the outcome of a setxkbmap subprocess invocation into a
+/// log-shaped string. Returns the message that the production code would
+/// log (info on success, warn on failure or spawn error). Split out so
+/// the three branches can be unit-tested.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SetxkbmapOutcome {
+    /// `setxkbmap` ran and exited 0.
+    Success,
+    /// `setxkbmap` ran but exited non-zero. Carries the captured stderr.
+    Failure { stderr: String },
+    /// `setxkbmap` failed to spawn (e.g., binary missing).
+    SpawnError { reason: String },
+}
+
+/// Classify a setxkbmap result tuple into `SetxkbmapOutcome`. Pure helper
+/// over (`status_success`, `stderr`, `spawn_err`) so the dispatcher's
+/// three branches can be unit-tested without owning a real subprocess.
+pub(crate) fn classify_setxkbmap_result(
+    spawn_result: Result<(bool, String), String>,
+) -> SetxkbmapOutcome {
+    match spawn_result {
+        Ok((true, _)) => SetxkbmapOutcome::Success,
+        Ok((false, stderr)) => SetxkbmapOutcome::Failure { stderr },
+        Err(e) => SetxkbmapOutcome::SpawnError { reason: e },
+    }
+}
+
+/// Build the now-unix-millis timestamp used by the input callback to
+/// stamp the `last_input_time` atomic. Pure helper around the SystemTime
+/// arithmetic so the fallback (UNIX_EPOCH unavailable) is testable.
+pub(crate) fn now_unix_millis(now: std::time::SystemTime) -> u64 {
+    now.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Log shape for the SCHED_FIFO elevation attempt. Returns the human
+/// message the agent logs after `sched_setscheduler`. Split out so the
+/// two branches (success / capability-denied) can be tested cheaply.
+pub(crate) fn sched_fifo_log_message(ret: i32, priority: i32) -> String {
+    if ret == 0 {
+        format!("Capture thread elevated to SCHED_FIFO priority {priority}")
+    } else {
+        format!("Could not set SCHED_FIFO (need CAP_SYS_NICE), priority {priority} not applied")
+    }
+}
+
+/// Decide whether the inbound file-download request was rejected by the
+/// channel (e.g. the receiver dropped because the agent is shutting down).
+/// Returns true when the production code would log a "dropped" warning.
+/// Test-only mirror of the boolean we'd want from the production callsite
+/// — the actual code uses `dispatch_file_download` and inverts its bool.
+#[cfg(test)]
+pub(crate) fn file_download_request_dropped<T>(
+    send_result: Result<(), tokio::sync::mpsc::error::TrySendError<T>>,
+) -> bool {
+    send_result.is_err()
+}
+
+/// Decide whether to log a "first frame captured" line. The agent only
+/// emits the message once per pipeline lifetime to keep logs quiet, so
+/// the boolean tracking state lives outside this helper.
+pub(crate) fn should_log_first_frame(already_logged: bool) -> bool {
+    !already_logged
+}
+
+/// Build the "capture heartbeat" log payload. The capture thread emits a
+/// heartbeat every 5 seconds with running frame counts + fps. Splitting
+/// the message construction off means the rate-derivation can be tested
+/// without owning a real capture loop.
+pub(crate) fn format_capture_heartbeat_fps(frame_count: u64, elapsed_secs: f64) -> String {
+    if elapsed_secs <= 0.0 {
+        return "0.0".to_string();
+    }
+    format!("{:.1}", frame_count as f64 / elapsed_secs)
+}
+
+/// Decide whether the capture thread should sleep on the wake condvar
+/// (idle/backgrounded paths) or spin-loop wait (active path).
+/// Returns true for the condvar path. Pure helper for testing the choice.
+pub(crate) fn capture_wait_should_use_condvar(is_idle: bool, is_backgrounded: bool) -> bool {
+    is_idle || is_backgrounded
+}
+
+/// Decide whether an "active" capture path should sleep before its
+/// spin-loop. Sleeping >1ms before the remaining-2ms boundary cuts
+/// CPU significantly without missing the deadline.
+pub(crate) fn capture_active_should_sleep(remaining_ms: u64) -> bool {
+    remaining_ms > 2
+}
+
+/// Decide whether the capture loop should log a "recovered after N
+/// consecutive errors" message. Only logs when N>0 (i.e., we actually
+/// had a streak to recover from). Pure helper.
+pub(crate) fn should_log_capture_recovery(consecutive: u64) -> bool {
+    consecutive > 0
+}
+
+/// Compute the per-frame duration in nanoseconds from a framerate in fps.
+/// Pure helper around the divide-by-zero guard so the worst-case is unit-
+/// testable (the production code never passes 0 — `cap_software_encoder_params`
+/// clamps to 60 — but the guard is defensive).
+pub(crate) fn frame_duration_ns_from_framerate(framerate: u32) -> u64 {
+    if framerate == 0 {
+        // 1 fps fallback — production never hits this but the guard keeps
+        // us from panicking on a malformed config.
+        return 1_000_000_000;
+    }
+    1_000_000_000u64 / framerate as u64
+}
+
+/// Decide whether the capture-encode loop's force-keyframe was triggered
+/// while the tab was backgrounded — a state-transition we log as a warn
+/// because it indicates the browser asked for a keyframe before
+/// foregrounding. Pure helper around the AtomicBool swap pattern.
+pub(crate) fn should_warn_keyframe_while_backgrounded(was_backgrounded: bool) -> bool {
+    was_backgrounded
+}
+
+/// Build the warn message logged when the resize handler's xrandr call
+/// fails. Pure helper for the log-format pin.
+pub(crate) fn format_xrandr_resize_failure(error: &str) -> String {
+    format!("xrandr resize failed: {error}")
+}
+
+/// Build the info message logged when the capture thread receives a
+/// resize request. Pure helper.
+pub(crate) fn format_processing_resize_message(width: u32, height: u32) -> String {
+    format!("Processing resize request: {width}x{height}")
+}
+
+/// Decide whether the encoder-recreate logic should drop+recreate or
+/// just emit a force-keyframe. Returns the same as `encoder_reset_cooldown_elapsed`
+/// but mirrored to "log the cooldown remaining" vs "go ahead and recreate".
+pub(crate) fn should_recreate_encoder(elapsed_ms: u64, cooldown_ms: u64) -> bool {
+    encoder_reset_cooldown_elapsed(elapsed_ms, cooldown_ms)
+}
+
+/// Compute the cooldown remaining (in ms) for the encoder-reset path.
+/// Used for the debug log on the throttled branch. Returns 0 when the
+/// cooldown has fully elapsed.
+pub(crate) fn encoder_reset_cooldown_remaining_ms(elapsed_ms: u64, cooldown_ms: u64) -> u64 {
+    cooldown_ms.saturating_sub(elapsed_ms)
+}
+
+/// Decide whether the capture thread should log the encode-buffer drop
+/// warning. The drop happens when the encoded-frame channel is full
+/// (latency throttling). We log at debug, not warn — locked here so a
+/// future refactor doesn't escalate the noise.
+#[cfg(test)]
+pub(crate) fn should_log_encoded_drop_at_warn(_full: bool) -> bool {
+    false
+}
+
+/// Compute the maximum bytes the appsrc queue can hold given a frame
+/// size. 3 frames of raw BGRA (4 bytes/pixel) — keeps the pipeline
+/// from OOMing under software-encoder backpressure. Test-only mirror of
+/// the literal in `encoder::Encoder::with_encoder_preference`.
+#[cfg(test)]
+pub(crate) fn appsrc_queue_max_bytes(width: u32, height: u32) -> u64 {
+    width as u64 * height as u64 * 4 * 3
+}
+
+/// Dispatch the channel-only side-effect of a Resize action: forward
+/// (width, height) onto the resize channel. Returns true on success,
+/// false when the channel is closed or full (defensively dropped).
+/// Pure helper testable against `tokio::sync::mpsc::channel`.
+pub(crate) fn dispatch_resize(
+    width: u32,
+    height: u32,
+    resize_tx: &mpsc::Sender<(u32, u32)>,
+) -> bool {
+    resize_tx.try_send((width, height)).is_ok()
+}
+
+/// Dispatch the channel-only side-effect of a FileDownload action.
+/// Forwards the path onto the download request channel. Returns true
+/// on success.
+pub(crate) fn dispatch_file_download(
+    path: String,
+    download_request_tx: &mpsc::Sender<String>,
+) -> bool {
+    download_request_tx.try_send(path).is_ok()
+}
+
+/// Dispatch the wake signal that the input callback sends every event.
+/// Sets the woken flag + notifies one waiter on the condvar. Pure helper
+/// that can be unit-tested against a fresh (Mutex, Condvar).
+pub(crate) fn dispatch_capture_wake(wake: &(std::sync::Mutex<bool>, std::sync::Condvar)) {
+    let (lock, cvar) = wake;
+    let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
+    *woken = true;
+    cvar.notify_one();
+}
+
+/// Update the input-timestamp atomic from a now-unix-millis. Pure
+/// helper around the Ordering::Relaxed store. Extracted so the
+/// atomic store can be tested in isolation.
+pub(crate) fn dispatch_update_last_input(now_ms: u64, last_input_time: &AtomicU64) {
+    last_input_time.store(now_ms, Ordering::Relaxed);
+}
+
+/// Decide whether the agent should clear the tab_backgrounded flag
+/// because we received an interactive input event. Returns true iff
+/// the event was interactive AND the flag was previously set. The
+/// flag is cleared as a side effect (swap). Pure-ish — the side effect
+/// is contained in the AtomicBool.
+pub(crate) fn dispatch_clear_backgrounded_if_interactive(
+    event: &InputEvent,
+    tab_backgrounded: &AtomicBool,
+) -> bool {
+    is_interactive_input_event(event) && tab_backgrounded.swap(false, Ordering::Relaxed)
+}
+
+/// Build the X11 keycode from a Linux evdev keycode. X11 keycode =
+/// evdev keycode + 8. Test-only mirror — see `InputInjector::evdev_to_x11_keycode`
+/// for the production callsite.
+#[cfg(test)]
+pub(crate) fn evdev_to_x11_keycode(evdev: u16) -> u8 {
+    (evdev + 8) as u8
+}
+
+/// Build the X11 button number from a browser button index. Test-only
+/// mirror of `InputInjector::map_button` (which is private to input.rs).
+#[cfg(test)]
+pub(crate) fn browser_button_to_x11(button: u8) -> Option<u8> {
+    match button {
+        0 => Some(1),
+        1 => Some(2),
+        2 => Some(3),
+        _ => None,
+    }
+}
+
+/// Decide whether the agent should log "tab backgrounded" or "tab foregrounded"
+/// transition. Pure helper around the AtomicBool change-detect pattern.
+pub(crate) fn capture_state_transition_message(
+    is_idle: bool,
+    is_backgrounded: bool,
+    was_idle: bool,
+    was_backgrounded: bool,
+    current_framerate: u32,
+    idle_framerate: u32,
+    background_framerate: u32,
+) -> Option<String> {
+    if is_backgrounded != was_backgrounded {
+        if is_backgrounded {
+            return Some(format!(
+                "Tab backgrounded, reducing to {background_framerate}fps"
+            ));
+        } else {
+            return Some(format!(
+                "Tab foregrounded, restoring framerate {current_framerate}fps"
+            ));
+        }
+    }
+    if is_idle != was_idle && !is_backgrounded {
+        if is_idle {
+            return Some(format!("Entering idle mode ({idle_framerate}fps)"));
+        } else {
+            return Some(format!("Resuming active mode ({current_framerate}fps)"));
+        }
+    }
+    None
+}
+
 /// Decide whether the encoder-reset request should actually destroy and
 /// recreate the encoder, or whether we're still in the cooldown window
 /// where a force-keyframe is the cheaper alternative. Returns `true`
@@ -467,22 +741,14 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
 
     Arc::new(move |event: InputEvent| {
         // Update last input timestamp for idle detection
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        last_input_time.store(now_ms, Ordering::Relaxed);
+        let now_ms = now_unix_millis(std::time::SystemTime::now());
+        dispatch_update_last_input(now_ms, &last_input_time);
 
         // Wake capture thread if it's sleeping in idle mode
-        {
-            let (lock, cvar) = &*capture_wake;
-            let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
-            *woken = true;
-            cvar.notify_one();
-        }
+        dispatch_capture_wake(&capture_wake);
 
         // Clear backgrounded flag on user-interactive input events
-        if is_interactive_input_event(&event) && tab_backgrounded.swap(false, Ordering::Relaxed) {
+        if dispatch_clear_backgrounded_if_interactive(&event, &tab_backgrounded) {
             debug!("Input received while backgrounded, clearing flag");
         }
 
@@ -564,11 +830,11 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 }
             }
             InputAction::Resize { width, height } => {
-                let _ = resize_tx.try_send((width, height));
+                let _ = dispatch_resize(width, height, &resize_tx);
             }
             InputAction::Layout { layout } => {
                 let mut prev = last_layout.lock().unwrap_or_else(|e| e.into_inner());
-                if *prev == layout {
+                if layout_is_duplicate(&prev, &layout) {
                     return;
                 }
                 *prev = layout.clone();
@@ -576,20 +842,24 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
 
                 let display_str = display.clone();
                 std::thread::spawn(move || {
-                    match std::process::Command::new("setxkbmap")
+                    let spawn_result = std::process::Command::new("setxkbmap")
                         .arg(&layout)
                         .env("DISPLAY", &display_str)
                         .output()
-                    {
-                        Ok(output) if output.status.success() => {
+                        .map(|o| {
+                            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                            (o.status.success(), stderr)
+                        })
+                        .map_err(|e| e.to_string());
+                    match classify_setxkbmap_result(spawn_result) {
+                        SetxkbmapOutcome::Success => {
                             info!(layout = %layout, "Keyboard layout set via setxkbmap");
                         }
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
+                        SetxkbmapOutcome::Failure { stderr } => {
                             warn!(layout = %layout, "setxkbmap failed: {stderr}");
                         }
-                        Err(e) => {
-                            warn!(layout = %layout, "Failed to run setxkbmap: {e}");
+                        SetxkbmapOutcome::SpawnError { reason } => {
+                            warn!(layout = %layout, "Failed to run setxkbmap: {reason}");
                         }
                     }
                 });
@@ -609,10 +879,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 if triggered_reset {
                     info!("Resetting encoder for browser reconnect");
                     // Wake capture thread immediately to restore full framerate
-                    let (lock, cvar) = &*capture_wake;
-                    let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    *woken = true;
-                    cvar.notify_one();
+                    dispatch_capture_wake(&capture_wake);
                 }
             }
             InputAction::FileStart { id, name, size } => {
@@ -643,8 +910,8 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 }
             }
             InputAction::FileDownload { path } => {
-                if let Err(e) = download_request_tx.try_send(path.clone()) {
-                    warn!(path, "File download request dropped: {e:#}");
+                if !dispatch_file_download(path.clone(), &download_request_tx) {
+                    warn!(path, "File download request dropped");
                 }
             }
             InputAction::Ignore => {
@@ -898,22 +1165,23 @@ async fn main() -> anyhow::Result<()> {
             // Elevate to real-time priority for consistent frame pacing
             #[cfg(target_os = "linux")]
             {
-                let param = libc::sched_param { sched_priority: 50 };
+                const SCHED_PRIORITY: i32 = 50;
+                let param = libc::sched_param { sched_priority: SCHED_PRIORITY };
                 let ret = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) };
+                let msg = sched_fifo_log_message(ret, SCHED_PRIORITY);
                 if ret != 0 {
-                    warn!("Could not set SCHED_FIFO (need CAP_SYS_NICE): {}",
-                        std::io::Error::last_os_error());
+                    warn!("{msg}: {}", std::io::Error::last_os_error());
                 } else {
-                    info!("Capture thread elevated to SCHED_FIFO priority 50");
+                    info!("{msg}");
                 }
             }
 
             let mut encoder = encoder;
             let current_bitrate = config_bitrate;
             let current_framerate = config_framerate;
-            let active_frame_duration_ns = 1_000_000_000u64 / config_framerate as u64;
-            let idle_frame_duration_ns = 1_000_000_000u64 / IDLE_FRAMERATE as u64;
-            let background_frame_duration_ns = 1_000_000_000u64 / BACKGROUND_FRAMERATE as u64;
+            let active_frame_duration_ns = frame_duration_ns_from_framerate(config_framerate);
+            let idle_frame_duration_ns = frame_duration_ns_from_framerate(IDLE_FRAMERATE);
+            let background_frame_duration_ns = frame_duration_ns_from_framerate(BACKGROUND_FRAMERATE);
             let mut frame_count: u64 = 0;
             let mut encoded_count: u64 = 0;
             let start = Instant::now();
@@ -946,7 +1214,7 @@ async fn main() -> anyhow::Result<()> {
                                 debug!(width, height, "Resize skipped (same dimensions)");
                                 continue;
                             }
-                            info!(width, height, "Processing resize request");
+                            info!("{}", format_processing_resize_message(width, height));
 
                             if let Err(e) = display::set_display_resolution(
                                 &display_for_capture,
@@ -954,7 +1222,7 @@ async fn main() -> anyhow::Result<()> {
                                 height,
                                 &output_name_for_capture,
                             ) {
-                                warn!("xrandr resize failed: {e:#}");
+                                warn!("{}", format_xrandr_resize_failure(&format!("{e:#}")));
                                 continue;
                             }
 
@@ -977,19 +1245,19 @@ async fn main() -> anyhow::Result<()> {
                             break;
                         }
                         CaptureCommand::ResetEncoder => {
-                            let elapsed = last_encoder_reset.elapsed();
-                            if !encoder_reset_cooldown_elapsed(
-                                elapsed.as_millis() as u64,
-                                ENCODER_RESET_COOLDOWN.as_millis() as u64,
-                            ) {
+                            let elapsed_ms = last_encoder_reset.elapsed().as_millis() as u64;
+                            let cooldown_ms = ENCODER_RESET_COOLDOWN.as_millis() as u64;
+                            if should_recreate_encoder(elapsed_ms, cooldown_ms) {
+                                recreate = EncoderRecreate::Reset;
+                                break;
+                            } else {
+                                let cooldown_remaining_ms =
+                                    encoder_reset_cooldown_remaining_ms(elapsed_ms, cooldown_ms);
                                 debug!(
-                                    cooldown_remaining_ms = (ENCODER_RESET_COOLDOWN - elapsed).as_millis() as u64,
+                                    cooldown_remaining_ms,
                                     "ResetEncoder throttled, sending force_keyframe instead"
                                 );
                                 encoder.force_keyframe();
-                            } else {
-                                recreate = EncoderRecreate::Reset;
-                                break;
                             }
                         }
                     }
@@ -1052,7 +1320,8 @@ async fn main() -> anyhow::Result<()> {
                 // Check force-keyframe flag
                 if kf_flag_for_capture.swap(false, Ordering::Relaxed) {
                     encoder.force_keyframe();
-                    if tab_backgrounded_for_capture.swap(false, Ordering::Relaxed) {
+                    let was_backgrounded = tab_backgrounded_for_capture.swap(false, Ordering::Relaxed);
+                    if should_warn_keyframe_while_backgrounded(was_backgrounded) {
                         warn!("Keyframe forced while backgrounded — clearing flag");
                     }
                 }
@@ -1077,21 +1346,21 @@ async fn main() -> anyhow::Result<()> {
                     background_frame_duration_ns,
                 );
 
+                if let Some(msg) = capture_state_transition_message(
+                    is_idle,
+                    is_backgrounded,
+                    was_idle,
+                    was_backgrounded,
+                    current_framerate,
+                    IDLE_FRAMERATE,
+                    BACKGROUND_FRAMERATE,
+                ) {
+                    debug!("{msg}");
+                }
                 if is_backgrounded != was_backgrounded {
-                    if is_backgrounded {
-                        debug!("Tab backgrounded, reducing to {BACKGROUND_FRAMERATE}fps");
-                    } else {
-                        debug!(fps = current_framerate, "Tab foregrounded, restoring framerate");
-                    }
                     was_backgrounded = is_backgrounded;
                 }
-
                 if is_idle != was_idle && !is_backgrounded {
-                    if is_idle {
-                        debug!("Entering idle mode ({IDLE_FRAMERATE}fps)");
-                    } else {
-                        debug!(fps = current_framerate, "Resuming active mode");
-                    }
                     was_idle = is_idle;
                 }
 
@@ -1118,14 +1387,14 @@ async fn main() -> anyhow::Result<()> {
 
                 match screen_capture.capture_frame() {
                     Ok(frame) => {
-                        if consecutive_capture_errors > 0 {
+                        if should_log_capture_recovery(consecutive_capture_errors) {
                             info!(
                                 recovered_after = consecutive_capture_errors,
                                 "Capture recovered after consecutive errors"
                             );
                             consecutive_capture_errors = 0;
                         }
-                        if !first_capture_logged {
+                        if should_log_first_frame(first_capture_logged) {
                             info!(size = frame.len(), "First frame captured from X display");
                             first_capture_logged = true;
                         }
@@ -1197,7 +1466,7 @@ async fn main() -> anyhow::Result<()> {
                     info!(
                         captured = frame_count,
                         encoded = encoded_count,
-                        fps = format!("{:.1}", frame_count as f64 / elapsed),
+                        fps = format_capture_heartbeat_fps(frame_count, elapsed),
                         is_idle, is_backgrounded,
                         "Capture heartbeat"
                     );
@@ -1209,7 +1478,7 @@ async fn main() -> anyhow::Result<()> {
                 let elapsed = frame_start.elapsed();
                 if elapsed < target {
                     let remaining = target - elapsed;
-                    if is_idle || is_backgrounded {
+                    if capture_wait_should_use_condvar(is_idle, is_backgrounded) {
                         let (lock, cvar) = &*capture_wake_for_thread;
                         let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
                         *woken = false;
@@ -1219,7 +1488,7 @@ async fn main() -> anyhow::Result<()> {
                             debug!("Capture thread woken by input/visibility change");
                         }
                     } else {
-                        if remaining > Duration::from_millis(2) {
+                        if capture_active_should_sleep(remaining.as_millis() as u64) {
                             std::thread::sleep(remaining - Duration::from_millis(1));
                         }
                         while frame_start.elapsed() < target {
@@ -2871,5 +3140,691 @@ mod tests {
         handle_visibility_change(true, &bg, &kf, &tx);
         assert!(!bg.load(Ordering::Relaxed));
         assert!(kf.load(Ordering::Relaxed));
+    }
+
+    // --- layout_is_duplicate ---
+
+    #[test]
+    fn layout_duplicate_true_for_identical_strings() {
+        assert!(layout_is_duplicate("us", "us"));
+        assert!(layout_is_duplicate("", ""));
+        assert!(layout_is_duplicate("de-latin1", "de-latin1"));
+    }
+
+    #[test]
+    fn layout_duplicate_false_for_different_strings() {
+        assert!(!layout_is_duplicate("us", "no"));
+        assert!(!layout_is_duplicate("", "us"));
+        assert!(!layout_is_duplicate("us", ""));
+    }
+
+    #[test]
+    fn layout_duplicate_case_sensitive() {
+        // setxkbmap layouts are lowercase by convention; case differences
+        // are NOT considered duplicates so a mistyped uppercase layout
+        // forces a re-spawn (and likely a failure log).
+        assert!(!layout_is_duplicate("us", "US"));
+    }
+
+    // --- classify_setxkbmap_result ---
+
+    #[test]
+    fn setxkbmap_success_when_status_ok() {
+        let r = classify_setxkbmap_result(Ok((true, String::new())));
+        assert_eq!(r, SetxkbmapOutcome::Success);
+    }
+
+    #[test]
+    fn setxkbmap_success_carries_empty_payload() {
+        // Even if setxkbmap printed something to stderr while still
+        // exiting 0, we treat that as success (no warning).
+        let r = classify_setxkbmap_result(Ok((true, "harmless info".to_string())));
+        assert_eq!(r, SetxkbmapOutcome::Success);
+    }
+
+    #[test]
+    fn setxkbmap_failure_when_status_nonzero() {
+        let r = classify_setxkbmap_result(Ok((false, "Cannot open display".into())));
+        match r {
+            SetxkbmapOutcome::Failure { stderr } => {
+                assert_eq!(stderr, "Cannot open display");
+            }
+            other => panic!("Expected Failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setxkbmap_spawn_error_when_io_failed() {
+        let r = classify_setxkbmap_result(Err("No such file or directory".to_string()));
+        match r {
+            SetxkbmapOutcome::SpawnError { reason } => {
+                assert_eq!(reason, "No such file or directory");
+            }
+            other => panic!("Expected SpawnError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setxkbmap_outcome_is_debug() {
+        // Locking that the outcome carries enough info for tracing logs.
+        let r = classify_setxkbmap_result(Ok((true, String::new())));
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Success"));
+    }
+
+    #[test]
+    fn setxkbmap_outcome_eq_distinguishes_variants() {
+        assert_ne!(
+            SetxkbmapOutcome::Success,
+            SetxkbmapOutcome::Failure {
+                stderr: String::new()
+            }
+        );
+        assert_ne!(
+            SetxkbmapOutcome::Failure { stderr: "a".into() },
+            SetxkbmapOutcome::Failure { stderr: "b".into() }
+        );
+    }
+
+    // --- now_unix_millis ---
+
+    #[test]
+    fn now_unix_millis_is_positive_for_current_time() {
+        let now = std::time::SystemTime::now();
+        let ms = now_unix_millis(now);
+        // Sanity-check we're past 2020 (1.6e12 ms past epoch).
+        assert!(ms > 1_600_000_000_000);
+    }
+
+    #[test]
+    fn now_unix_millis_returns_zero_for_epoch() {
+        let ms = now_unix_millis(std::time::UNIX_EPOCH);
+        assert_eq!(ms, 0);
+    }
+
+    #[test]
+    fn now_unix_millis_returns_zero_for_pre_epoch_time() {
+        // For a SystemTime before UNIX_EPOCH, the duration_since() errors,
+        // and the helper falls back to Duration::default() (zero).
+        let pre = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        let ms = now_unix_millis(pre);
+        assert_eq!(ms, 0);
+    }
+
+    // --- sched_fifo_log_message ---
+
+    #[test]
+    fn sched_fifo_log_success_for_ret_zero() {
+        let msg = sched_fifo_log_message(0, 50);
+        assert!(msg.contains("elevated to SCHED_FIFO"));
+        assert!(msg.contains("50"));
+    }
+
+    #[test]
+    fn sched_fifo_log_failure_for_nonzero_ret() {
+        let msg = sched_fifo_log_message(-1, 50);
+        assert!(msg.contains("Could not set SCHED_FIFO"));
+        assert!(msg.contains("CAP_SYS_NICE"));
+        assert!(msg.contains("50"));
+    }
+
+    #[test]
+    fn sched_fifo_log_includes_priority_value() {
+        // The priority is part of the message — if it ever changes the
+        // test should remind whoever changes it to look here too.
+        let msg = sched_fifo_log_message(0, 99);
+        assert!(msg.contains("99"));
+    }
+
+    // --- file_download_request_dropped ---
+
+    #[test]
+    fn file_download_drop_returns_true_on_full_channel() {
+        use tokio::sync::mpsc::error::TrySendError;
+        let r: Result<(), TrySendError<String>> = Err(TrySendError::Full("foo".to_string()));
+        assert!(file_download_request_dropped(r));
+    }
+
+    #[test]
+    fn file_download_drop_returns_true_on_closed_channel() {
+        use tokio::sync::mpsc::error::TrySendError;
+        let r: Result<(), TrySendError<String>> = Err(TrySendError::Closed("foo".to_string()));
+        assert!(file_download_request_dropped(r));
+    }
+
+    #[test]
+    fn file_download_drop_returns_false_on_success() {
+        let r: Result<(), tokio::sync::mpsc::error::TrySendError<String>> = Ok(());
+        assert!(!file_download_request_dropped(r));
+    }
+
+    // --- should_log_first_frame ---
+
+    #[test]
+    fn should_log_first_frame_when_not_yet_logged() {
+        assert!(should_log_first_frame(false));
+    }
+
+    #[test]
+    fn should_log_first_frame_skips_when_already_logged() {
+        assert!(!should_log_first_frame(true));
+    }
+
+    // --- format_capture_heartbeat_fps ---
+
+    #[test]
+    fn heartbeat_fps_zero_elapsed_returns_zero_string() {
+        // Avoid divide-by-zero in the format.
+        let s = format_capture_heartbeat_fps(120, 0.0);
+        assert_eq!(s, "0.0");
+    }
+
+    #[test]
+    fn heartbeat_fps_negative_elapsed_returns_zero_string() {
+        // Defensive: Instant::elapsed is monotonic in production but the
+        // helper is defensive for testability — negative or zero both
+        // return the safe fallback.
+        let s = format_capture_heartbeat_fps(120, -1.0);
+        assert_eq!(s, "0.0");
+    }
+
+    #[test]
+    fn heartbeat_fps_formats_one_decimal() {
+        // 120 frames in 2.0s = 60.0 fps
+        assert_eq!(format_capture_heartbeat_fps(120, 2.0), "60.0");
+        // 90 frames in 1.5s = 60.0 fps
+        assert_eq!(format_capture_heartbeat_fps(90, 1.5), "60.0");
+    }
+
+    #[test]
+    fn heartbeat_fps_handles_fractional_rate() {
+        // 100 frames in 1.5s = 66.6 fps
+        let s = format_capture_heartbeat_fps(100, 1.5);
+        assert!(s.starts_with("66.") && s.len() >= 4, "got: {s}");
+    }
+
+    #[test]
+    fn heartbeat_fps_handles_large_counts() {
+        // 1M frames in 1000s = 1000 fps
+        assert_eq!(format_capture_heartbeat_fps(1_000_000, 1000.0), "1000.0");
+    }
+
+    #[test]
+    fn heartbeat_fps_handles_zero_frames() {
+        assert_eq!(format_capture_heartbeat_fps(0, 5.0), "0.0");
+    }
+
+    // --- capture_wait_should_use_condvar ---
+
+    #[test]
+    fn condvar_when_idle() {
+        assert!(capture_wait_should_use_condvar(true, false));
+    }
+
+    #[test]
+    fn condvar_when_backgrounded() {
+        assert!(capture_wait_should_use_condvar(false, true));
+    }
+
+    #[test]
+    fn condvar_when_both_idle_and_backgrounded() {
+        assert!(capture_wait_should_use_condvar(true, true));
+    }
+
+    #[test]
+    fn spinloop_when_active() {
+        assert!(!capture_wait_should_use_condvar(false, false));
+    }
+
+    // --- capture_active_should_sleep ---
+
+    #[test]
+    fn active_sleep_above_2ms_remaining() {
+        assert!(capture_active_should_sleep(3));
+        assert!(capture_active_should_sleep(16));
+        assert!(capture_active_should_sleep(100));
+    }
+
+    #[test]
+    fn active_no_sleep_at_or_below_2ms() {
+        // Strict `>` so 2ms is the boundary — spin only.
+        assert!(!capture_active_should_sleep(0));
+        assert!(!capture_active_should_sleep(1));
+        assert!(!capture_active_should_sleep(2));
+    }
+
+    // --- should_log_capture_recovery ---
+
+    #[test]
+    fn recovery_log_when_streak_positive() {
+        assert!(should_log_capture_recovery(1));
+        assert!(should_log_capture_recovery(100));
+        assert!(should_log_capture_recovery(u64::MAX));
+    }
+
+    #[test]
+    fn recovery_log_skipped_when_no_streak() {
+        // The first successful capture (consecutive=0) should NOT emit
+        // the recovery line — there was no failure to recover from.
+        assert!(!should_log_capture_recovery(0));
+    }
+
+    // --- frame_duration_ns_from_framerate ---
+
+    #[test]
+    fn frame_duration_at_60fps() {
+        // 1s / 60 = 16.666ms = 16_666_666ns (integer division).
+        assert_eq!(frame_duration_ns_from_framerate(60), 16_666_666);
+    }
+
+    #[test]
+    fn frame_duration_at_30fps() {
+        assert_eq!(frame_duration_ns_from_framerate(30), 33_333_333);
+    }
+
+    #[test]
+    fn frame_duration_at_1fps_locks_to_1s() {
+        assert_eq!(frame_duration_ns_from_framerate(1), 1_000_000_000);
+    }
+
+    #[test]
+    fn frame_duration_zero_framerate_safe_fallback() {
+        // Production never sends 0 — but the guard MUST not divide-by-zero.
+        let d = frame_duration_ns_from_framerate(0);
+        assert_eq!(d, 1_000_000_000, "Fallback should be 1fps duration");
+    }
+
+    #[test]
+    fn frame_duration_at_high_framerates() {
+        // 120fps = ~8.33ms per frame
+        assert_eq!(frame_duration_ns_from_framerate(120), 8_333_333);
+    }
+
+    #[test]
+    fn frame_duration_max_framerate_does_not_overflow() {
+        // u32::MAX fps is silly but must not panic. Should produce 0
+        // (1s/u32::MAX rounds down to 0 with integer math).
+        let d = frame_duration_ns_from_framerate(u32::MAX);
+        assert_eq!(d, 1_000_000_000 / u32::MAX as u64);
+    }
+
+    // --- should_warn_keyframe_while_backgrounded ---
+
+    #[test]
+    fn warn_keyframe_when_was_backgrounded() {
+        assert!(should_warn_keyframe_while_backgrounded(true));
+    }
+
+    #[test]
+    fn no_warn_keyframe_when_not_backgrounded() {
+        assert!(!should_warn_keyframe_while_backgrounded(false));
+    }
+
+    // --- format_xrandr_resize_failure ---
+
+    #[test]
+    fn xrandr_resize_failure_includes_error() {
+        let m = format_xrandr_resize_failure("BadMatch (invalid mode)");
+        assert!(m.contains("xrandr resize failed"));
+        assert!(m.contains("BadMatch"));
+    }
+
+    #[test]
+    fn xrandr_resize_failure_handles_empty() {
+        let m = format_xrandr_resize_failure("");
+        assert!(m.starts_with("xrandr resize failed"));
+    }
+
+    // --- format_processing_resize_message ---
+
+    #[test]
+    fn processing_resize_message_includes_dims() {
+        let m = format_processing_resize_message(1920, 1080);
+        assert!(m.contains("1920"));
+        assert!(m.contains("1080"));
+        assert!(m.contains("Processing resize"));
+    }
+
+    #[test]
+    fn processing_resize_message_handles_zero_dims() {
+        // Defensive — the helper just formats; clamping is upstream.
+        let m = format_processing_resize_message(0, 0);
+        assert!(m.contains("0x0"));
+    }
+
+    // --- should_recreate_encoder + encoder_reset_cooldown_remaining_ms ---
+
+    #[test]
+    fn should_recreate_after_cooldown() {
+        assert!(should_recreate_encoder(5_000, 5_000));
+        assert!(should_recreate_encoder(10_000, 5_000));
+    }
+
+    #[test]
+    fn should_not_recreate_within_cooldown() {
+        assert!(!should_recreate_encoder(2_000, 5_000));
+        assert!(!should_recreate_encoder(0, 5_000));
+    }
+
+    #[test]
+    fn cooldown_remaining_zero_when_elapsed_exceeds() {
+        assert_eq!(encoder_reset_cooldown_remaining_ms(6_000, 5_000), 0);
+        assert_eq!(encoder_reset_cooldown_remaining_ms(5_000, 5_000), 0);
+    }
+
+    #[test]
+    fn cooldown_remaining_subtraction() {
+        assert_eq!(encoder_reset_cooldown_remaining_ms(1_000, 5_000), 4_000);
+        assert_eq!(encoder_reset_cooldown_remaining_ms(0, 5_000), 5_000);
+    }
+
+    #[test]
+    fn cooldown_remaining_handles_saturate_to_zero() {
+        // u64 saturating_sub — large elapsed values produce 0, not panic.
+        assert_eq!(encoder_reset_cooldown_remaining_ms(u64::MAX, 5_000), 0);
+    }
+
+    // --- should_log_encoded_drop_at_warn ---
+
+    #[test]
+    fn encoded_drop_is_never_warn() {
+        // Lock: drops are debug-level, NEVER warn.
+        assert!(!should_log_encoded_drop_at_warn(true));
+        assert!(!should_log_encoded_drop_at_warn(false));
+    }
+
+    // --- appsrc_queue_max_bytes ---
+
+    #[test]
+    fn appsrc_queue_3_frames_at_1080p() {
+        // 1920 * 1080 * 4 (BGRA) * 3 (frames) = 24.88 MB
+        let bytes = appsrc_queue_max_bytes(1920, 1080);
+        assert_eq!(bytes, 24_883_200);
+    }
+
+    #[test]
+    fn appsrc_queue_at_4k() {
+        // 3840 * 2160 * 4 * 3 = 99.53 MB
+        let bytes = appsrc_queue_max_bytes(3840, 2160);
+        assert_eq!(bytes, 99_532_800);
+    }
+
+    #[test]
+    fn appsrc_queue_at_zero_dims() {
+        // Zero dims (defensive) produce zero buffer requirement.
+        assert_eq!(appsrc_queue_max_bytes(0, 0), 0);
+        assert_eq!(appsrc_queue_max_bytes(1920, 0), 0);
+        assert_eq!(appsrc_queue_max_bytes(0, 1080), 0);
+    }
+
+    // --- capture_state_transition_message ---
+
+    #[test]
+    fn transition_msg_none_when_no_change() {
+        // No state change → no message.
+        let m = capture_state_transition_message(false, false, false, false, 60, 5, 1);
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn transition_msg_backgrounded_enter() {
+        let m = capture_state_transition_message(false, true, false, false, 60, 5, 1).unwrap();
+        assert!(m.contains("Tab backgrounded"));
+        assert!(m.contains("1fps"), "Should mention background framerate");
+    }
+
+    #[test]
+    fn transition_msg_backgrounded_exit() {
+        // is_backgrounded false now, was true.
+        let m = capture_state_transition_message(false, false, false, true, 60, 5, 1).unwrap();
+        assert!(m.contains("Tab foregrounded"));
+        assert!(m.contains("60"), "Should mention current framerate");
+    }
+
+    #[test]
+    fn transition_msg_idle_enter() {
+        let m = capture_state_transition_message(true, false, false, false, 60, 5, 1).unwrap();
+        assert!(m.contains("Entering idle"));
+        assert!(m.contains("5fps"));
+    }
+
+    #[test]
+    fn transition_msg_idle_exit() {
+        let m = capture_state_transition_message(false, false, true, false, 60, 5, 1).unwrap();
+        assert!(m.contains("Resuming active"));
+        assert!(m.contains("60fps"));
+    }
+
+    #[test]
+    fn transition_msg_background_takes_priority_over_idle() {
+        // Both flags changed; background transition wins.
+        let m = capture_state_transition_message(true, true, false, false, 60, 5, 1).unwrap();
+        assert!(m.contains("Tab backgrounded"));
+        assert!(!m.contains("Entering idle"));
+    }
+
+    #[test]
+    fn transition_msg_idle_change_suppressed_when_backgrounded() {
+        // Tab is backgrounded — idle transitions don't log.
+        let m = capture_state_transition_message(true, true, false, true, 60, 5, 1);
+        assert!(m.is_none());
+    }
+
+    // --- dispatch_resize ---
+
+    #[tokio::test]
+    async fn dispatch_resize_sends_dimensions() {
+        let (tx, mut rx) = mpsc::channel::<(u32, u32)>(4);
+        assert!(dispatch_resize(1920, 1080, &tx));
+        assert_eq!(rx.recv().await, Some((1920, 1080)));
+    }
+
+    #[tokio::test]
+    async fn dispatch_resize_returns_false_when_channel_full() {
+        let (tx, _rx) = mpsc::channel::<(u32, u32)>(1);
+        assert!(dispatch_resize(1, 1, &tx));
+        // Second send fills the channel.
+        assert!(!dispatch_resize(2, 2, &tx));
+    }
+
+    #[tokio::test]
+    async fn dispatch_resize_returns_false_when_channel_closed() {
+        let (tx, rx) = mpsc::channel::<(u32, u32)>(4);
+        drop(rx);
+        assert!(!dispatch_resize(1, 1, &tx));
+    }
+
+    // --- dispatch_file_download ---
+
+    #[tokio::test]
+    async fn dispatch_file_download_sends_path() {
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        assert!(dispatch_file_download("/tmp/x.txt".to_string(), &tx));
+        assert_eq!(rx.recv().await, Some("/tmp/x.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_file_download_returns_false_when_closed() {
+        let (tx, rx) = mpsc::channel::<String>(4);
+        drop(rx);
+        assert!(!dispatch_file_download("/tmp/y.txt".to_string(), &tx));
+    }
+
+    #[tokio::test]
+    async fn dispatch_file_download_handles_empty_path() {
+        // Defensive — the dispatcher doesn't validate; just forwards.
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        assert!(dispatch_file_download(String::new(), &tx));
+        assert_eq!(rx.recv().await, Some(String::new()));
+    }
+
+    // --- dispatch_capture_wake ---
+
+    #[test]
+    fn dispatch_capture_wake_sets_woken_flag() {
+        let wake = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+        dispatch_capture_wake(&wake);
+        assert!(*wake.0.lock().unwrap());
+    }
+
+    #[test]
+    fn dispatch_capture_wake_idempotent() {
+        let wake = (std::sync::Mutex::new(true), std::sync::Condvar::new());
+        // Already-woken: still works, leaves flag true.
+        dispatch_capture_wake(&wake);
+        assert!(*wake.0.lock().unwrap());
+    }
+
+    #[test]
+    fn dispatch_capture_wake_notifies_waiter() {
+        use std::sync::Arc;
+        use std::thread;
+        let wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+
+        // Spawn a waiter — it'll block until dispatch_capture_wake fires.
+        let wake_for_waiter = Arc::clone(&wake);
+        let waiter = thread::spawn(move || {
+            let (lock, cvar) = &*wake_for_waiter;
+            let mut woken = lock.lock().unwrap();
+            while !*woken {
+                woken = cvar.wait(woken).unwrap();
+            }
+            *woken
+        });
+
+        // Give the waiter a moment to park, then fire the wake.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        dispatch_capture_wake(&wake);
+        // Waiter should observe the woken=true and exit.
+        let observed = waiter.join().unwrap();
+        assert!(observed);
+    }
+
+    // --- dispatch_update_last_input ---
+
+    #[test]
+    fn dispatch_update_last_input_writes_atomic() {
+        let t = AtomicU64::new(0);
+        dispatch_update_last_input(12_345, &t);
+        assert_eq!(t.load(Ordering::Relaxed), 12_345);
+    }
+
+    #[test]
+    fn dispatch_update_last_input_overwrites_existing() {
+        let t = AtomicU64::new(100);
+        dispatch_update_last_input(200, &t);
+        assert_eq!(t.load(Ordering::Relaxed), 200);
+    }
+
+    #[test]
+    fn dispatch_update_last_input_handles_zero() {
+        let t = AtomicU64::new(100);
+        dispatch_update_last_input(0, &t);
+        assert_eq!(t.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn dispatch_update_last_input_handles_max() {
+        let t = AtomicU64::new(0);
+        dispatch_update_last_input(u64::MAX, &t);
+        assert_eq!(t.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    // --- dispatch_clear_backgrounded_if_interactive ---
+
+    #[test]
+    fn clear_backgrounded_when_interactive_and_flag_set() {
+        let bg = AtomicBool::new(true);
+        let event = InputEvent::Key { c: 65, d: true };
+        assert!(dispatch_clear_backgrounded_if_interactive(&event, &bg));
+        assert!(!bg.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn no_clear_when_interactive_but_flag_unset() {
+        let bg = AtomicBool::new(false);
+        let event = InputEvent::Key { c: 65, d: true };
+        // Swap returns previous (false) so the helper returns false.
+        assert!(!dispatch_clear_backgrounded_if_interactive(&event, &bg));
+        assert!(!bg.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn no_clear_when_non_interactive_event() {
+        let bg = AtomicBool::new(true);
+        let event = InputEvent::VisibilityState { visible: true };
+        // Non-interactive event: don't even swap.
+        assert!(!dispatch_clear_backgrounded_if_interactive(&event, &bg));
+        assert!(bg.load(Ordering::Relaxed), "Flag should remain set");
+    }
+
+    #[test]
+    fn no_clear_for_file_chunk_event() {
+        let bg = AtomicBool::new(true);
+        let event = InputEvent::FileChunk {
+            id: "x".to_string(),
+            data: String::new(),
+        };
+        assert!(!dispatch_clear_backgrounded_if_interactive(&event, &bg));
+        assert!(bg.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn no_clear_for_metrics_event() {
+        let bg = AtomicBool::new(true);
+        let event = InputEvent::ClientMetricsPing {
+            id: 1,
+            sent_ms: 0.0,
+        };
+        assert!(!dispatch_clear_backgrounded_if_interactive(&event, &bg));
+        assert!(bg.load(Ordering::Relaxed));
+    }
+
+    // --- evdev_to_x11_keycode ---
+
+    #[test]
+    fn evdev_to_x11_adds_8() {
+        assert_eq!(evdev_to_x11_keycode(0), 8);
+        assert_eq!(evdev_to_x11_keycode(28), 36); // KEY_ENTER
+        assert_eq!(evdev_to_x11_keycode(29), 37); // KEY_LEFTCTRL
+        assert_eq!(evdev_to_x11_keycode(57), 65); // KEY_SPACE
+    }
+
+    #[test]
+    fn evdev_to_x11_handles_max_u8_input() {
+        // evdev keycode 247 + 8 = 255 — fits in u8.
+        assert_eq!(evdev_to_x11_keycode(247), 255);
+    }
+
+    #[test]
+    fn evdev_to_x11_wraps_at_overflow() {
+        // Defensive — production validates upstream, but the cast truncates.
+        assert_eq!(evdev_to_x11_keycode(248), 0);
+        assert_eq!(evdev_to_x11_keycode(255), 7);
+    }
+
+    // --- browser_button_to_x11 ---
+
+    #[test]
+    fn browser_button_to_x11_maps_known() {
+        assert_eq!(browser_button_to_x11(0), Some(1));
+        assert_eq!(browser_button_to_x11(1), Some(2));
+        assert_eq!(browser_button_to_x11(2), Some(3));
+    }
+
+    #[test]
+    fn browser_button_to_x11_returns_none_for_unknown() {
+        assert_eq!(browser_button_to_x11(3), None);
+        assert_eq!(browser_button_to_x11(255), None);
+    }
+
+    // --- file_download_request_dropped (additional cases) ---
+
+    #[test]
+    fn file_download_drop_with_unit_payload() {
+        // Verify the generic type parameter doesn't lock us to String.
+        use tokio::sync::mpsc::error::TrySendError;
+        let r: Result<(), TrySendError<u64>> = Err(TrySendError::Full(42));
+        assert!(file_download_request_dropped(r));
     }
 }

@@ -35,7 +35,7 @@ pub(crate) async fn run_signaling(
     ws_outbox_rx: &mut mpsc::Receiver<tokio_tungstenite::tungstenite::Message>,
 ) {
     if ctx.server_url.is_empty() {
-        info!("No server URL provided, sleeping forever");
+        info!("{}", no_server_url_message());
         std::future::pending::<()>().await;
         return;
     }
@@ -43,16 +43,16 @@ pub(crate) async fn run_signaling(
     // Connect to WebSocket with exponential backoff retry
     let mut backoff = INITIAL_BACKOFF;
     loop {
-        info!(url = ctx.server_url, "Connecting to signaling server");
+        info!("{}", connecting_message(ctx.server_url));
 
         match connect_and_handle(ctx, ws_outbox_rx).await {
             Ok(()) => {
-                info!("Signaling connection closed cleanly");
+                info!("{}", closed_cleanly_message());
                 break;
             }
             Err(e) => {
-                warn!("Signaling connection error: {e:#}");
-                info!("Reconnecting in {} seconds...", backoff.as_secs());
+                warn!("{}", connection_error_message(&format!("{e:#}")));
+                info!("{}", reconnecting_message(backoff.as_secs()));
                 tokio::time::sleep(backoff).await;
                 backoff = next_backoff(backoff, MAX_BACKOFF);
             }
@@ -152,6 +152,34 @@ pub(crate) const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 /// Upper bound on the reconnect backoff. We cap here to avoid hour-long
 /// reconnect delays after extended outages.
 pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Build the "no server URL provided" log line emitted by `run_signaling`
+/// on the empty-URL early-return path. Pure helper for the log-format pin.
+pub(crate) fn no_server_url_message() -> &'static str {
+    "No server URL provided, sleeping forever"
+}
+
+/// Build the "connecting to signaling server" log line. Pure helper —
+/// pins the format so a future log-format change is caught by a test.
+pub(crate) fn connecting_message(server_url: &str) -> String {
+    format!("Connecting to signaling server: {server_url}")
+}
+
+/// Build the "signaling connection closed cleanly" log line. Pure
+/// constant helper that pins the message.
+pub(crate) fn closed_cleanly_message() -> &'static str {
+    "Signaling connection closed cleanly"
+}
+
+/// Build the "signaling connection error" warn line. Pure helper.
+pub(crate) fn connection_error_message(err: &str) -> String {
+    format!("Signaling connection error: {err}")
+}
+
+/// Build the "reconnecting in N seconds" info line. Pure helper.
+pub(crate) fn reconnecting_message(secs: u64) -> String {
+    format!("Reconnecting in {secs} seconds...")
+}
 
 async fn connect_and_handle(
     ctx: &SignalingCtx<'_>,
@@ -576,5 +604,62 @@ mod tests {
     fn next_backoff_with_zero_returns_zero() {
         let result = next_backoff(Duration::from_secs(0), Duration::from_secs(60));
         assert_eq!(result, Duration::from_secs(0));
+    }
+
+    // --- Log-message helpers ---
+
+    #[test]
+    fn no_server_url_message_static() {
+        let m = no_server_url_message();
+        assert!(m.contains("No server URL"));
+        assert!(m.contains("sleeping"));
+    }
+
+    #[test]
+    fn connecting_message_includes_url() {
+        let m = connecting_message("wss://beam.test:8443");
+        assert!(m.contains("Connecting"));
+        assert!(m.contains("wss://beam.test:8443"));
+    }
+
+    #[test]
+    fn connecting_message_handles_empty_url() {
+        // The branch with empty URL takes the early-return path, but
+        // defensive: the formatter still works.
+        let m = connecting_message("");
+        assert!(m.starts_with("Connecting"));
+    }
+
+    #[test]
+    fn closed_cleanly_message_static() {
+        let m = closed_cleanly_message();
+        assert!(m.contains("closed cleanly"));
+        assert!(m.contains("Signaling"));
+    }
+
+    #[test]
+    fn connection_error_message_includes_err() {
+        let m = connection_error_message("connection refused");
+        assert!(m.contains("connection refused"));
+        assert!(m.contains("Signaling connection error"));
+    }
+
+    #[test]
+    fn reconnecting_message_includes_seconds() {
+        let m = reconnecting_message(30);
+        assert!(m.contains("30 seconds"));
+        assert!(m.contains("Reconnecting"));
+    }
+
+    #[test]
+    fn reconnecting_message_handles_zero() {
+        let m = reconnecting_message(0);
+        assert!(m.contains("0 seconds"));
+    }
+
+    #[test]
+    fn reconnecting_message_handles_large_value() {
+        let m = reconnecting_message(86_400);
+        assert!(m.contains("86400 seconds"));
     }
 }
