@@ -42,6 +42,117 @@ pub(crate) enum CaptureCommand {
     ResetEncoder,
 }
 
+/// Maximum clipboard text size accepted from the browser. Larger payloads
+/// trigger a warning and are dropped (DoS guard for browsers that paste
+/// gigabytes of text by accident).
+pub(crate) const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
+
+/// Bound for relative-mouse / scroll deltas. Values outside [-MAX, MAX] are
+/// rejected as malformed (browsers should never emit those; if they do it's
+/// either a bug or an attempted overflow into the X11 wire format).
+pub(crate) const MAX_INPUT_DELTA: f64 = 10_000.0;
+
+/// Permissive but defensive check on `dx`/`dy` for relative motion + scroll.
+///
+/// Splits the "is this input safe to inject?" predicate into a pure function
+/// so it can be unit-tested without an X11 connection.
+pub(crate) fn is_finite_bounded_delta(dx: f64, dy: f64) -> bool {
+    dx.is_finite()
+        && dy.is_finite()
+        && (-MAX_INPUT_DELTA..=MAX_INPUT_DELTA).contains(&dx)
+        && (-MAX_INPUT_DELTA..=MAX_INPUT_DELTA).contains(&dy)
+}
+
+/// Check whether a `setxkbmap` layout name is safe to spawn. Layout names
+/// arrive over the wire and end up in a subprocess argv, so we enforce a
+/// tight allowlist (alphanumeric + `-` + `_`) and a length cap before any
+/// process spawn happens.
+pub(crate) fn is_valid_layout_name(layout: &str) -> bool {
+    !layout.is_empty()
+        && layout.len() <= 20
+        && layout
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Check whether a clipboard payload is small enough to push into the X11
+/// selection. Browsers occasionally paste paste-bombs (gigabyte-scale text)
+/// which would hang xclip; this guard bounds the worst case.
+pub(crate) fn is_clipboard_size_ok(len: usize) -> bool {
+    len <= MAX_CLIPBOARD_BYTES
+}
+
+/// Parse a display string like `:10` into a numeric display id, falling back
+/// to the default Beam display (10) if the string is malformed. The parsing
+/// is split out so the fallback branch can be unit-tested without spawning
+/// the full agent.
+pub(crate) fn parse_display_num(x_display: &str) -> u32 {
+    x_display.trim_start_matches(':').parse().unwrap_or(10)
+}
+
+/// Build the PulseAudio "unix:..." path string for a given display id.
+/// The path mirrors the layout chosen by `VirtualDisplay::start_pulseaudio`
+/// and is used for both PulseAudio server discovery (existing display) and
+/// freshly-started sessions.
+pub(crate) fn pulse_server_path(display_num: u32) -> String {
+    format!("/tmp/beam-pulse-{display_num}/native")
+}
+
+pub(crate) fn pulse_server_url(display_num: u32) -> String {
+    format!("unix:{}", pulse_server_path(display_num))
+}
+
+/// Compute the effective framerate + bitrate for the encoder, applying the
+/// software-encoder cap (~60fps at 1080p, 20Mbps).
+///
+/// On ARM64 with x264enc the encoder cannot sustain 120fps; this guard
+/// prevents the appsrc queue from growing faster than the encoder drains
+/// it and OOM-killing the process.
+pub(crate) fn cap_software_encoder_params(
+    encoder_type: encoder::EncoderType,
+    requested_fps: u32,
+    requested_bitrate: u32,
+) -> (u32, u32) {
+    if matches!(encoder_type, encoder::EncoderType::Software) && requested_fps > 60 {
+        (60, requested_bitrate.min(20_000))
+    } else {
+        (requested_fps, requested_bitrate)
+    }
+}
+
+/// xrandr output fallback name used when no virtual display is in play.
+pub(crate) const DEFAULT_OUTPUT_NAME: &str = "DUMMY0";
+
+/// Side-effect-free Ctrl/AltGr key tracker used by the input callback.
+/// X11 keycodes 29 (LeftCtrl) and 97 (RightCtrl) toggle the same internal
+/// flag — when either is pressed and the user releases `,` or `.` while held,
+/// the agent fires a clipboard-read so Ctrl+C/Ctrl+V can sync over.
+pub(crate) fn is_ctrl_keycode(c: u16) -> bool {
+    c == 29 || c == 97
+}
+
+/// Keycode for `.` and `,` — the keys that trigger a clipboard-read when
+/// released with Ctrl held. Split out as a predicate so the gating logic can
+/// be unit-tested.
+pub(crate) fn is_clipboard_read_trigger_key(c: u16) -> bool {
+    c == 45 || c == 46
+}
+
+/// Predicate gate for the visibility "input restored" branch. When the tab
+/// is backgrounded and we receive a user-interactive input event, we clear
+/// the backgrounded flag and resume normal framerate. Sub-events like
+/// VisibilityState / FileChunk / ClientMetrics never trigger the resume.
+pub(crate) fn is_interactive_input_event(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::Key { .. }
+            | InputEvent::MouseMove { .. }
+            | InputEvent::RelativeMouseMove { .. }
+            | InputEvent::Button { .. }
+            | InputEvent::Scroll { .. }
+    )
+}
+
 /// Shared context for building the input event callback.
 struct InputCallbackCtx {
     injector: Arc<Mutex<InputInjector>>,
@@ -99,25 +210,16 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
         }
 
         // Clear backgrounded flag on user-interactive input events
-        match &event {
-            InputEvent::Key { .. }
-            | InputEvent::MouseMove { .. }
-            | InputEvent::RelativeMouseMove { .. }
-            | InputEvent::Button { .. }
-            | InputEvent::Scroll { .. }
-                if tab_backgrounded.swap(false, Ordering::Relaxed) =>
-            {
-                debug!("Input received while backgrounded, clearing flag");
-            }
-            _ => {}
+        if is_interactive_input_event(&event) && tab_backgrounded.swap(false, Ordering::Relaxed) {
+            debug!("Input received while backgrounded, clearing flag");
         }
 
         match event {
             InputEvent::Key { c, d } => {
-                if c == 29 || c == 97 {
+                if is_ctrl_keycode(c) {
                     ctrl_down.store(d, Ordering::Relaxed);
                 }
-                if !d && (c == 46 || c == 45) && ctrl_down.load(Ordering::Relaxed) {
+                if !d && is_clipboard_read_trigger_key(c) && ctrl_down.load(Ordering::Relaxed) {
                     let _ = clipboard_read_tx.try_send(());
                 }
                 if let Err(e) = injector
@@ -138,10 +240,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 }
             }
             InputEvent::RelativeMouseMove { dx, dy } => {
-                if dx.is_finite()
-                    && dy.is_finite()
-                    && (-10000.0..=10000.0).contains(&dx)
-                    && (-10000.0..=10000.0).contains(&dy)
+                if is_finite_bounded_delta(dx, dy)
                     && let Err(e) = injector
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -160,10 +259,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 }
             }
             InputEvent::Scroll { dx, dy } => {
-                if dx.is_finite()
-                    && dy.is_finite()
-                    && (-10000.0..=10000.0).contains(&dx)
-                    && (-10000.0..=10000.0).contains(&dy)
+                if is_finite_bounded_delta(dx, dy)
                     && let Err(e) = injector
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -173,8 +269,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 }
             }
             InputEvent::Clipboard { ref text } => {
-                const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
-                if text.len() > MAX_CLIPBOARD_BYTES {
+                if !is_clipboard_size_ok(text.len()) {
                     warn!(
                         len = text.len(),
                         max = MAX_CLIPBOARD_BYTES,
@@ -189,8 +284,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 }
             }
             InputEvent::ClipboardPrimary { ref text } => {
-                const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
-                if text.len() > MAX_CLIPBOARD_BYTES {
+                if !is_clipboard_size_ok(text.len()) {
                     warn!(
                         len = text.len(),
                         max = MAX_CLIPBOARD_BYTES,
@@ -214,12 +308,7 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                 }
             }
             InputEvent::Layout { ref layout } => {
-                if layout.len() <= 20
-                    && !layout.is_empty()
-                    && layout
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                {
+                if is_valid_layout_name(layout) {
                     let mut prev = last_layout.lock().unwrap_or_else(|e| e.into_inner());
                     if *prev == *layout {
                         return;
@@ -344,16 +433,16 @@ async fn main() -> anyhow::Result<()> {
 
     // PulseAudio server path — derived from display number regardless of new/existing display
     let mut pulse_server: Option<String> = None;
-    let display_num: u32 = args.display.trim_start_matches(':').parse().unwrap_or(10);
+    let display_num: u32 = parse_display_num(&args.display);
 
     // Try to connect to the display; if it doesn't exist, start a virtual one
     let mut virtual_display = match ScreenCapture::new(&args.display) {
         Ok(_) => {
             info!(display = %args.display, "Connected to existing display");
             // Session reuse: PulseAudio should already be running for this display
-            let pulse_path = format!("/tmp/beam-pulse-{display_num}/native");
+            let pulse_path = pulse_server_path(display_num);
             if std::path::Path::new(&pulse_path).exists() {
-                pulse_server = Some(format!("unix:{pulse_path}"));
+                pulse_server = Some(pulse_server_url(display_num));
                 info!(%pulse_path, "Found existing PulseAudio socket for reused display");
             } else {
                 warn!(%pulse_path, "No PulseAudio socket found for reused display, audio may not work");
@@ -376,8 +465,8 @@ async fn main() -> anyhow::Result<()> {
                     if let Err(e) = vd.start_pulseaudio() {
                         warn!("Failed to start PulseAudio: {e:#}");
                     }
-                    let pulse_path = format!("/tmp/beam-pulse-{display_num}/native");
-                    pulse_server = Some(format!("unix:{pulse_path}"));
+                    let pulse_path = pulse_server_path(display_num);
+                    pulse_server = Some(pulse_server_url(display_num));
                     for _ in 0..20 {
                         if std::path::Path::new(&pulse_path).exists() {
                             break;
@@ -403,7 +492,7 @@ async fn main() -> anyhow::Result<()> {
     // Virtual displays know their output name; existing displays detect it.
     let output_name = match &virtual_display {
         Some(vd) => vd.output_name().to_string(),
-        None => "DUMMY0".to_string(),
+        None => DEFAULT_OUTPUT_NAME.to_string(),
     };
 
     // Create screen capture (now the display should be available)
@@ -418,20 +507,16 @@ async fn main() -> anyhow::Result<()> {
     // encoder drains it, leading to OOM.
     let encoder_pref = args.encoder.clone();
     let (encoder_type, _) = encoder::detect_encoder_type(args.encoder.as_deref())?;
-    let config_framerate;
-    let config_bitrate;
-    if matches!(encoder_type, encoder::EncoderType::Software) && args.framerate > 60 {
-        config_framerate = 60;
-        config_bitrate = args.bitrate.min(20_000);
+    let (config_framerate, config_bitrate) =
+        cap_software_encoder_params(encoder_type, args.framerate, args.bitrate);
+    if config_framerate != args.framerate || config_bitrate != args.bitrate {
         warn!(
             requested_fps = args.framerate,
             capped_fps = config_framerate,
+            requested_bitrate = args.bitrate,
             capped_bitrate = config_bitrate,
             "Software encoder: capping framerate to 60fps and bitrate to 20Mbps"
         );
-    } else {
-        config_framerate = args.framerate;
-        config_bitrate = args.bitrate;
     }
 
     let encoder = Encoder::with_encoder_preference(
@@ -1065,4 +1150,532 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Agent shutdown complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- is_finite_bounded_delta ---
+
+    #[test]
+    fn finite_bounded_delta_accepts_small_values() {
+        assert!(is_finite_bounded_delta(0.0, 0.0));
+        assert!(is_finite_bounded_delta(1.0, -1.0));
+        assert!(is_finite_bounded_delta(0.5, 0.5));
+        assert!(is_finite_bounded_delta(100.0, -100.0));
+    }
+
+    #[test]
+    fn finite_bounded_delta_accepts_boundary_values() {
+        // 10000.0 is inclusive, so it must pass.
+        assert!(is_finite_bounded_delta(MAX_INPUT_DELTA, MAX_INPUT_DELTA));
+        assert!(is_finite_bounded_delta(-MAX_INPUT_DELTA, -MAX_INPUT_DELTA));
+        assert!(is_finite_bounded_delta(MAX_INPUT_DELTA, -MAX_INPUT_DELTA));
+    }
+
+    #[test]
+    fn finite_bounded_delta_rejects_beyond_max() {
+        assert!(!is_finite_bounded_delta(MAX_INPUT_DELTA + 0.0001, 0.0));
+        assert!(!is_finite_bounded_delta(0.0, MAX_INPUT_DELTA + 0.0001));
+        assert!(!is_finite_bounded_delta(20_000.0, 0.0));
+        assert!(!is_finite_bounded_delta(0.0, -20_000.0));
+    }
+
+    #[test]
+    fn finite_bounded_delta_rejects_nan() {
+        assert!(!is_finite_bounded_delta(f64::NAN, 0.0));
+        assert!(!is_finite_bounded_delta(0.0, f64::NAN));
+        assert!(!is_finite_bounded_delta(f64::NAN, f64::NAN));
+    }
+
+    #[test]
+    fn finite_bounded_delta_rejects_infinity() {
+        assert!(!is_finite_bounded_delta(f64::INFINITY, 0.0));
+        assert!(!is_finite_bounded_delta(0.0, f64::INFINITY));
+        assert!(!is_finite_bounded_delta(f64::NEG_INFINITY, 0.0));
+        assert!(!is_finite_bounded_delta(0.0, f64::NEG_INFINITY));
+        assert!(!is_finite_bounded_delta(f64::INFINITY, f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn finite_bounded_delta_subnormal_values_are_accepted() {
+        // f64::MIN_POSITIVE is the smallest positive normal value; subnormals
+        // smaller than that are still finite, so they pass the gate.
+        let tiny = f64::MIN_POSITIVE / 2.0;
+        assert!(is_finite_bounded_delta(tiny, tiny));
+    }
+
+    #[test]
+    fn finite_bounded_delta_negative_zero_is_accepted() {
+        // -0.0 is finite and in range; must not be confused for NaN or sign-flipped.
+        assert!(is_finite_bounded_delta(-0.0, -0.0));
+    }
+
+    // --- is_valid_layout_name ---
+
+    #[test]
+    fn valid_layout_accepts_common_keyboard_layouts() {
+        // setxkbmap layouts that we routinely send from the browser.
+        for name in ["us", "us-intl", "de", "no", "se", "gb", "fr"] {
+            assert!(
+                is_valid_layout_name(name),
+                "Layout '{name}' should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_layout_accepts_alphanumeric_and_separators() {
+        assert!(is_valid_layout_name("us"));
+        assert!(is_valid_layout_name("us-intl"));
+        assert!(is_valid_layout_name("us_intl"));
+        assert!(is_valid_layout_name("layout1"));
+        assert!(is_valid_layout_name("a-b_c-d"));
+    }
+
+    #[test]
+    fn valid_layout_rejects_empty() {
+        assert!(!is_valid_layout_name(""));
+    }
+
+    #[test]
+    fn valid_layout_rejects_too_long() {
+        // 20 chars max — 21 must fail.
+        let long_layout = "a".repeat(21);
+        assert!(!is_valid_layout_name(&long_layout));
+        // Boundary: exactly 20 passes.
+        let twenty = "a".repeat(20);
+        assert!(is_valid_layout_name(&twenty));
+    }
+
+    #[test]
+    fn valid_layout_rejects_shell_metacharacters() {
+        // These would be dangerous in argv to setxkbmap.
+        for bad in [
+            "us;rm -rf /",
+            "us $(rm)",
+            "us`evil`",
+            "us|cat",
+            "us&exit",
+            "us>/etc",
+            "us\nbreak",
+            "us\tbad",
+            "us ",
+            " us",
+            "../etc/passwd",
+            "us/intl",
+        ] {
+            assert!(
+                !is_valid_layout_name(bad),
+                "Layout '{bad}' must be rejected (shell metacharacter)"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_layout_rejects_unicode() {
+        // Non-ASCII characters are out: setxkbmap takes only ASCII layout names.
+        assert!(!is_valid_layout_name("café"));
+        assert!(!is_valid_layout_name("\u{00e9}"));
+        assert!(!is_valid_layout_name("layout\u{0000}null"));
+    }
+
+    #[test]
+    fn valid_layout_rejects_special_chars_period_and_at() {
+        // Even though `.` and `@` look benign, they're NOT in the allowed set.
+        assert!(!is_valid_layout_name("us.dvorak"));
+        assert!(!is_valid_layout_name("us@v2"));
+    }
+
+    #[test]
+    fn valid_layout_accepts_single_character() {
+        // Smallest non-empty layout.
+        assert!(is_valid_layout_name("a"));
+        assert!(is_valid_layout_name("1"));
+        assert!(is_valid_layout_name("-"));
+        assert!(is_valid_layout_name("_"));
+    }
+
+    // --- is_clipboard_size_ok ---
+
+    #[test]
+    fn clipboard_size_accepts_empty_and_small() {
+        assert!(is_clipboard_size_ok(0));
+        assert!(is_clipboard_size_ok(1));
+        assert!(is_clipboard_size_ok(1024));
+        assert!(is_clipboard_size_ok(65_536));
+    }
+
+    #[test]
+    fn clipboard_size_accepts_exact_max() {
+        assert!(is_clipboard_size_ok(MAX_CLIPBOARD_BYTES));
+    }
+
+    #[test]
+    fn clipboard_size_rejects_one_byte_over() {
+        assert!(!is_clipboard_size_ok(MAX_CLIPBOARD_BYTES + 1));
+    }
+
+    #[test]
+    fn clipboard_size_rejects_dos_payloads() {
+        // 1 GB and beyond clearly DoS — must be rejected.
+        assert!(!is_clipboard_size_ok(1_000_000_000));
+        assert!(!is_clipboard_size_ok(usize::MAX));
+    }
+
+    #[test]
+    fn clipboard_max_is_one_mib() {
+        // Lock the constant: 1 MiB ceiling (browsers can grow up to it, larger
+        // pastes are dropped with a warning).
+        assert_eq!(MAX_CLIPBOARD_BYTES, 1_048_576);
+        assert_eq!(MAX_CLIPBOARD_BYTES, 1024 * 1024);
+    }
+
+    // --- MAX_INPUT_DELTA ---
+
+    #[test]
+    fn input_delta_max_lock() {
+        // Sanity: the cap is high enough for sane scroll/relative-motion deltas
+        // but low enough that an int16 conversion downstream doesn't overflow.
+        assert_eq!(MAX_INPUT_DELTA, 10_000.0);
+        // i16 max is 32767, and we round our delta to i16. 10000 fits.
+        assert!(MAX_INPUT_DELTA as i32 <= i16::MAX as i32);
+    }
+
+    // --- CaptureCommand ---
+
+    #[test]
+    fn capture_command_resize_is_constructable() {
+        let cmd = CaptureCommand::Resize {
+            width: 1920,
+            height: 1080,
+        };
+        if let CaptureCommand::Resize { width, height } = cmd {
+            assert_eq!(width, 1920);
+            assert_eq!(height, 1080);
+        } else {
+            panic!("Expected Resize variant");
+        }
+    }
+
+    #[test]
+    fn capture_command_reset_encoder_is_constructable() {
+        let cmd = CaptureCommand::ResetEncoder;
+        assert!(matches!(cmd, CaptureCommand::ResetEncoder));
+    }
+
+    #[test]
+    fn capture_command_sends_through_std_mpsc() {
+        // The capture thread uses a std::sync::mpsc channel for commands.
+        // Verify the variant survives a round-trip through the channel.
+        let (tx, rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        tx.send(CaptureCommand::ResetEncoder).unwrap();
+        tx.send(CaptureCommand::Resize {
+            width: 800,
+            height: 600,
+        })
+        .unwrap();
+        match rx.recv().unwrap() {
+            CaptureCommand::ResetEncoder => {}
+            other => panic!(
+                "Expected ResetEncoder, got {:?}",
+                capture_command_kind(&other)
+            ),
+        }
+        match rx.recv().unwrap() {
+            CaptureCommand::Resize { width, height } => {
+                assert_eq!(width, 800);
+                assert_eq!(height, 600);
+            }
+            other => panic!("Expected Resize, got {:?}", capture_command_kind(&other)),
+        }
+    }
+
+    fn capture_command_kind(cmd: &CaptureCommand) -> &'static str {
+        match cmd {
+            CaptureCommand::Resize { .. } => "Resize",
+            CaptureCommand::ResetEncoder => "ResetEncoder",
+        }
+    }
+
+    // --- parse_display_num ---
+
+    #[test]
+    fn parse_display_num_strips_colon_prefix() {
+        assert_eq!(parse_display_num(":10"), 10);
+        assert_eq!(parse_display_num(":99"), 99);
+        assert_eq!(parse_display_num(":0"), 0);
+    }
+
+    #[test]
+    fn parse_display_num_handles_no_colon() {
+        // Some callers may pass the display number without a leading colon.
+        assert_eq!(parse_display_num("42"), 42);
+    }
+
+    #[test]
+    fn parse_display_num_falls_back_to_10_for_garbage() {
+        // Anything unparseable → default Beam display 10.
+        assert_eq!(parse_display_num(":not-a-number"), 10);
+        assert_eq!(parse_display_num("garbage"), 10);
+        assert_eq!(parse_display_num(""), 10);
+        assert_eq!(parse_display_num(":"), 10);
+        assert_eq!(parse_display_num(":-5"), 10);
+    }
+
+    #[test]
+    fn parse_display_num_caps_at_u32_max_via_overflow_fallback() {
+        // 2^32 overflows u32 and falls back to 10.
+        assert_eq!(parse_display_num(":4294967296"), 10);
+    }
+
+    #[test]
+    fn parse_display_num_accepts_max_u32() {
+        // u32::MAX is parseable, so it should round-trip.
+        assert_eq!(parse_display_num(":4294967295"), u32::MAX);
+    }
+
+    // --- pulse_server_path / pulse_server_url ---
+
+    #[test]
+    fn pulse_server_path_includes_display_num() {
+        assert_eq!(pulse_server_path(10), "/tmp/beam-pulse-10/native");
+        assert_eq!(pulse_server_path(0), "/tmp/beam-pulse-0/native");
+        assert_eq!(
+            pulse_server_path(u32::MAX),
+            format!("/tmp/beam-pulse-{}/native", u32::MAX)
+        );
+    }
+
+    #[test]
+    fn pulse_server_url_prefixes_unix_scheme() {
+        assert_eq!(pulse_server_url(10), "unix:/tmp/beam-pulse-10/native");
+        assert_eq!(pulse_server_url(42), "unix:/tmp/beam-pulse-42/native");
+    }
+
+    #[test]
+    fn pulse_server_url_is_path_prefixed_with_unix() {
+        // The URL is always the path with an `unix:` prefix — never a host
+        // form (PulseAudio's Simple API takes server in this format).
+        for n in [0u32, 1, 10, 42, 100, 1000] {
+            let url = pulse_server_url(n);
+            let path = pulse_server_path(n);
+            assert_eq!(url, format!("unix:{path}"));
+            assert!(url.starts_with("unix:"));
+        }
+    }
+
+    // --- cap_software_encoder_params ---
+
+    #[test]
+    fn cap_software_encoder_caps_at_60fps_and_20mbps() {
+        // Software + >60 fps → 60fps. Bitrate at 30k → capped to 20k.
+        let (fps, br) = cap_software_encoder_params(encoder::EncoderType::Software, 120, 30_000);
+        assert_eq!(fps, 60);
+        assert_eq!(br, 20_000);
+    }
+
+    #[test]
+    fn cap_software_encoder_passes_through_below_60fps() {
+        // Software at 30fps is fine — no cap applied.
+        let (fps, br) = cap_software_encoder_params(encoder::EncoderType::Software, 30, 5_000);
+        assert_eq!(fps, 30);
+        assert_eq!(br, 5_000);
+    }
+
+    #[test]
+    fn cap_software_encoder_at_exactly_60fps_does_not_cap() {
+        // The threshold is > 60, so 60 itself passes through.
+        let (fps, br) = cap_software_encoder_params(encoder::EncoderType::Software, 60, 8_000);
+        assert_eq!(fps, 60);
+        assert_eq!(br, 8_000);
+    }
+
+    #[test]
+    fn cap_software_encoder_caps_only_software() {
+        // Nvidia/CUDA/VAAPI all pass through unchanged even at 120fps.
+        for enc_type in [
+            encoder::EncoderType::Nvidia,
+            encoder::EncoderType::NvidiaCuda,
+            encoder::EncoderType::VaApi,
+        ] {
+            let (fps, br) = cap_software_encoder_params(enc_type, 120, 50_000);
+            assert_eq!(fps, 120, "{enc_type:?} fps should not be capped");
+            assert_eq!(br, 50_000, "{enc_type:?} bitrate should not be capped");
+        }
+    }
+
+    #[test]
+    fn cap_software_encoder_bitrate_below_cap_is_preserved() {
+        // Software at 120 fps, 10000 kbps → fps capped to 60, bitrate
+        // unchanged (already below 20000 cap).
+        let (fps, br) = cap_software_encoder_params(encoder::EncoderType::Software, 120, 10_000);
+        assert_eq!(fps, 60);
+        assert_eq!(br, 10_000);
+    }
+
+    #[test]
+    fn cap_software_encoder_bitrate_min_takes_the_smaller_value() {
+        // Software at 120 fps, 19999 kbps → bitrate stays 19999.
+        let (fps, br) = cap_software_encoder_params(encoder::EncoderType::Software, 120, 19_999);
+        assert_eq!(fps, 60);
+        assert_eq!(br, 19_999);
+    }
+
+    #[test]
+    fn default_output_name_constant() {
+        // Stay locked at DUMMY0 — the agent + display code assume this string.
+        assert_eq!(DEFAULT_OUTPUT_NAME, "DUMMY0");
+    }
+
+    // --- is_ctrl_keycode ---
+
+    #[test]
+    fn ctrl_keycode_recognizes_left_and_right_ctrl() {
+        assert!(is_ctrl_keycode(29), "Left Ctrl");
+        assert!(is_ctrl_keycode(97), "Right Ctrl");
+    }
+
+    #[test]
+    fn ctrl_keycode_rejects_other_keys() {
+        // Spot-check non-Ctrl keycodes — must not flip the ctrl_down flag.
+        for code in [0u16, 1, 28, 30, 96, 98, 100, 200, u16::MAX] {
+            assert!(!is_ctrl_keycode(code), "Keycode {code} should not be Ctrl");
+        }
+    }
+
+    // --- is_clipboard_read_trigger_key ---
+
+    #[test]
+    fn clipboard_trigger_recognizes_comma_and_period() {
+        assert!(is_clipboard_read_trigger_key(45), "comma");
+        assert!(is_clipboard_read_trigger_key(46), "period");
+    }
+
+    #[test]
+    fn clipboard_trigger_rejects_other_keys() {
+        for code in [0u16, 1, 29, 44, 47, 50, 100, u16::MAX] {
+            assert!(
+                !is_clipboard_read_trigger_key(code),
+                "Keycode {code} should not trigger clipboard read"
+            );
+        }
+    }
+
+    // --- is_interactive_input_event ---
+
+    #[test]
+    fn interactive_event_accepts_key_press() {
+        assert!(is_interactive_input_event(&InputEvent::Key {
+            c: 42,
+            d: true,
+        }));
+        assert!(is_interactive_input_event(&InputEvent::Key {
+            c: 42,
+            d: false,
+        }));
+    }
+
+    #[test]
+    fn interactive_event_accepts_mouse_move() {
+        assert!(is_interactive_input_event(&InputEvent::MouseMove {
+            x: 0.5,
+            y: 0.5,
+        }));
+    }
+
+    #[test]
+    fn interactive_event_accepts_relative_mouse_move() {
+        assert!(is_interactive_input_event(&InputEvent::RelativeMouseMove {
+            dx: 1.0,
+            dy: 1.0,
+        }));
+    }
+
+    #[test]
+    fn interactive_event_accepts_button() {
+        assert!(is_interactive_input_event(&InputEvent::Button {
+            b: 0,
+            d: true,
+        }));
+    }
+
+    #[test]
+    fn interactive_event_accepts_scroll() {
+        assert!(is_interactive_input_event(&InputEvent::Scroll {
+            dx: 0.0,
+            dy: 30.0,
+        }));
+    }
+
+    #[test]
+    fn interactive_event_rejects_visibility_change() {
+        // VisibilityState alone should NOT clear backgrounded — the explicit
+        // "I'm back" signal still fires from the side-effect arm.
+        assert!(!is_interactive_input_event(&InputEvent::VisibilityState {
+            visible: true,
+        }));
+    }
+
+    #[test]
+    fn interactive_event_rejects_clipboard_events() {
+        assert!(!is_interactive_input_event(&InputEvent::Clipboard {
+            text: "x".to_string(),
+        }));
+        assert!(!is_interactive_input_event(&InputEvent::ClipboardPrimary {
+            text: "x".to_string(),
+        }));
+    }
+
+    #[test]
+    fn interactive_event_rejects_layout() {
+        assert!(!is_interactive_input_event(&InputEvent::Layout {
+            layout: "us".to_string(),
+        }));
+    }
+
+    #[test]
+    fn interactive_event_rejects_resize() {
+        // Resize is admin-ish (browser tells us a new screen size). It
+        // shouldn't count as user-input for the backgrounded resume logic.
+        assert!(!is_interactive_input_event(&InputEvent::Resize {
+            w: 1920,
+            h: 1080,
+        }));
+    }
+
+    #[test]
+    fn interactive_event_rejects_file_transfer() {
+        assert!(!is_interactive_input_event(&InputEvent::FileStart {
+            id: "x".to_string(),
+            name: "y".to_string(),
+            size: 100,
+        }));
+        assert!(!is_interactive_input_event(&InputEvent::FileChunk {
+            id: "x".to_string(),
+            data: "y".to_string(),
+        }));
+        assert!(!is_interactive_input_event(&InputEvent::FileDone {
+            id: "x".to_string(),
+        }));
+        assert!(!is_interactive_input_event(
+            &InputEvent::FileDownloadRequest {
+                path: "x".to_string(),
+            }
+        ));
+    }
+
+    #[test]
+    fn interactive_event_rejects_metrics() {
+        assert!(!is_interactive_input_event(
+            &InputEvent::ClientMetricsPing {
+                id: 1,
+                sent_ms: 100.0,
+            }
+        ));
+        assert!(!is_interactive_input_event(&InputEvent::ClientMetrics(
+            beam_protocol::ClientMetricsReport::default()
+        )));
+    }
 }

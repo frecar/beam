@@ -70,6 +70,67 @@ where
     }
 }
 
+/// Parse a `bind:port` pair into a [`SocketAddr`]. Split out so the parsing
+/// branch can be unit-tested without binding a real port.
+fn parse_bind_addr(bind: &str, port: u16) -> Result<SocketAddr> {
+    format!("{bind}:{port}")
+        .parse()
+        .context("Invalid bind address")
+}
+
+/// Load a persisted JWT secret from `secret_path`, returning `None` if the
+/// file is missing or empty. Split out so the persistence branches can be
+/// unit-tested with a tempfile fixture.
+fn load_persisted_jwt_secret(secret_path: &std::path::Path) -> Option<String> {
+    match std::fs::read_to_string(secret_path) {
+        Ok(existing) => {
+            let trimmed = existing.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+/// Classify the validation `issues` returned by [`BeamConfig::validate`].
+/// Returns true if any issue is a hard error (must abort) vs a warning.
+/// Split out for unit-testing — the production path logs warnings + errors
+/// and conditionally exits, but the classification itself is a pure check.
+fn has_validation_errors(issues: &[String]) -> bool {
+    issues.iter().any(|i| i.starts_with("ERROR:"))
+}
+
+/// Build the warning message shown when a config has at least one ERROR.
+/// Pure formatter, used by main() before [`std::process::exit`].
+fn config_validation_summary(issues: &[String]) -> String {
+    format!(
+        "Configuration has {} issue(s). Fix the ERROR(s) above and restart.",
+        issues.len()
+    )
+}
+
+/// Persist a newly-generated JWT secret to `secret_path` (0600 file mode).
+/// Returns `Err` if directory creation or file write fails. The caller logs
+/// and falls back to in-memory only on error.
+fn persist_jwt_secret(secret_path: &std::path::Path, secret: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(parent) = secret_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(secret_path)?;
+    f.write_all(secret.as_bytes())?;
+    Ok(())
+}
+
 fn parse_args() -> (PathBuf, Option<u16>) {
     let args: Vec<String> = std::env::args().collect();
     match parse_args_from(args) {
@@ -120,7 +181,7 @@ async fn main() -> Result<()> {
     }
     // Validate configuration semantics
     if let Err(issues) = config.validate() {
-        let has_errors = issues.iter().any(|i| i.starts_with("ERROR:"));
+        let has_errors = has_validation_errors(&issues);
         for issue in &issues {
             if issue.starts_with("ERROR:") {
                 tracing::error!("{}", issue);
@@ -129,10 +190,7 @@ async fn main() -> Result<()> {
             }
         }
         if has_errors {
-            tracing::error!(
-                "Configuration has {} issue(s). Fix the ERROR(s) above and restart.",
-                issues.len()
-            );
+            tracing::error!("{}", config_validation_summary(&issues));
             std::process::exit(1);
         }
     }
@@ -155,9 +213,7 @@ async fn main() -> Result<()> {
     }
 
     let port = config.server.port;
-    let bind_addr: SocketAddr = format!("{}:{}", config.server.bind, port)
-        .parse()
-        .context("Invalid bind address")?;
+    let bind_addr: SocketAddr = parse_bind_addr(&config.server.bind, port)?;
 
     // Build TLS config
     let tls_result = tls::build_tls_config(
@@ -170,35 +226,18 @@ async fn main() -> Result<()> {
     // JWT secret — persist to /var/lib/beam/jwt_secret so tokens survive restarts
     let jwt_secret = config.server.jwt_secret.clone().unwrap_or_else(|| {
         let secret_path = std::path::Path::new("/var/lib/beam/jwt_secret");
-        // Try to read existing persisted secret
-        if let Ok(existing) = std::fs::read_to_string(secret_path) {
-            let trimmed = existing.trim().to_string();
-            if !trimmed.is_empty() {
-                tracing::info!("Loaded JWT secret from {}", secret_path.display());
-                return trimmed;
-            }
+        if let Some(existing) = load_persisted_jwt_secret(secret_path) {
+            tracing::info!("Loaded JWT secret from {}", secret_path.display());
+            return existing;
         }
         // Generate and persist a new secret
         let secret = auth::generate_secret();
-        if let Err(e) = std::fs::create_dir_all("/var/lib/beam") {
-            tracing::warn!("Failed to create /var/lib/beam: {e}");
-        } else {
-            use std::os::unix::fs::OpenOptionsExt;
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(secret_path)
-            {
-                Ok(mut f) => {
-                    use std::io::Write;
-                    let _ = f.write_all(secret.as_bytes());
-                    tracing::info!("Persisted JWT secret to {}", secret_path.display());
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to persist JWT secret: {e}");
-                }
+        match persist_jwt_secret(secret_path, &secret) {
+            Ok(()) => {
+                tracing::info!("Persisted JWT secret to {}", secret_path.display());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to persist JWT secret: {e}");
             }
         }
         secret
@@ -776,5 +815,263 @@ mod args_tests {
                 port_override: None,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod bind_addr_tests {
+    use super::parse_bind_addr;
+
+    #[test]
+    fn ipv4_bind_address_parses() {
+        let addr = parse_bind_addr("127.0.0.1", 8443).unwrap();
+        assert_eq!(addr.to_string(), "127.0.0.1:8443");
+    }
+
+    #[test]
+    fn ipv4_zero_bind_address_parses() {
+        let addr = parse_bind_addr("0.0.0.0", 8444).unwrap();
+        assert_eq!(addr.to_string(), "0.0.0.0:8444");
+    }
+
+    #[test]
+    fn ipv6_localhost_parses() {
+        // Bracketed IPv6 literal.
+        let addr = parse_bind_addr("[::1]", 8444).unwrap();
+        assert!(addr.to_string().contains("8444"));
+        assert!(addr.is_ipv6());
+    }
+
+    #[test]
+    fn ipv6_any_parses() {
+        let addr = parse_bind_addr("[::]", 9000).unwrap();
+        assert!(addr.is_ipv6());
+        assert_eq!(addr.port(), 9000);
+    }
+
+    #[test]
+    fn invalid_bind_address_returns_error() {
+        let result = parse_bind_addr("not-an-ip-address", 8443);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_bind_address_error_mentions_invalid() {
+        let err = parse_bind_addr("not-an-ip-address", 8443).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("invalid"),
+            "Error should mention 'Invalid': {msg}"
+        );
+    }
+
+    #[test]
+    fn port_zero_is_valid() {
+        // Port 0 means "let the OS pick" — must be parseable even if it's
+        // unusual for a production beam config.
+        let addr = parse_bind_addr("127.0.0.1", 0).unwrap();
+        assert_eq!(addr.port(), 0);
+    }
+
+    #[test]
+    fn port_max_is_valid() {
+        let addr = parse_bind_addr("127.0.0.1", u16::MAX).unwrap();
+        assert_eq!(addr.port(), u16::MAX);
+    }
+
+    #[test]
+    fn hostname_does_not_parse() {
+        // SocketAddr::parse does not do DNS resolution — hostnames must fail.
+        let result = parse_bind_addr("localhost", 8443);
+        assert!(result.is_err(), "hostname should not resolve");
+    }
+}
+
+#[cfg(test)]
+mod jwt_secret_tests {
+    use super::{load_persisted_jwt_secret, persist_jwt_secret};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn unique_secret_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "beam-jwt-secret-{}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4(),
+            label,
+        ))
+    }
+
+    #[test]
+    fn load_returns_none_for_missing_file() {
+        let path = unique_secret_path("missing");
+        assert!(load_persisted_jwt_secret(&path).is_none());
+    }
+
+    #[test]
+    fn load_returns_none_for_empty_file() {
+        let path = unique_secret_path("empty");
+        std::fs::write(&path, "").unwrap();
+        assert!(load_persisted_jwt_secret(&path).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_returns_none_for_whitespace_only() {
+        let path = unique_secret_path("whitespace");
+        std::fs::write(&path, "   \n\t  \n").unwrap();
+        assert!(load_persisted_jwt_secret(&path).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_trims_secret() {
+        let path = unique_secret_path("trim");
+        std::fs::write(&path, "  abcdef0123456789  \n").unwrap();
+        let secret = load_persisted_jwt_secret(&path).expect("should load");
+        assert_eq!(secret, "abcdef0123456789");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_returns_full_content_when_no_whitespace() {
+        let path = unique_secret_path("clean");
+        let secret = "1234567890abcdef".repeat(4);
+        std::fs::write(&path, &secret).unwrap();
+        let loaded = load_persisted_jwt_secret(&path).expect("should load");
+        assert_eq!(loaded, secret);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn persist_writes_secret_with_0600_perms() {
+        // tmp dir requires creating an intermediate subdirectory so we can
+        // exercise the `create_dir_all` arm.
+        let dir = std::env::temp_dir().join(format!(
+            "beam-jwt-persist-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("jwt_secret");
+
+        assert!(!dir.exists(), "Subdir must not pre-exist");
+        let secret = "test-secret-1234567890";
+        persist_jwt_secret(&path, secret).expect("persist should succeed");
+
+        assert!(dir.exists(), "create_dir_all should have run");
+        assert!(path.exists(), "secret file should be written");
+
+        let loaded = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(loaded, secret);
+
+        let perms = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(perms, 0o600, "secret file must be 0o600");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_truncates_existing_file() {
+        // Pre-write a longer secret, then re-persist a shorter one — the
+        // file must end up containing only the new secret.
+        let path = unique_secret_path("truncate");
+        std::fs::write(&path, "this-was-the-old-much-longer-secret").unwrap();
+
+        persist_jwt_secret(&path, "new-shorter").unwrap();
+        let loaded = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(loaded, "new-shorter");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn persist_fails_on_unwritable_parent() {
+        // Writing under /proc returns an OS error — verify the function
+        // surfaces it rather than panicking.
+        let path = std::path::PathBuf::from("/proc/nonexistent-beam-jwt-secret");
+        let result = persist_jwt_secret(&path, "x");
+        assert!(result.is_err(), "Should fail when path is unwritable");
+    }
+
+    #[test]
+    fn load_after_persist_roundtrip() {
+        let path = unique_secret_path("roundtrip");
+        let secret = "deadbeef0123456789abcdef";
+        persist_jwt_secret(&path, secret).unwrap();
+        let loaded = load_persisted_jwt_secret(&path).unwrap();
+        assert_eq!(loaded, secret);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::{config_validation_summary, has_validation_errors};
+
+    #[test]
+    fn no_errors_when_all_warnings() {
+        // Only "WARN:" prefix → not an error.
+        let issues: Vec<String> = vec!["WARN: tls_cert missing".into()];
+        assert!(!has_validation_errors(&issues));
+    }
+
+    #[test]
+    fn no_errors_for_empty_issues_list() {
+        assert!(!has_validation_errors(&[]));
+    }
+
+    #[test]
+    fn has_errors_when_any_error_prefix() {
+        // A single "ERROR:" line flips the classifier.
+        let issues: Vec<String> = vec![
+            "WARN: tls_cert missing".into(),
+            "ERROR: invalid port".into(),
+        ];
+        assert!(has_validation_errors(&issues));
+    }
+
+    #[test]
+    fn has_errors_only_strict_prefix() {
+        // "error:" lowercase is NOT an ERROR (config.validate() uses ERROR:).
+        let issues: Vec<String> = vec!["error: lowercase".into()];
+        assert!(!has_validation_errors(&issues));
+    }
+
+    #[test]
+    fn has_errors_requires_prefix() {
+        // Substring "ERROR:" in the middle doesn't count.
+        let issues: Vec<String> = vec!["WARN: contains ERROR: word".into()];
+        assert!(!has_validation_errors(&issues));
+    }
+
+    #[test]
+    fn summary_includes_issue_count() {
+        let issues: Vec<String> = vec!["ERROR: a".into(), "ERROR: b".into(), "WARN: c".into()];
+        let summary = config_validation_summary(&issues);
+        assert!(summary.contains("3 issue"));
+    }
+
+    #[test]
+    fn summary_mentions_restart() {
+        let issues: Vec<String> = vec!["ERROR: x".into()];
+        let summary = config_validation_summary(&issues);
+        assert!(
+            summary.to_lowercase().contains("restart") || summary.contains("Fix"),
+            "Summary should guide the operator to fix + restart: {summary}"
+        );
+    }
+
+    #[test]
+    fn summary_handles_empty_issues() {
+        // Edge case: caller invokes this with no issues. Should still format
+        // cleanly (production never hits this branch but defensive testing).
+        let summary = config_validation_summary(&[]);
+        assert!(summary.contains("0 issue"));
+    }
+
+    #[test]
+    fn summary_with_single_issue_uses_singular_count() {
+        let issues = vec!["ERROR: only one".to_string()];
+        let summary = config_validation_summary(&issues);
+        assert!(summary.contains("1 issue"));
     }
 }

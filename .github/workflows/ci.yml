@@ -160,22 +160,20 @@ jobs:
           # Ratchet protocol: --fail-under-lines locks current
           # coverage as a floor. Baseline measured was 55.40%.
           # Several PRs lifted coverage in steady increments; the
-          # preceding big-lift PR measured 75.84% lines (floor 74).
-          # This PR adds further tests across filetransfer (cleanup +
-          # collision + UUID-fallback branches), clipboard +
-          # clipboard_sync (run loops with bogus display via real
-          # xclip), web.rs (HTTP-level integration tests using a new
-          # insert_for_test SessionManager helper), session.rs
-          # (persist_sessions_in / restore_sessions_in refactor with
-          # temp-dir fixtures), tls.rs (build_tls_config_in refactor
-          # to exercise the self-signed cert generation + reuse +
-          # regenerate-on-corrupt branches against a temp state dir),
-          # and gpu.rs (enumerate_nvidia_gpus_in refactor to exercise
-          # /proc/driver/nvidia/gpus parsing against fixture trees).
-          # Measured coverage rose to 80.07% lines. floor(80.07 - 1) = 79.
+          # preceding big-lift PR measured 80.07% lines (floor 77).
+          # This PR (#45 big-lift-3) refactors several X11/X-server-bound
+          # functions to expose pure-logic helpers (URL builder, frame
+          # magic validator, browser/server message dispatchers, backoff
+          # math, JWT secret load/persist, bind-addr parser, encoder type
+          # routing, audio sample rate/channel mapping, validator splits)
+          # so the dispatch logic can be tested without driving X11,
+          # GStreamer, or PulseAudio. It also drives the WebSocket
+          # handler bodies via a real TCP server + tokio-tungstenite
+          # client (handle_browser_ws + handle_agent_ws end-to-end).
+          # Measured coverage rose to 83.47% lines. floor(83.47 - 1) = 82.
           # --ignore-filename-regex 'tests?/' excludes the test harness
           # modules from the floor so it tracks real source coverage
           # only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 77
+            --fail-under-lines 82

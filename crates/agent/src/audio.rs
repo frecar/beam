@@ -4,6 +4,31 @@ use libpulse_binding as pulse;
 use libpulse_simple_binding::Simple;
 use tracing::info;
 
+/// Map a channel count to an Opus [`Channels`] enum. Split out so the
+/// allowlist branching (1 = Mono, 2 = Stereo, anything else = error) can be
+/// unit-tested without actually building an [`OpusEncoder`].
+pub(crate) fn opus_channels_for(channels: u16) -> anyhow::Result<Channels> {
+    match channels {
+        1 => Ok(Channels::Mono),
+        2 => Ok(Channels::Stereo),
+        _ => anyhow::bail!("Unsupported channel count: {channels}"),
+    }
+}
+
+/// Map a sample-rate value (Hz) to an Opus [`SampleRate`] enum. Opus only
+/// supports a fixed set of sample rates (48/24/16/12/8 kHz). Anything else
+/// triggers an error from [`OpusEncoder::new`].
+pub(crate) fn opus_sample_rate_for(sample_rate: u32) -> anyhow::Result<SampleRate> {
+    match sample_rate {
+        48000 => Ok(SampleRate::Hz48000),
+        24000 => Ok(SampleRate::Hz24000),
+        16000 => Ok(SampleRate::Hz16000),
+        12000 => Ok(SampleRate::Hz12000),
+        8000 => Ok(SampleRate::Hz8000),
+        _ => anyhow::bail!("Unsupported sample rate for Opus: {sample_rate}"),
+    }
+}
+
 pub struct AudioCapture {
     simple: Simple,
     opus_encoder: OpusEncoder,
@@ -51,20 +76,8 @@ impl AudioCapture {
         )
         .map_err(|e| anyhow::anyhow!("PulseAudio connection failed: {e}"))?;
 
-        let opus_channels = match channels {
-            1 => Channels::Mono,
-            2 => Channels::Stereo,
-            _ => anyhow::bail!("Unsupported channel count: {channels}"),
-        };
-
-        let opus_sample_rate = match sample_rate {
-            48000 => SampleRate::Hz48000,
-            24000 => SampleRate::Hz24000,
-            16000 => SampleRate::Hz16000,
-            12000 => SampleRate::Hz12000,
-            8000 => SampleRate::Hz8000,
-            _ => anyhow::bail!("Unsupported sample rate for Opus: {sample_rate}"),
-        };
+        let opus_channels = opus_channels_for(channels)?;
+        let opus_sample_rate = opus_sample_rate_for(sample_rate)?;
 
         let mut opus_encoder =
             OpusEncoder::new(opus_sample_rate, opus_channels, Application::LowDelay)
@@ -337,5 +350,106 @@ mod tests {
             let restored = i16::from_le_bytes([bytes[0], bytes[1]]);
             assert_eq!(restored, original);
         }
+    }
+
+    // --- opus_channels_for ---
+
+    #[test]
+    fn opus_channels_mono() {
+        let channels = opus_channels_for(1).unwrap();
+        // The Channels enum doesn't derive Eq, but we can verify by matching.
+        assert!(matches!(channels, Channels::Mono));
+    }
+
+    #[test]
+    fn opus_channels_stereo() {
+        let channels = opus_channels_for(2).unwrap();
+        assert!(matches!(channels, Channels::Stereo));
+    }
+
+    #[test]
+    fn opus_channels_rejects_zero() {
+        let err = opus_channels_for(0).unwrap_err();
+        assert!(err.to_string().contains("Unsupported channel count"));
+    }
+
+    #[test]
+    fn opus_channels_rejects_three() {
+        let err = opus_channels_for(3).unwrap_err();
+        assert!(err.to_string().contains("Unsupported channel count"));
+        assert!(err.to_string().contains('3'));
+    }
+
+    #[test]
+    fn opus_channels_rejects_max() {
+        let err = opus_channels_for(u16::MAX).unwrap_err();
+        assert!(err.to_string().contains("Unsupported channel count"));
+    }
+
+    // --- opus_sample_rate_for ---
+
+    #[test]
+    fn opus_sample_rate_48khz() {
+        assert!(matches!(
+            opus_sample_rate_for(48000).unwrap(),
+            SampleRate::Hz48000
+        ));
+    }
+
+    #[test]
+    fn opus_sample_rate_24khz() {
+        assert!(matches!(
+            opus_sample_rate_for(24000).unwrap(),
+            SampleRate::Hz24000
+        ));
+    }
+
+    #[test]
+    fn opus_sample_rate_16khz() {
+        assert!(matches!(
+            opus_sample_rate_for(16000).unwrap(),
+            SampleRate::Hz16000
+        ));
+    }
+
+    #[test]
+    fn opus_sample_rate_12khz() {
+        assert!(matches!(
+            opus_sample_rate_for(12000).unwrap(),
+            SampleRate::Hz12000
+        ));
+    }
+
+    #[test]
+    fn opus_sample_rate_8khz() {
+        assert!(matches!(
+            opus_sample_rate_for(8000).unwrap(),
+            SampleRate::Hz8000
+        ));
+    }
+
+    #[test]
+    fn opus_sample_rate_rejects_44100() {
+        // CD-quality 44.1kHz is not in Opus's allowed set.
+        let err = opus_sample_rate_for(44100).unwrap_err();
+        assert!(err.to_string().contains("Unsupported sample rate"));
+        assert!(err.to_string().contains("44100"));
+    }
+
+    #[test]
+    fn opus_sample_rate_rejects_44_1khz_with_off_by_one_neighbors() {
+        // Nearby but invalid sample rates.
+        for bad in [47999, 48001, 11999, 12001, 0, 1, u32::MAX] {
+            assert!(
+                opus_sample_rate_for(bad).is_err(),
+                "Sample rate {bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn opus_sample_rate_error_mentions_value() {
+        let err = opus_sample_rate_for(12345).unwrap_err();
+        assert!(err.to_string().contains("12345"));
     }
 }

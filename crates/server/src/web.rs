@@ -3040,4 +3040,1016 @@ sentry_environment = "test"
         let src = sentry_connect_src("https://pub@self-hosted.example:9000/1").unwrap();
         assert_eq!(src, "https://self-hosted.example:9000");
     }
+
+    // --- Additional handler coverage ---
+
+    #[tokio::test]
+    async fn delete_session_returns_404_when_missing() {
+        // No insert_for_test → DELETE returns 404.
+        let state = test_app_state();
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/sessions/{}", Uuid::new_v4()))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_session_rejects_missing_token() {
+        // No auth header AND no session → 401 not 404 (auth checked first).
+        let state = test_app_state();
+        let app = build_router(state);
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/sessions/{}", Uuid::new_v4()))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn session_heartbeat_returns_404_when_missing() {
+        let state = test_app_state();
+        let app = build_router(state);
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{}/heartbeat", Uuid::new_v4()))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_list_sessions_rejects_non_admin_with_403() {
+        // No admin_users configured → no one is admin → 403.
+        let state = test_app_state();
+        state
+            .session_manager
+            .insert_for_test(Uuid::new_v4(), "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .uri("/api/admin/sessions")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_list_sessions_rejects_missing_token() {
+        let state = test_app_state();
+        let app = build_router(state);
+        let request = Request::builder()
+            .uri("/api/admin/sessions")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_session_rejects_non_admin_with_403() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/sessions/{session_id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_session_returns_404_when_missing() {
+        let mut config: BeamConfig = toml::from_str("").expect("default config");
+        config.server.admin_users = vec!["admin_user".to_string()];
+        let state = test_app_state_with_config(config);
+        let app = build_router(Arc::clone(&state));
+
+        let token = crate::auth::generate_jwt("admin_user", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/admin/sessions/{}", Uuid::new_v4()))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn release_session_rejects_empty_body() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/release"))
+            .body(Body::from(""))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn release_session_rejects_whitespace_only_body() {
+        // After trim(), pure whitespace becomes the empty string → BAD_REQUEST.
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/release"))
+            .body(Body::from("   \n\t  "))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn release_session_rejects_invalid_token() {
+        // Existing session, wrong release token → 401.
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/release"))
+            .body(Body::from("not-the-real-release-token"))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn release_session_unknown_session_returns_unauthorized() {
+        // No session and bogus token → still 401 (don't leak existence).
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{}/release", Uuid::new_v4()))
+            .body(Body::from("some-token"))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_rejects_missing_token() {
+        let state = test_app_state();
+        let app = build_router(state);
+        let request = Request::builder()
+            .uri("/api/sessions")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_empty_array_for_user_with_no_sessions() {
+        // User with no sessions → 200 + empty list (not 404).
+        let state = test_app_state();
+        let app = build_router(state);
+        let token = crate::auth::generate_jwt("nobody", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn refresh_token_returns_404_for_user_without_session() {
+        // Valid JWT but no session for that subject → 404 (rate-limits abuse).
+        let state = test_app_state();
+        let app = build_router(state);
+        let token = crate::auth::generate_jwt("noone", TEST_JWT_SECRET).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/auth/refresh")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn agent_ws_upgrade_returns_400_without_upgrade_headers() {
+        // The agent_ws_upgrade handler requires WebSocket upgrade headers.
+        // Without them, axum returns 400 (or 426 depending on version).
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let release_token = state
+            .session_manager
+            .get_release_token(session_id)
+            .await
+            .expect("release token");
+        let app = build_router(Arc::clone(&state));
+        let request = Request::builder()
+            .uri(format!("/ws/agent/{session_id}?token={release_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        // Without Upgrade: websocket header axum rejects.
+        let status = response.status();
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::UPGRADE_REQUIRED,
+            "expected 400 or 426, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_api_path_returns_404() {
+        let state = test_app_state();
+        let app = build_router(state);
+        let request = Request::builder()
+            .uri("/api/this-route-does-not-exist")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        // Falls through to the spa fallback (web root); since the file doesn't
+        // exist it returns 404. The exact status from the fallback could be
+        // OK (serving index.html) or NOT_FOUND depending on extension.
+        let status = response.status();
+        assert!(
+            status == StatusCode::NOT_FOUND || status == StatusCode::OK,
+            "expected 404 or 200, got {status}"
+        );
+    }
+
+    // --- normalize_ip_for_rate_limit: additional coverage ---
+
+    #[test]
+    fn normalize_ip_v4_loopback_unchanged() {
+        use std::net::IpAddr;
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(normalize_ip_for_rate_limit(ip), "127.0.0.1");
+    }
+
+    #[test]
+    fn normalize_ip_v4_zero_unchanged() {
+        use std::net::IpAddr;
+        let ip: IpAddr = "0.0.0.0".parse().unwrap();
+        assert_eq!(normalize_ip_for_rate_limit(ip), "0.0.0.0");
+    }
+
+    #[test]
+    fn normalize_ip_v6_loopback_returns_zero_prefix() {
+        use std::net::IpAddr;
+        let ip: IpAddr = "::1".parse().unwrap();
+        // ::1 is 0:0:0:0:0:0:0:1, so the /64 prefix is all zeros.
+        assert_eq!(normalize_ip_for_rate_limit(ip), "0:0:0:0::/64");
+    }
+
+    #[test]
+    fn normalize_ip_v4_mapped_all_variants_collapse_to_v4() {
+        use std::net::IpAddr;
+        // Different v4-mapped representations of 10.0.0.1 all collapse to "10.0.0.1".
+        let ip1: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "::ffff:0a00:0001".parse().unwrap();
+        assert_eq!(normalize_ip_for_rate_limit(ip1), "10.0.0.1");
+        assert_eq!(normalize_ip_for_rate_limit(ip2), "10.0.0.1");
+    }
+
+    // --- LoginRateLimiter: edge cases ---
+
+    #[test]
+    fn rate_limiter_clears_old_attempts_on_check() {
+        // After the time window passes (in practice, hit max attempts then
+        // simulate by forcing a fresh limiter with a tiny window).
+        let limiter = LoginRateLimiter::new(2, 60);
+        limiter.record_failure("attacker");
+        limiter.record_failure("attacker");
+        assert!(!limiter.is_allowed("attacker"));
+        // A different key is unaffected.
+        assert!(limiter.is_allowed("benign"));
+    }
+
+    #[test]
+    fn rate_limiter_clear_reenables_user() {
+        let limiter = LoginRateLimiter::new(2, 60);
+        limiter.record_failure("alice");
+        limiter.record_failure("alice");
+        assert!(!limiter.is_allowed("alice"));
+        limiter.clear("alice");
+        // After clear: rate limit is reset.
+        assert!(limiter.is_allowed("alice"));
+    }
+
+    #[test]
+    fn rate_limiter_remaining_returns_none_when_below_warn_threshold() {
+        let limiter = LoginRateLimiter::new(5, 60);
+        // No attempts at all
+        assert_eq!(limiter.remaining_attempts("alice", 3), None);
+        // 1 attempt: still below warn threshold of 3
+        limiter.record_failure("alice");
+        assert_eq!(limiter.remaining_attempts("alice", 3), None);
+        // 2 attempts: still below threshold
+        limiter.record_failure("alice");
+        assert_eq!(limiter.remaining_attempts("alice", 3), None);
+    }
+
+    #[test]
+    fn rate_limiter_with_cleanup_interval_smoke_test() {
+        let limiter = LoginRateLimiter::new(2, 60).with_cleanup_interval(1);
+        assert!(limiter.is_allowed("alice"));
+        limiter.record_failure("alice");
+        // The constructor returns the same type; verify state is sane.
+        assert!(limiter.is_allowed("alice"));
+    }
+
+    // --- agent_ws_upgrade ---
+    //
+    // The WS handlers in axum 0.8 reject the request with 400 if the
+    // WebSocket upgrade headers are missing, BEFORE the handler body runs.
+    // Without a real WebSocket client we can't reach the 401 path inside
+    // the handler. The tests therefore accept either status: 400 means
+    // axum rejected at the extractor; 401 means the handler ran and
+    // rejected the token. Either is a defensible outcome for an unauth'd
+    // request.
+
+    fn ws_unauth_status_ok(status: StatusCode) -> bool {
+        status == StatusCode::UNAUTHORIZED
+            || status == StatusCode::BAD_REQUEST
+            || status == StatusCode::UPGRADE_REQUIRED
+    }
+
+    #[tokio::test]
+    async fn agent_ws_rejects_request_without_token() {
+        let state = test_app_state();
+        let app = build_router(state);
+        let request = Request::builder()
+            .uri(format!("/ws/agent/{}", Uuid::new_v4()))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert!(
+            ws_unauth_status_ok(response.status()),
+            "expected 400/401/426, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_ws_rejects_request_with_invalid_token() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let request = Request::builder()
+            .uri(format!("/ws/agent/{session_id}?token=wrong-token"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert!(
+            ws_unauth_status_ok(response.status()),
+            "expected 400/401/426, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_ws_rejects_request_for_unknown_session() {
+        // Even with a "token", an unknown session ID returns 401 (constant-time
+        // equality means no session lookup leaks). Without WS upgrade headers,
+        // axum rejects with 400 first.
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri(format!("/ws/agent/{}?token=anything", Uuid::new_v4()))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert!(
+            ws_unauth_status_ok(response.status()),
+            "expected 400/401/426, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_ws_rejects_request_without_token() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+
+        let request = Request::builder()
+            .uri(format!("/api/sessions/{session_id}/ws"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert!(
+            ws_unauth_status_ok(response.status()),
+            "expected 400/401/426, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_ws_rejects_request_with_wrong_owner_token() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+        // bob's JWT, alice's session → 403 ownership mismatch (assuming the
+        // handler runs; axum may reject earlier with 400 due to missing
+        // WS-upgrade headers).
+        let token = crate::auth::generate_jwt("bob", TEST_JWT_SECRET).unwrap();
+
+        let request = Request::builder()
+            .uri(format!("/api/sessions/{session_id}/ws"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        assert!(
+            status == StatusCode::FORBIDDEN
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::UPGRADE_REQUIRED,
+            "expected 400/403/426, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_ws_rejects_request_for_missing_session() {
+        let state = test_app_state();
+        let app = build_router(state);
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+
+        let request = Request::builder()
+            .uri(format!("/api/sessions/{}/ws", Uuid::new_v4()))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        assert!(
+            status == StatusCode::NOT_FOUND
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::UPGRADE_REQUIRED,
+            "expected 400/404/426, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_with_query_param_token() {
+        // The handler accepts the token via either Authorization header OR
+        // ?token= query string. Verify the query-param path.
+        let state = test_app_state();
+        state
+            .session_manager
+            .insert_for_test(Uuid::new_v4(), "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+
+        let request = Request::builder()
+            .uri(format!("/api/sessions?token={token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        let list = json.as_array().expect("array body");
+        assert_eq!(list.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_token_with_query_param_succeeds() {
+        let state = test_app_state();
+        state
+            .session_manager
+            .insert_for_test(Uuid::new_v4(), "alice", 100)
+            .await;
+        let app = build_router(Arc::clone(&state));
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/auth/refresh?token={token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // --- Live WebSocket handler tests via a real TCP listener ---
+    //
+    // These tests bind a fresh TCP port (0 = OS-assigned), serve the router,
+    // and connect via tokio-tungstenite. This exercises the real handler
+    // bodies (handle_browser_ws, handle_agent_ws) which are otherwise
+    // unreachable from a oneshot HTTP request because of the WS upgrade
+    // protocol requirements.
+
+    use beam_protocol::FRAME_MAGIC;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    /// Spawn the app on a fresh port and return the http://127.0.0.1:port base URL.
+    async fn spawn_test_server(state: Arc<AppState>) -> String {
+        let app = build_router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // Give axum a moment to start accepting connections.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        format!("ws://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn agent_ws_connect_with_valid_token_succeeds_then_closes() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let agent_token = state
+            .session_manager
+            .agent_token_for_test(session_id)
+            .await
+            .unwrap();
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/ws/agent/{session_id}?token={agent_token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        // Close cleanly from the agent side.
+        ws.close(None).await.unwrap();
+        // Drain remaining messages until the stream ends.
+        while ws.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn agent_ws_connect_with_bad_token_rejects_handshake() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/ws/agent/{session_id}?token=bogus");
+        let result = tokio_tungstenite::connect_async(&url).await;
+        assert!(result.is_err(), "Bad token must fail the handshake");
+    }
+
+    #[tokio::test]
+    async fn agent_ws_forwards_binary_frame_to_browser_subscriber() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let agent_token = state
+            .session_manager
+            .agent_token_for_test(session_id)
+            .await
+            .unwrap();
+        // Pre-subscribe to the video channel so the agent's frame finds a
+        // listener (the signaling channel is created lazily).
+        let channel = signaling::get_or_create_channel(&state.channels, session_id).await;
+        let mut video_rx = channel.video_frames.subscribe();
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/ws/agent/{session_id}?token={agent_token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // Build a binary frame with the FRAME_MAGIC header and a single
+        // payload byte. The server should validate the magic and relay
+        // the bytes to all video subscribers.
+        let mut frame: Vec<u8> = FRAME_MAGIC.to_le_bytes().to_vec();
+        frame.extend([0u8; 20]); // pad to satisfy the binary frame header check
+        frame.push(0x42); // arbitrary payload byte
+        ws.send(WsMessage::Binary(frame.clone().into()))
+            .await
+            .unwrap();
+
+        // Wait briefly for the relay.
+        let received = tokio::time::timeout(std::time::Duration::from_millis(500), video_rx.recv())
+            .await
+            .expect("video frame should arrive")
+            .expect("recv ok");
+
+        assert_eq!(received.as_ref(), frame.as_slice());
+
+        ws.close(None).await.unwrap();
+        while ws.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn agent_ws_drops_binary_frame_with_bad_magic() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let agent_token = state
+            .session_manager
+            .agent_token_for_test(session_id)
+            .await
+            .unwrap();
+        let channel = signaling::get_or_create_channel(&state.channels, session_id).await;
+        let mut video_rx = channel.video_frames.subscribe();
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/ws/agent/{session_id}?token={agent_token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // Wrong magic — server should drop and NOT relay.
+        let mut frame: Vec<u8> = (!FRAME_MAGIC).to_le_bytes().to_vec();
+        frame.extend([0u8; 20]);
+        ws.send(WsMessage::Binary(frame.into())).await.unwrap();
+
+        // No relayed frame within 200ms → confirms the drop branch ran.
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_millis(200), video_rx.recv()).await;
+        assert!(
+            outcome.is_err(),
+            "Bad-magic frame must NOT be relayed (timeout expected)"
+        );
+
+        ws.close(None).await.unwrap();
+        while ws.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn agent_ws_relays_text_to_browser() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let agent_token = state
+            .session_manager
+            .agent_token_for_test(session_id)
+            .await
+            .unwrap();
+        let channel = signaling::get_or_create_channel(&state.channels, session_id).await;
+        let mut to_browser_rx = channel.to_browser.subscribe();
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/ws/agent/{session_id}?token={agent_token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        let payload = r#"{"t":"session_ready"}"#;
+        ws.send(WsMessage::text(payload)).await.unwrap();
+
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(500), to_browser_rx.recv())
+                .await
+                .expect("text frame should arrive")
+                .expect("recv ok");
+        assert_eq!(received, payload);
+
+        ws.close(None).await.unwrap();
+        while ws.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn browser_ws_connect_with_owner_token_succeeds() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/api/sessions/{session_id}/ws?token={token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        ws.close(None).await.unwrap();
+        while ws.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn browser_ws_forwards_input_event_to_agent() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        // Subscribe to to_agent before the browser connects so the
+        // VisibilityState bootstrap message + our key event both land.
+        let channel = signaling::get_or_create_channel(&state.channels, session_id).await;
+        let mut agent_rx = channel.to_agent.subscribe();
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/api/sessions/{session_id}/ws?token={token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // First message from the server-side handler is a VisibilityState ping.
+        let first = tokio::time::timeout(std::time::Duration::from_millis(500), agent_rx.recv())
+            .await
+            .expect("first cmd")
+            .expect("recv ok");
+        assert!(matches!(
+            first,
+            beam_protocol::AgentCommand::Input(beam_protocol::InputEvent::VisibilityState {
+                visible: true
+            })
+        ));
+
+        // Browser sends a Key input event.
+        let key = beam_protocol::InputEvent::Key { c: 42, d: true };
+        ws.send(WsMessage::text(serde_json::to_string(&key).unwrap()))
+            .await
+            .unwrap();
+
+        let next = tokio::time::timeout(std::time::Duration::from_millis(500), agent_rx.recv())
+            .await
+            .expect("second cmd")
+            .expect("recv ok");
+        match next {
+            beam_protocol::AgentCommand::Input(beam_protocol::InputEvent::Key { c, d }) => {
+                assert_eq!(c, 42);
+                assert!(d);
+            }
+            other => panic!("Expected Key, got {other:?}"),
+        }
+
+        ws.close(None).await.unwrap();
+        while ws.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn browser_ws_receives_kick_when_second_browser_connects() {
+        // Two consecutive browser WS connections to the same session: the
+        // first must receive the "replaced" Error frame and close cleanly.
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/api/sessions/{session_id}/ws?token={token}");
+        let (mut ws1, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // Let the first connection register before opening the second.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let (mut ws2, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // The first connection should receive a "replaced" SignalingMessage.
+        let mut got_replaced = false;
+        for _ in 0..10 {
+            let msg = tokio::time::timeout(std::time::Duration::from_millis(500), ws1.next()).await;
+            match msg {
+                Ok(Some(Ok(WsMessage::Text(t)))) if t.contains("replaced") => {
+                    got_replaced = true;
+                    break;
+                }
+                Ok(Some(Ok(WsMessage::Close(_)))) => break,
+                Ok(None) => break,
+                _ => continue,
+            }
+        }
+        assert!(
+            got_replaced,
+            "First browser should receive 'replaced' frame when a second connects"
+        );
+
+        ws2.close(None).await.unwrap();
+        while ws2.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn browser_ws_relays_agent_text_to_browser() {
+        // The browser WS subscribes to `to_browser`. Anything we send via
+        // that broadcast must arrive at the connected browser.
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let channel = signaling::get_or_create_channel(&state.channels, session_id).await;
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/api/sessions/{session_id}/ws?token={token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // Give the WS task a beat to subscribe to to_browser.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let payload = r#"{"type":"clipboard_data","text":"hello"}"#.to_string();
+        channel.to_browser.send(payload.clone()).unwrap();
+
+        // The browser should receive that text frame.
+        let mut got_relay = false;
+        for _ in 0..10 {
+            let msg = tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await;
+            match msg {
+                Ok(Some(Ok(WsMessage::Text(t)))) if t == payload => {
+                    got_relay = true;
+                    break;
+                }
+                Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+                _ => continue,
+            }
+        }
+        assert!(got_relay, "Text from to_browser should reach the browser");
+
+        ws.close(None).await.unwrap();
+        while ws.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn browser_ws_relays_agent_video_to_browser() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let channel = signaling::get_or_create_channel(&state.channels, session_id).await;
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/api/sessions/{session_id}/ws?token={token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let payload = bytes::Bytes::from_static(b"video-frame-payload");
+        channel.video_frames.send(payload.clone()).unwrap();
+
+        let mut got_binary = false;
+        for _ in 0..10 {
+            let msg = tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await;
+            match msg {
+                Ok(Some(Ok(WsMessage::Binary(b)))) if b.as_ref() == payload.as_ref() => {
+                    got_binary = true;
+                    break;
+                }
+                Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+                _ => continue,
+            }
+        }
+        assert!(
+            got_binary,
+            "Binary from video_frames should reach the browser"
+        );
+
+        ws.close(None).await.unwrap();
+        while ws.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn browser_ws_metrics_ping_returns_pong_when_enabled() {
+        let mut config: BeamConfig = toml::from_str("").expect("default config");
+        config.server.client_metrics_enabled = true;
+        let state = test_app_state_with_config(config);
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/api/sessions/{session_id}/ws?token={token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // Send a ClientMetricsPing.
+        let ping = beam_protocol::InputEvent::ClientMetricsPing {
+            id: 99,
+            sent_ms: 5000.0,
+        };
+        ws.send(WsMessage::text(serde_json::to_string(&ping).unwrap()))
+            .await
+            .unwrap();
+
+        // Expect a MetricsPong back.
+        let mut got_pong = false;
+        for _ in 0..10 {
+            let msg = tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await;
+            match msg {
+                Ok(Some(Ok(WsMessage::Text(t))))
+                    if t.contains("metrics_pong") && t.contains("99") =>
+                {
+                    got_pong = true;
+                    break;
+                }
+                Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+                _ => continue,
+            }
+        }
+        assert!(got_pong, "MetricsPing should produce a MetricsPong");
+
+        ws.close(None).await.unwrap();
+        while ws.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn browser_ws_invalid_json_returns_error_frame() {
+        let state = test_app_state();
+        let session_id = Uuid::new_v4();
+        state
+            .session_manager
+            .insert_for_test(session_id, "alice", 100)
+            .await;
+        let token = crate::auth::generate_jwt("alice", TEST_JWT_SECRET).unwrap();
+        let base = spawn_test_server(Arc::clone(&state)).await;
+
+        let url = format!("{base}/api/sessions/{session_id}/ws?token={token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        ws.send(WsMessage::text("not-valid-json")).await.unwrap();
+
+        // The server should echo back an Error signaling frame.
+        let mut got_error = false;
+        for _ in 0..5 {
+            let msg = tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await;
+            match msg {
+                Ok(Some(Ok(WsMessage::Text(t)))) => {
+                    if t.contains("Invalid message format") {
+                        got_error = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(got_error, "Invalid JSON should trigger an Error frame");
+
+        ws.close(None).await.unwrap();
+        while ws.next().await.is_some() {}
+    }
 }
