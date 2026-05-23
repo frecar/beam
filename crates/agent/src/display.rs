@@ -103,26 +103,10 @@ impl VirtualDisplay {
         // needs_root_rights=yes so Xorg can access /dev/tty0 for VT management.
         // Dev/source installs: config in /tmp, use Xorg binary directly with
         // absolute path (no elevated privilege restrictions).
-        let (xorg_bin, config_arg): (&str, &str) = if config_path.starts_with("/etc/X11/") {
-            // Relative path required when Xorg runs with elevated privileges.
-            // Strip the /etc/X11/ prefix to get the relative path (e.g.
-            // "/etc/X11/beam-xorg.conf" -> "beam-xorg.conf", or
-            // "/etc/X11/beam/beam-xorg-20.conf" -> "beam/beam-xorg-20.conf").
-            let relative = config_path
-                .strip_prefix("/etc/X11/")
-                .unwrap_or(&config_path);
-            ("Xorg", relative)
-        } else {
-            // Dev mode: use direct binary with absolute path
-            if std::path::Path::new("/usr/lib/xorg/Xorg").exists() {
-                ("/usr/lib/xorg/Xorg", config_path.as_str())
-            } else {
-                ("Xorg", config_path.as_str())
-            }
-        };
-
-        // Need to own the config_arg string for the lifetime of the Command
-        let config_arg_owned = config_arg.to_string();
+        let direct_xorg_exists = std::path::Path::new("/usr/lib/xorg/Xorg").exists();
+        let (xorg_bin_owned, config_arg_owned) =
+            resolve_xorg_invocation(&config_path, direct_xorg_exists);
+        let xorg_bin = xorg_bin_owned.as_str();
 
         // Capture Xorg stderr to diagnose startup failures
         let xorg_log_path = format!("/tmp/beam-xorg-stderr-{display_num}.log");
@@ -191,7 +175,7 @@ impl VirtualDisplay {
             .output();
 
         // Only delete temp configs on drop, not the static package config
-        let cleanup_config = if config_path.starts_with("/tmp/") {
+        let cleanup_config = if xorg_config_needs_cleanup(&config_path) {
             Some(config_path)
         } else {
             None
@@ -804,7 +788,7 @@ pub fn set_display_resolution(
     if !newmode_output.status.success() {
         let stderr = String::from_utf8_lossy(&newmode_output.stderr);
         // "already exists" is expected for repeated resizes
-        if !stderr.contains("already exists") {
+        if !is_benign_xrandr_stderr(&stderr) {
             warn!("xrandr --newmode {mode_name} failed: {stderr}");
         }
     }
@@ -817,7 +801,7 @@ pub fn set_display_resolution(
         .context("Failed to run xrandr --addmode")?;
     if !addmode_output.status.success() {
         let stderr = String::from_utf8_lossy(&addmode_output.stderr);
-        if !stderr.contains("already exists") {
+        if !is_benign_xrandr_stderr(&stderr) {
             warn!("xrandr --addmode {output_name} {mode_name} failed: {stderr}");
         }
     }
@@ -841,6 +825,60 @@ pub fn set_display_resolution(
     Ok(())
 }
 
+/// Resolve which Xorg invocation to use (binary path + config argument)
+/// from a config file path. Returns `(xorg_bin, config_arg)`.
+///
+/// - Config under `/etc/X11/` → use the `Xorg` wrapper (setuid for VT
+///   management) with the path relative to `/etc/X11/`.
+/// - Config elsewhere → use the absolute path. Prefer the direct binary
+///   at `/usr/lib/xorg/Xorg` when present (skips setuid restrictions).
+///
+/// Pure helper so the path logic can be unit-tested without spawning Xorg.
+pub(crate) fn resolve_xorg_invocation(
+    config_path: &str,
+    direct_xorg_binary_exists: bool,
+) -> (String, String) {
+    if let Some(relative) = config_path.strip_prefix("/etc/X11/") {
+        return ("Xorg".to_string(), relative.to_string());
+    }
+    let xorg_bin = if direct_xorg_binary_exists {
+        "/usr/lib/xorg/Xorg".to_string()
+    } else {
+        "Xorg".to_string()
+    };
+    (xorg_bin, config_path.to_string())
+}
+
+/// Decide whether a Xorg config path is a temp config (in `/tmp/`) that
+/// should be cleaned up on VirtualDisplay drop, vs. a static package
+/// config (in `/etc/X11/`) that should be left alone.
+pub(crate) fn xorg_config_needs_cleanup(config_path: &str) -> bool {
+    config_path.starts_with("/tmp/")
+}
+
+/// Decide whether an xrandr stderr message represents a "benign" outcome
+/// (the mode is already added) versus a real error worth warning about.
+/// Repeated resizes routinely hit "already exists" — log spam should be
+/// suppressed for that case but kept for real failures.
+pub(crate) fn is_benign_xrandr_stderr(stderr: &str) -> bool {
+    stderr.contains("already exists")
+}
+
+/// Parse `xrandr --query` stdout and return the first connected output
+/// name (e.g. "DUMMY0", "DFP-1", "HDMI-A-1"). Returns `None` if no line
+/// contains " connected" (which is a fall-through to the production
+/// default of "DUMMY0").
+pub(crate) fn parse_xrandr_connected_output(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        if line.contains(" connected")
+            && let Some(name) = line.split_whitespace().next()
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
 /// Detect the xrandr output name for a display.
 /// Parses `xrandr --query` and returns the first connected output name.
 /// Falls back to "DUMMY0" if detection fails.
@@ -857,12 +895,8 @@ fn detect_xrandr_output(x_display: &str) -> String {
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 // Parse lines like "DUMMY0 connected primary 1920x1080+0+0"
                 // or "DFP-1 connected 1920x1080+0+0"
-                for line in stdout.lines() {
-                    if line.contains(" connected")
-                        && let Some(name) = line.split_whitespace().next()
-                    {
-                        return name.to_string();
-                    }
+                if let Some(name) = parse_xrandr_connected_output(&stdout) {
+                    return name;
                 }
                 warn!(
                     x_display,
@@ -2220,5 +2254,674 @@ mod tests {
         let (w, h) = clamp_resize_dimensions(2000, 1500, 0, 1080).unwrap();
         assert_eq!(w, 2000);
         assert_eq!(h, 1080);
+    }
+
+    // --- pa_config ---
+
+    #[test]
+    fn pa_config_uses_runtime_dir_in_socket_path() {
+        // Socket path must reference the runtime dir verbatim.
+        let cfg = pa_config("/tmp/beam-pulse-10");
+        assert!(cfg.contains("/tmp/beam-pulse-10/native"));
+    }
+
+    #[test]
+    fn pa_config_contains_required_modules() {
+        let cfg = pa_config("/tmp/test-runtime");
+        // null-sink — virtual sink so beam-agent can capture from monitor
+        assert!(cfg.contains("module-null-sink"));
+        // native-protocol-unix — actual TCP-replacement socket
+        assert!(cfg.contains("module-native-protocol-unix"));
+        // always-sink — ensures something is always playing if not specified
+        assert!(cfg.contains("module-always-sink"));
+        // default sink — apps fall through to this if they don't pick one
+        assert!(cfg.contains("set-default-sink beam"));
+    }
+
+    #[test]
+    fn pa_config_enables_anonymous_auth() {
+        // auth-anonymous=1 lets the beam-agent process talk to PulseAudio
+        // without exchanging cookies — fine because the socket is in a
+        // 0700 runtime dir and only beam-agent can reach it.
+        let cfg = pa_config("/tmp/x");
+        assert!(cfg.contains("auth-anonymous=1"));
+    }
+
+    #[test]
+    fn pa_config_handles_paths_with_spaces() {
+        // Defensive: even a path with unusual characters must round-trip
+        // into the format! template without panicking.
+        let cfg = pa_config("/tmp/beam pulse");
+        assert!(cfg.contains("/tmp/beam pulse/native"));
+    }
+
+    // --- generate_nvidia_xorg_config ---
+
+    #[test]
+    fn nvidia_config_includes_bus_id() {
+        let cfg = generate_nvidia_xorg_config("PCI:1:0:0", "DFP-1", "/etc/X11/beam/edid.bin");
+        assert!(cfg.contains("PCI:1:0:0"));
+    }
+
+    #[test]
+    fn nvidia_config_includes_dfp_output() {
+        let cfg = generate_nvidia_xorg_config("PCI:0:0:0", "DFP-2", "/etc/X11/beam/edid.bin");
+        assert!(cfg.contains("DFP-2"));
+        // ConnectedMonitor is the NVIDIA option that names the virtual output
+        assert!(cfg.contains("ConnectedMonitor"));
+    }
+
+    #[test]
+    fn nvidia_config_includes_custom_edid() {
+        let cfg =
+            generate_nvidia_xorg_config("PCI:0:0:0", "DFP-1", "/etc/X11/beam/beam-edid-10.bin");
+        assert!(cfg.contains("CustomEDID"));
+        assert!(cfg.contains("/etc/X11/beam/beam-edid-10.bin"));
+    }
+
+    #[test]
+    fn nvidia_config_pairs_dfp_with_edid_path() {
+        // The CustomEDID syntax is "{output}:{edid_path}" — verify both ends.
+        let cfg = generate_nvidia_xorg_config("PCI:0:0:0", "DFP-3", "/path/to/edid.bin");
+        assert!(cfg.contains("DFP-3:/path/to/edid.bin"));
+    }
+
+    #[test]
+    fn nvidia_config_uses_nvidia_driver() {
+        let cfg = generate_nvidia_xorg_config("PCI:0:0:0", "DFP-1", "/edid");
+        // Section "Device" must declare driver "nvidia"
+        assert!(cfg.contains(r#"Driver      "nvidia""#));
+    }
+
+    #[test]
+    fn nvidia_config_disables_auto_devices() {
+        let cfg = generate_nvidia_xorg_config("PCI:0:0:0", "DFP-1", "/edid");
+        // No keyboards/mice — beam-agent injects via XTEST only.
+        assert!(cfg.contains(r#"Option "AutoAddDevices" "false""#));
+        assert!(cfg.contains(r#"Option "AutoEnableDevices" "false""#));
+    }
+
+    #[test]
+    fn nvidia_config_disables_vt_switching() {
+        // DontVTSwitch prevents the X server from grabbing the console.
+        let cfg = generate_nvidia_xorg_config("PCI:0:0:0", "DFP-1", "/edid");
+        assert!(cfg.contains(r#"Option "DontVTSwitch" "true""#));
+    }
+
+    #[test]
+    fn nvidia_config_allows_empty_initial_config() {
+        // AllowEmptyInitialConfiguration is required for headless boot —
+        // without it Xorg refuses to start if no monitor is connected.
+        let cfg = generate_nvidia_xorg_config("PCI:0:0:0", "DFP-1", "/edid");
+        assert!(cfg.contains(r#"Option      "AllowEmptyInitialConfiguration" "True""#));
+    }
+
+    // --- generate_xorg_config (dummy driver) ---
+
+    #[test]
+    fn dummy_xorg_config_uses_dummy_driver() {
+        let cfg = generate_xorg_config(1920, 1080);
+        assert!(cfg.contains(r#"Driver      "dummy""#));
+    }
+
+    #[test]
+    fn dummy_xorg_config_no_auto_devices() {
+        let cfg = generate_xorg_config(1280, 720);
+        assert!(cfg.contains(r#"Option "AutoAddDevices" "false""#));
+        assert!(cfg.contains(r#"Option "AutoEnableDevices" "false""#));
+    }
+
+    #[test]
+    fn dummy_xorg_config_dont_vt_switch() {
+        let cfg = generate_xorg_config(800, 600);
+        assert!(cfg.contains(r#"Option "DontVTSwitch" "true""#));
+    }
+
+    #[test]
+    fn dummy_xorg_config_depth_24() {
+        let cfg = generate_xorg_config(1920, 1080);
+        assert!(cfg.contains("DefaultDepth 24"));
+    }
+
+    // --- generate_modeline ---
+
+    #[test]
+    fn modeline_pixel_clock_scales_with_area() {
+        let small = generate_modeline(800, 600, 60);
+        let large = generate_modeline(1920, 1080, 60);
+        let small_clock: f64 = small.split_whitespace().next().unwrap().parse().unwrap();
+        let large_clock: f64 = large.split_whitespace().next().unwrap().parse().unwrap();
+        assert!(large_clock > small_clock);
+    }
+
+    #[test]
+    fn modeline_includes_refresh_dependent_clock() {
+        let m30 = generate_modeline(1920, 1080, 30);
+        let m60 = generate_modeline(1920, 1080, 60);
+        let c30: f64 = m30.split_whitespace().next().unwrap().parse().unwrap();
+        let c60: f64 = m60.split_whitespace().next().unwrap().parse().unwrap();
+        assert!(c60 > c30, "60Hz should have higher pixel clock than 30Hz");
+    }
+
+    #[test]
+    fn modeline_blanking_intervals_present() {
+        // h_sync_start = width + 48
+        let ml = generate_modeline(1920, 1080, 60);
+        let parts: Vec<&str> = ml.split_whitespace().collect();
+        let h_sync_start: u32 = parts[2].parse().unwrap();
+        assert_eq!(h_sync_start, 1920 + 48);
+        let h_sync_end: u32 = parts[3].parse().unwrap();
+        assert_eq!(h_sync_end, 1920 + 48 + 32);
+        let v_sync_start: u32 = parts[6].parse().unwrap();
+        assert_eq!(v_sync_start, 1080 + 3);
+    }
+
+    #[test]
+    fn modeline_4k_dimensions_work() {
+        let ml = generate_modeline(3840, 2160, 60);
+        let parts: Vec<&str> = ml.split_whitespace().collect();
+        assert_eq!(parts[1], "3840");
+        assert_eq!(parts[5], "2160");
+    }
+
+    // --- which_exists ---
+
+    #[test]
+    fn which_exists_finds_common_unix_binary() {
+        // /bin/sh exists on every supported platform.
+        assert!(which_exists("sh"));
+    }
+
+    #[test]
+    fn which_exists_returns_false_for_missing_binary() {
+        // A 32-character random suffix vastly reduces the odds of a hit.
+        assert!(!which_exists("definitely-not-a-real-binary-x9q2r5"));
+    }
+
+    // --- is_snap_binary ---
+
+    #[test]
+    fn is_snap_binary_false_for_nonexistent() {
+        // `which` returns nonzero → path is None → false.
+        assert!(!is_snap_binary("definitely-not-a-real-binary-x9q2r5"));
+    }
+
+    #[test]
+    fn is_snap_binary_false_for_regular_binary() {
+        // /bin/sh is not a snap wrapper.
+        assert!(!is_snap_binary("sh"));
+    }
+
+    // --- find_non_snap_app ---
+
+    #[test]
+    fn find_non_snap_app_returns_first_found() {
+        // 'sh' is universally available; should be picked first.
+        assert_eq!(
+            find_non_snap_app(&["definitely-not-a-real-binary-x9q2r5", "sh"]),
+            Some("sh")
+        );
+    }
+
+    #[test]
+    fn find_non_snap_app_returns_none_when_all_missing() {
+        assert_eq!(
+            find_non_snap_app(&[
+                "definitely-not-a-real-binary-a",
+                "definitely-not-a-real-binary-b"
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn find_non_snap_app_handles_empty_list() {
+        assert_eq!(find_non_snap_app(&[]), None);
+    }
+
+    // --- is_display_running ---
+
+    #[test]
+    fn is_display_running_false_when_no_lockfile() {
+        // Display number 99999 has no lock file in /tmp under any
+        // realistic test environment.
+        assert!(!is_display_running(99_999));
+    }
+
+    #[test]
+    fn is_display_running_false_for_garbage_lockfile() {
+        // Write a lockfile with non-numeric PID — should return false.
+        let path = "/tmp/.X88888-lock";
+        let _ = std::fs::write(path, "not-a-pid");
+        let result = is_display_running(88_888);
+        let _ = std::fs::remove_file(path);
+        assert!(!result);
+    }
+
+    #[test]
+    fn is_display_running_false_for_dead_pid() {
+        // Write a lockfile with a likely-dead high PID — kill(pid, 0) returns
+        // -1 with ESRCH for nonexistent process.
+        let path = "/tmp/.X77777-lock";
+        // 2^22 - 1 = highest possible PID by default on Linux; the actual
+        // process is extremely unlikely to exist mid-test.
+        let _ = std::fs::write(path, "4194303\n");
+        let result = is_display_running(77_777);
+        let _ = std::fs::remove_file(path);
+        assert!(!result);
+    }
+
+    // --- try_persistent_config_in / ensure_persistent_config ---
+
+    fn temp_home() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "beam-display-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4(),
+        ))
+    }
+
+    #[test]
+    fn try_persistent_config_creates_config_dir_on_first_session() {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        let (config_dir, first) = try_persistent_config_in(home.to_str().unwrap()).unwrap();
+        assert!(first, "first session should be true");
+        assert!(std::path::Path::new(&config_dir).exists());
+        // The sentinel file marks initialization complete
+        let sentinel = home.join(".local/share/beam/.initialized");
+        assert!(sentinel.exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn try_persistent_config_returns_false_for_subsequent_session() {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        let (_, first1) = try_persistent_config_in(home.to_str().unwrap()).unwrap();
+        assert!(first1);
+        // Second call: sentinel exists, so first should be false
+        let (_, first2) = try_persistent_config_in(home.to_str().unwrap()).unwrap();
+        assert!(!first2, "second session should be false");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn try_persistent_config_seeds_xfce_xml() {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        let (config_dir, _) = try_persistent_config_in(home.to_str().unwrap()).unwrap();
+        // xfwm4.xml should have been written
+        let xfwm = format!("{config_dir}/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml");
+        assert!(std::path::Path::new(&xfwm).exists(), "xfwm4.xml missing");
+        let contents = std::fs::read_to_string(&xfwm).unwrap();
+        assert!(contents.contains("use_compositing"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn try_persistent_config_seeds_gtk3_settings() {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        let (config_dir, _) = try_persistent_config_in(home.to_str().unwrap()).unwrap();
+        let gtk = format!("{config_dir}/gtk-3.0/settings.ini");
+        assert!(std::path::Path::new(&gtk).exists());
+        let contents = std::fs::read_to_string(&gtk).unwrap();
+        assert!(contents.contains("gtk-enable-animations=false"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn try_persistent_config_writes_autostart_overrides() {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        let (config_dir, _) = try_persistent_config_in(home.to_str().unwrap()).unwrap();
+        // Each autostart entry written should be Hidden=true
+        let autostart = format!("{config_dir}/autostart");
+        assert!(std::path::Path::new(&autostart).exists());
+        // Spot-check one entry
+        let one = format!("{autostart}/update-notifier.desktop");
+        assert!(std::path::Path::new(&one).exists());
+        let contents = std::fs::read_to_string(&one).unwrap();
+        assert!(contents.contains("Hidden=true"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn try_persistent_config_in_writes_config_version() {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        let _ = try_persistent_config_in(home.to_str().unwrap()).unwrap();
+        let version = home.join(".local/share/beam/.config-version");
+        assert!(version.exists());
+        assert_eq!(std::fs::read_to_string(&version).unwrap(), "1");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn try_persistent_config_in_uses_0700_perms() {
+        // Config dir must be 0700 (only the user can read).
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        let (config_dir, _) = try_persistent_config_in(home.to_str().unwrap()).unwrap();
+        let mode = std::fs::metadata(&config_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn try_persistent_config_in_fails_when_home_unwritable() {
+        // /proc is not writable — try_persistent_config_in should surface an error.
+        let result = try_persistent_config_in("/proc/nonexistent-beam-home");
+        assert!(result.is_err());
+    }
+
+    // (No tests mutating HOME directly — the existing
+    // persistent_config_fallback_on_error test already covers the ephemeral
+    // fallback path via ensure_persistent_config, and concurrent HOME mutation
+    // across tests is unsafe in Rust 2024.)
+
+    // --- seed_default_config ---
+
+    #[test]
+    fn seed_default_config_writes_mimeapps_when_browser_detected() {
+        // mimeapps.list is only seeded when a non-snap browser is detected.
+        // In CI environments that may be absent — guard the assertion.
+        let dir = temp_home();
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_default_config(dir.to_str().unwrap());
+        let mimeapps = dir.join("mimeapps.list");
+        // Don't assert presence — depends on the test host's installed apps.
+        // Instead, assert that IF it exists, it has a known scheme handler.
+        if mimeapps.exists() {
+            let contents = std::fs::read_to_string(&mimeapps).unwrap();
+            assert!(contents.contains("x-scheme-handler/http"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_default_config_writes_helpers_rc() {
+        let dir = temp_home();
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_default_config(dir.to_str().unwrap());
+        let helpers = dir.join("xfce4/helpers.rc");
+        assert!(helpers.exists());
+        let contents = std::fs::read_to_string(&helpers).unwrap();
+        assert!(contents.starts_with("[Default]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_default_config_writes_gtk_css_for_zero_transitions() {
+        let dir = temp_home();
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_default_config(dir.to_str().unwrap());
+        let css = dir.join("gtk-3.0/gtk.css");
+        assert!(css.exists());
+        let contents = std::fs::read_to_string(&css).unwrap();
+        assert!(contents.contains("transition-duration: 0s"));
+        assert!(contents.contains("animation-duration: 0s"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_default_config_writes_xsettings_no_animations() {
+        let dir = temp_home();
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_default_config(dir.to_str().unwrap());
+        let xsettings = dir.join("xfce4/xfconf/xfce-perchannel-xml/xsettings.xml");
+        assert!(xsettings.exists());
+        let contents = std::fs::read_to_string(&xsettings).unwrap();
+        assert!(contents.contains(r#""EnableAnimations" type="bool" value="false""#));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_default_config_writes_keyboard_shortcuts() {
+        let dir = temp_home();
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_default_config(dir.to_str().unwrap());
+        let kbd = dir.join("xfce4/xfconf/xfce-perchannel-xml/xfce4-keyboard-shortcuts.xml");
+        assert!(kbd.exists());
+        let contents = std::fs::read_to_string(&kbd).unwrap();
+        // Alt+F2 → app finder is the universal "run app" shortcut.
+        assert!(contents.contains("xfce4-appfinder"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_default_config_writes_panel_xml_with_plugins() {
+        let dir = temp_home();
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_default_config(dir.to_str().unwrap());
+        let panel = dir.join("xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml");
+        assert!(panel.exists());
+        let contents = std::fs::read_to_string(&panel).unwrap();
+        // Required: panel-1 declaration + tasklist + systray + clock plugins.
+        assert!(contents.contains("panel-1"));
+        assert!(contents.contains("tasklist"));
+        assert!(contents.contains("systray"));
+        assert!(contents.contains("clock"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_default_config_writes_desktop_wallpaper_xml() {
+        let dir = temp_home();
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_default_config(dir.to_str().unwrap());
+        let desktop = dir.join("xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml");
+        assert!(desktop.exists());
+        let contents = std::fs::read_to_string(&desktop).unwrap();
+        assert!(contents.contains("xfce-shapes.svg"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_default_config_writes_session_no_splash() {
+        let dir = temp_home();
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_default_config(dir.to_str().unwrap());
+        let session = dir.join("xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml");
+        assert!(session.exists());
+        let contents = std::fs::read_to_string(&session).unwrap();
+        // splash Engine= "" disables the XFCE splash screen
+        assert!(contents.contains(r#""Engine" type="string" value="""#));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- parse_xrandr_connected_output ---
+
+    #[test]
+    fn parse_xrandr_extracts_first_connected_output() {
+        let output = "\
+Screen 0: minimum 1 x 1, current 1920 x 1080, maximum 7680 x 4320
+DUMMY0 connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 0mm x 0mm
+   1920x1080     60.00*+
+";
+        assert_eq!(
+            parse_xrandr_connected_output(output),
+            Some("DUMMY0".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_xrandr_extracts_dfp_output_for_nvidia() {
+        let output = "\
+Screen 0: minimum 8 x 8, current 1920 x 1080, maximum 32767 x 32767
+DFP-1 connected 1920x1080+0+0 (normal left inverted right x axis y axis) 0mm x 0mm
+   1920x1080     60.00 +
+";
+        assert_eq!(
+            parse_xrandr_connected_output(output),
+            Some("DFP-1".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_xrandr_returns_none_when_no_connected_output() {
+        let output = "\
+Screen 0: minimum 1 x 1, current 1920 x 1080, maximum 7680 x 4320
+DUMMY0 disconnected (normal left inverted right x axis y axis)
+DFP-1 disconnected
+";
+        assert_eq!(parse_xrandr_connected_output(output), None);
+    }
+
+    #[test]
+    fn parse_xrandr_returns_none_for_empty_stdout() {
+        assert_eq!(parse_xrandr_connected_output(""), None);
+    }
+
+    #[test]
+    fn parse_xrandr_first_connected_wins_among_many() {
+        let output = "\
+Screen 0: minimum 1 x 1, current 1920 x 1080, maximum 7680 x 4320
+HDMI-A-1 connected primary 1920x1080+0+0 (normal)
+DP-1 connected 1280x720+0+0 (normal)
+";
+        assert_eq!(
+            parse_xrandr_connected_output(output),
+            Some("HDMI-A-1".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_xrandr_handles_no_space_before_connected() {
+        // "disconnected" should NOT match — the " connected" pattern
+        // requires a space before to distinguish from "disconnected".
+        let output = "\
+Screen 0
+DP-1 disconnected
+DP-2 disconnected (normal)
+";
+        assert_eq!(parse_xrandr_connected_output(output), None);
+    }
+
+    // --- is_benign_xrandr_stderr ---
+
+    #[test]
+    fn benign_xrandr_stderr_recognizes_already_exists() {
+        assert!(is_benign_xrandr_stderr(
+            "xrandr: Mode \"1920x1080\" already exists"
+        ));
+        assert!(is_benign_xrandr_stderr("already exists"));
+    }
+
+    #[test]
+    fn benign_xrandr_stderr_rejects_real_errors() {
+        assert!(!is_benign_xrandr_stderr(
+            "xrandr: Failed to get size of gamma for output"
+        ));
+        assert!(!is_benign_xrandr_stderr(
+            "xrandr: cannot find mode \"3840x2160\""
+        ));
+        assert!(!is_benign_xrandr_stderr(""));
+    }
+
+    #[test]
+    fn benign_xrandr_stderr_substring_match() {
+        // The check is substring-based, so any line containing the phrase
+        // counts as benign even if preceded by other text.
+        assert!(is_benign_xrandr_stderr(
+            "X Error of failed request: BadMatch\n\
+             Major opcode: 153 (XRandR)\n\
+             already exists\n"
+        ));
+    }
+
+    // --- resolve_xorg_invocation ---
+
+    #[test]
+    fn xorg_invocation_etc_x11_uses_wrapper_and_relative() {
+        // /etc/X11/beam-xorg.conf → Xorg + "beam-xorg.conf" (relative)
+        let (bin, arg) = resolve_xorg_invocation("/etc/X11/beam-xorg.conf", true);
+        assert_eq!(bin, "Xorg");
+        assert_eq!(arg, "beam-xorg.conf");
+    }
+
+    #[test]
+    fn xorg_invocation_etc_x11_subdir_relative() {
+        // Multi-level path under /etc/X11/
+        let (bin, arg) = resolve_xorg_invocation("/etc/X11/beam/beam-xorg-20.conf", true);
+        assert_eq!(bin, "Xorg");
+        assert_eq!(arg, "beam/beam-xorg-20.conf");
+    }
+
+    #[test]
+    fn xorg_invocation_tmp_uses_direct_binary_when_present() {
+        let (bin, arg) = resolve_xorg_invocation("/tmp/beam-xorg-10.conf", true);
+        assert_eq!(bin, "/usr/lib/xorg/Xorg");
+        assert_eq!(arg, "/tmp/beam-xorg-10.conf");
+    }
+
+    #[test]
+    fn xorg_invocation_tmp_falls_back_to_xorg_wrapper_when_missing() {
+        // When the direct binary doesn't exist, fall back to "Xorg" (PATH lookup).
+        let (bin, arg) = resolve_xorg_invocation("/tmp/beam-xorg-10.conf", false);
+        assert_eq!(bin, "Xorg");
+        assert_eq!(arg, "/tmp/beam-xorg-10.conf");
+    }
+
+    #[test]
+    fn xorg_invocation_other_path_uses_absolute() {
+        // Some custom dev path that isn't /etc/X11 or /tmp — full path passes.
+        let (bin, arg) = resolve_xorg_invocation("/home/dev/xorg.conf", true);
+        assert_eq!(bin, "/usr/lib/xorg/Xorg");
+        assert_eq!(arg, "/home/dev/xorg.conf");
+    }
+
+    // --- xorg_config_needs_cleanup ---
+
+    #[test]
+    fn xorg_cleanup_true_for_tmp_paths() {
+        assert!(xorg_config_needs_cleanup("/tmp/beam-xorg-10.conf"));
+        assert!(xorg_config_needs_cleanup("/tmp/anything"));
+    }
+
+    #[test]
+    fn xorg_cleanup_false_for_etc_paths() {
+        // Package configs in /etc/X11/ must not be deleted on drop.
+        assert!(!xorg_config_needs_cleanup("/etc/X11/beam-xorg.conf"));
+        assert!(!xorg_config_needs_cleanup("/etc/X11/beam/x.conf"));
+    }
+
+    #[test]
+    fn xorg_cleanup_false_for_other_paths() {
+        assert!(!xorg_config_needs_cleanup("/home/dev/xorg.conf"));
+        assert!(!xorg_config_needs_cleanup(""));
+        assert!(!xorg_config_needs_cleanup("relative/path"));
+    }
+
+    #[test]
+    fn seed_default_config_writes_all_autostart_overrides() {
+        let dir = temp_home();
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_default_config(dir.to_str().unwrap());
+        let autostart_dir = dir.join("autostart");
+        assert!(autostart_dir.exists());
+        // Spot-check that ALL of the masked-by-design entries exist.
+        for entry in [
+            "update-notifier.desktop",
+            "polkit-gnome-authentication-agent-1.desktop",
+            "pulseaudio.desktop",
+            "tracker-miner-fs-3.desktop",
+            "snap-userd-autostart.desktop",
+            "spice-vdagent.desktop",
+            "ubuntu-advantage-notification.desktop",
+            "ubuntu-report-on-upgrade.desktop",
+            "gnome-initial-setup-copy-worker.desktop",
+            "gnome-initial-setup-first-login.desktop",
+            "org.gnome.DejaDup.Monitor.desktop",
+            "org.gnome.Evolution-alarm-notify.desktop",
+        ] {
+            let path = autostart_dir.join(entry);
+            assert!(path.exists(), "Missing autostart override: {entry}");
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert!(content.contains("Hidden=true"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

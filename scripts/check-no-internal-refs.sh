@@ -24,7 +24,11 @@ is_allowlisted_match() {
             *"persistent_config_sentinel_prevents_reseeding"*|\
             *"even with a corrupt/partial config dir, the sentinel"*|\
             *"beam-test-sentinel-"*|\
-            *"after sentinel exists"*)
+            *"after sentinel exists"*|\
+            *"The sentinel file marks initialization complete"*|\
+            *"let sentinel = home.join"*|\
+            *"assert!(sentinel.exists())"*|\
+            *"Second call: sentinel exists"*)
                 remaining="${remaining//sentinel/}"
                 remaining="${remaining//Sentinel/}"
                 ;;

@@ -153,6 +153,278 @@ pub(crate) fn is_interactive_input_event(event: &InputEvent) -> bool {
     )
 }
 
+/// Pure classification of an incoming `InputEvent` into the high-level
+/// action the input callback should perform. Split out so the dispatch
+/// branches can be unit-tested without owning X11, clipboard, channels,
+/// or the encoder pipeline. The callback maps each variant onto the
+/// appropriate side-effecting subsystem (XTEST inject, clipboard set,
+/// resize channel, layout subprocess, encoder reset, file transfer).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum InputAction {
+    /// Inject a key (`code`, `pressed`). If `code` is a Ctrl keycode the
+    /// dispatcher also updates `ctrl_down` BEFORE attempting the injection.
+    /// If the key is a clipboard-read trigger AND ctrl_down is held AND
+    /// `pressed` is false, the dispatcher fires a clipboard-read request.
+    InjectKey { code: u16, pressed: bool },
+    /// Absolute mouse move at normalized [0.0, 1.0] coordinates.
+    InjectMouseAbs { x: f64, y: f64 },
+    /// Relative mouse move. Only emitted when `(dx, dy)` passes
+    /// `is_finite_bounded_delta` — invalid deltas become `Ignore`.
+    InjectMouseRel { dx: f64, dy: f64 },
+    /// Mouse button press/release (browser index, see `InputInjector::map_button`).
+    InjectButton { b: u8, pressed: bool },
+    /// Scroll event. Only emitted when `(dx, dy)` passes
+    /// `is_finite_bounded_delta` — invalid deltas become `Ignore`.
+    InjectScroll { dx: f64, dy: f64 },
+    /// Set the regular X11 clipboard. Empty `text` is OK; large text becomes
+    /// `Ignore` (caller asserts via `is_clipboard_size_ok`).
+    SetClipboard { text: String },
+    /// Set the X11 primary selection (middle-click paste buffer).
+    SetClipboardPrimary { text: String },
+    /// Send a resize request through the resize channel. Dimensions have
+    /// already been clamped by `display::clamp_resize_dimensions`; if
+    /// clamping failed the variant becomes `Ignore`.
+    Resize { width: u32, height: u32 },
+    /// Spawn a `setxkbmap` subprocess with the validated layout name.
+    /// Skipped when the layout matches the previous one (de-dup).
+    Layout { layout: String },
+    /// Tab visibility changed. `visible=true` resets the encoder + wakes
+    /// the capture thread; `visible=false` just flips the backgrounded flag.
+    Visibility { visible: bool },
+    /// File transfer start. Forwarded to FileTransferManager.
+    FileStart { id: String, name: String, size: u64 },
+    /// File transfer chunk. Forwarded to FileTransferManager.
+    FileChunk { id: String, data: String },
+    /// File transfer complete. Forwarded to FileTransferManager.
+    FileDone { id: String },
+    /// Download request from the browser. Forwarded to download channel.
+    FileDownload { path: String },
+    /// Event is intentionally ignored (oversized clipboard, malformed
+    /// delta, unknown layout name, invalid resize dimensions, browser
+    /// metrics destined for the server, removed Quality selector).
+    Ignore,
+}
+
+/// Build the cursor-shape WS message body that gets forwarded to the
+/// browser. Pure helper exposed for testing — the production loop sends
+/// the resulting JSON via the WebSocket text channel.
+pub(crate) fn build_cursor_message(css: &str) -> String {
+    serde_json::json!({ "t": "cur", "css": css }).to_string()
+}
+
+/// Handle a `InputAction::Visibility { visible }` dispatch on the
+/// channel-only side effects (no X11 access). Flips the backgrounded
+/// flag; on `visible=true` also marks the encoder needs a keyframe and
+/// sends a ResetEncoder command. Returns `true` if the visibility flip
+/// triggered the encoder reset path.
+///
+/// Extracted from `build_input_callback` so the routing can be tested
+/// without owning the encoder, the capture thread, or the X11 connection.
+pub(crate) fn handle_visibility_change(
+    visible: bool,
+    tab_backgrounded: &AtomicBool,
+    video_needs_keyframe: &AtomicBool,
+    capture_cmd_tx: &std::sync::mpsc::Sender<CaptureCommand>,
+) -> bool {
+    tab_backgrounded.store(!visible, Ordering::Relaxed);
+    if visible {
+        video_needs_keyframe.store(true, Ordering::Relaxed);
+        let _ = capture_cmd_tx.send(CaptureCommand::ResetEncoder);
+        true
+    } else {
+        false
+    }
+}
+
+/// Decide whether the capture loop should log a "capture frame failed"
+/// warning for this consecutive-error count. We log the first 3 errors
+/// then every 100th to keep the log volume bounded.
+pub(crate) fn should_log_capture_error(consecutive: u64) -> bool {
+    consecutive <= 3 || consecutive.is_multiple_of(100)
+}
+
+/// Decide whether the encoder-reset request should actually destroy and
+/// recreate the encoder, or whether we're still in the cooldown window
+/// where a force-keyframe is the cheaper alternative. Returns `true`
+/// when the cooldown has elapsed (free to recreate).
+pub(crate) fn encoder_reset_cooldown_elapsed(last_reset_elapsed_ms: u64, cooldown_ms: u64) -> bool {
+    last_reset_elapsed_ms >= cooldown_ms
+}
+
+/// Decide whether the capture loop should break entirely after
+/// `consecutive` failures in a row (default threshold: 300).
+pub(crate) fn should_break_capture_loop(consecutive: u64, threshold: u64) -> bool {
+    consecutive >= threshold
+}
+
+/// Resolve the agent's file-transfer home directory. Reads `$HOME` and
+/// falls back to `/tmp` if unset. Pure helper around the env lookup so
+/// the fallback branch can be unit-tested without poking process env.
+pub(crate) fn resolve_home_dir(env_home: Option<&str>) -> std::path::PathBuf {
+    match env_home {
+        Some(s) if !s.is_empty() => std::path::PathBuf::from(s),
+        _ => std::path::PathBuf::from("/tmp"),
+    }
+}
+
+/// Resolve the xrandr output name to use for resize operations. Virtual
+/// displays know their output (NVIDIA's DFP-0, dummy's DUMMY0, etc.);
+/// when reusing an existing display we fall back to the default name.
+/// Pure helper so the fallback branch is unit-testable.
+pub(crate) fn resolve_output_name(virtual_display_output: Option<&str>) -> String {
+    match virtual_display_output {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => DEFAULT_OUTPUT_NAME.to_string(),
+    }
+}
+
+/// Decide the audio-capture retry backoff: 500ms for the first 20
+/// attempts (10s total), 2000ms thereafter. Pure helper exposed for
+/// testing — keeps the audio thread's backoff math straightforward.
+pub(crate) fn audio_retry_delay_ms(attempt: u32) -> u64 {
+    if attempt < 20 { 500 } else { 2000 }
+}
+
+/// Decide whether the agent should log a "still retrying audio capture"
+/// message on this attempt. Spammy logs hurt log volume budgets; we
+/// log the first 20 attempts (each one), then every 10th attempt to
+/// keep the trail audible but quiet.
+pub(crate) fn should_log_audio_retry(attempt: u32) -> bool {
+    attempt < 20 || attempt.is_multiple_of(10)
+}
+
+/// Decide whether the audio-capture thread should give up. After 60
+/// failed attempts (about 100 seconds at the configured backoff) we
+/// stop retrying because something is fundamentally wrong.
+pub(crate) fn should_give_up_audio_retry(attempt: u32) -> bool {
+    attempt > 60
+}
+
+/// Determine the per-frame sleep duration in nanoseconds based on the
+/// agent's current state. Background tabs throttle hardest (~1fps),
+/// idle (no input for >5min) drops to ~5fps, and active sessions use
+/// the configured framerate.
+///
+/// Pure helper — split out so the capture thread's framerate-switching
+/// decision can be unit-tested without owning the encoder/capture loop.
+pub(crate) fn select_frame_duration_ns(
+    is_backgrounded: bool,
+    is_idle: bool,
+    active_ns: u64,
+    idle_ns: u64,
+    background_ns: u64,
+) -> u64 {
+    if is_backgrounded {
+        background_ns
+    } else if is_idle {
+        idle_ns
+    } else {
+        active_ns
+    }
+}
+
+/// Decide whether the agent is "idle" — no user input for at least
+/// `timeout_ms` milliseconds. Returns `false` if `last_input_ms` is 0
+/// (never received any input yet — the agent is still warming up, not
+/// idle). Pure helper exposed for testing.
+pub(crate) fn is_idle_state(last_input_ms: u64, now_ms: u64, timeout_ms: u64) -> bool {
+    last_input_ms > 0 && now_ms.saturating_sub(last_input_ms) > timeout_ms
+}
+
+/// Decide whether a resize request is a no-op given the current screen
+/// dimensions. Resize requests with the same dimensions are dropped to
+/// avoid recreating the capture + encoder pipeline for no reason. Pure
+/// helper exposed for testing.
+pub(crate) fn is_resize_noop(
+    current_w: u32,
+    current_h: u32,
+    requested_w: u32,
+    requested_h: u32,
+) -> bool {
+    current_w == requested_w && current_h == requested_h
+}
+
+/// Classify an `InputEvent` into the high-level `InputAction` the agent
+/// dispatcher will take. Pure: no side effects, no channel sends, no
+/// subprocess spawns. Tests exercise this directly; the production
+/// callback maps each variant onto its real subsystem.
+pub(crate) fn classify_input_event(
+    event: &InputEvent,
+    max_width: u32,
+    max_height: u32,
+) -> InputAction {
+    match event {
+        InputEvent::Key { c, d } => InputAction::InjectKey {
+            code: *c,
+            pressed: *d,
+        },
+        InputEvent::MouseMove { x, y } => InputAction::InjectMouseAbs { x: *x, y: *y },
+        InputEvent::RelativeMouseMove { dx, dy } => {
+            if is_finite_bounded_delta(*dx, *dy) {
+                InputAction::InjectMouseRel { dx: *dx, dy: *dy }
+            } else {
+                InputAction::Ignore
+            }
+        }
+        InputEvent::Button { b, d } => InputAction::InjectButton { b: *b, pressed: *d },
+        InputEvent::Scroll { dx, dy } => {
+            if is_finite_bounded_delta(*dx, *dy) {
+                InputAction::InjectScroll { dx: *dx, dy: *dy }
+            } else {
+                InputAction::Ignore
+            }
+        }
+        InputEvent::Clipboard { text } => {
+            if is_clipboard_size_ok(text.len()) {
+                InputAction::SetClipboard { text: text.clone() }
+            } else {
+                InputAction::Ignore
+            }
+        }
+        InputEvent::ClipboardPrimary { text } => {
+            if is_clipboard_size_ok(text.len()) {
+                InputAction::SetClipboardPrimary { text: text.clone() }
+            } else {
+                InputAction::Ignore
+            }
+        }
+        InputEvent::Resize { w, h } => {
+            match display::clamp_resize_dimensions(*w, *h, max_width, max_height) {
+                Some((cw, ch)) => InputAction::Resize {
+                    width: cw,
+                    height: ch,
+                },
+                None => InputAction::Ignore,
+            }
+        }
+        InputEvent::Layout { layout } => {
+            if is_valid_layout_name(layout) {
+                InputAction::Layout {
+                    layout: layout.clone(),
+                }
+            } else {
+                InputAction::Ignore
+            }
+        }
+        InputEvent::Quality { .. } => InputAction::Ignore,
+        InputEvent::ClientMetricsPing { .. } | InputEvent::ClientMetrics(_) => InputAction::Ignore,
+        InputEvent::VisibilityState { visible } => InputAction::Visibility { visible: *visible },
+        InputEvent::FileStart { id, name, size } => InputAction::FileStart {
+            id: id.clone(),
+            name: name.clone(),
+            size: *size,
+        },
+        InputEvent::FileChunk { id, data } => InputAction::FileChunk {
+            id: id.clone(),
+            data: data.clone(),
+        },
+        InputEvent::FileDone { id } => InputAction::FileDone { id: id.clone() },
+        InputEvent::FileDownloadRequest { path } => {
+            InputAction::FileDownload { path: path.clone() }
+        }
+    }
+}
+
 /// Shared context for building the input event callback.
 struct InputCallbackCtx {
     injector: Arc<Mutex<InputInjector>>,
@@ -214,23 +486,30 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
             debug!("Input received while backgrounded, clearing flag");
         }
 
-        match event {
-            InputEvent::Key { c, d } => {
-                if is_ctrl_keycode(c) {
-                    ctrl_down.store(d, Ordering::Relaxed);
+        // Pure classification — no side effects yet, no X11, no channels.
+        // The match below dispatches the resulting action onto the
+        // appropriate subsystem.
+        let action = classify_input_event(&event, max_width, max_height);
+        match action {
+            InputAction::InjectKey { code, pressed } => {
+                if is_ctrl_keycode(code) {
+                    ctrl_down.store(pressed, Ordering::Relaxed);
                 }
-                if !d && is_clipboard_read_trigger_key(c) && ctrl_down.load(Ordering::Relaxed) {
+                if !pressed
+                    && is_clipboard_read_trigger_key(code)
+                    && ctrl_down.load(Ordering::Relaxed)
+                {
                     let _ = clipboard_read_tx.try_send(());
                 }
                 if let Err(e) = injector
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .inject_key(c, d)
+                    .inject_key(code, pressed)
                 {
                     warn!("Key inject error: {e:#}");
                 }
             }
-            InputEvent::MouseMove { x, y } => {
+            InputAction::InjectMouseAbs { x, y } => {
                 if let Err(e) = injector
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -239,127 +518,96 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                     warn!("Mouse move inject error: {e:#}");
                 }
             }
-            InputEvent::RelativeMouseMove { dx, dy } => {
-                if is_finite_bounded_delta(dx, dy)
-                    && let Err(e) = injector
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .inject_mouse_move_rel(dx, dy)
+            InputAction::InjectMouseRel { dx, dy } => {
+                if let Err(e) = injector
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .inject_mouse_move_rel(dx, dy)
                 {
                     warn!("Relative mouse move inject error: {e:#}");
                 }
             }
-            InputEvent::Button { b, d } => {
+            InputAction::InjectButton { b, pressed } => {
                 if let Err(e) = injector
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .inject_button(b, d)
+                    .inject_button(b, pressed)
                 {
                     warn!("Button inject error: {e:#}");
                 }
             }
-            InputEvent::Scroll { dx, dy } => {
-                if is_finite_bounded_delta(dx, dy)
-                    && let Err(e) = injector
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .inject_scroll(dx, dy)
+            InputAction::InjectScroll { dx, dy } => {
+                if let Err(e) = injector
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .inject_scroll(dx, dy)
                 {
                     warn!("Scroll inject error: {e:#}");
                 }
             }
-            InputEvent::Clipboard { ref text } => {
-                if !is_clipboard_size_ok(text.len()) {
-                    warn!(
-                        len = text.len(),
-                        max = MAX_CLIPBOARD_BYTES,
-                        "Clipboard text too large, ignoring"
-                    );
-                } else if let Err(e) = clipboard
+            InputAction::SetClipboard { text } => {
+                if let Err(e) = clipboard
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .set_text(text)
+                    .set_text(&text)
                 {
                     warn!("Clipboard set error: {e:#}");
                 }
             }
-            InputEvent::ClipboardPrimary { ref text } => {
-                if !is_clipboard_size_ok(text.len()) {
-                    warn!(
-                        len = text.len(),
-                        max = MAX_CLIPBOARD_BYTES,
-                        "Primary clipboard text too large, ignoring"
-                    );
-                } else if let Err(e) = clipboard
+            InputAction::SetClipboardPrimary { text } => {
+                if let Err(e) = clipboard
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .set_primary_text(text)
+                    .set_primary_text(&text)
                 {
                     warn!("Primary clipboard set error: {e:#}");
                 }
             }
-            InputEvent::Resize { w, h } => {
-                if let Some((cw, ch)) =
-                    display::clamp_resize_dimensions(w, h, max_width, max_height)
-                {
-                    let _ = resize_tx.try_send((cw, ch));
-                } else {
-                    warn!(w, h, "Ignoring invalid resize dimensions");
-                }
+            InputAction::Resize { width, height } => {
+                let _ = resize_tx.try_send((width, height));
             }
-            InputEvent::Layout { ref layout } => {
-                if is_valid_layout_name(layout) {
-                    let mut prev = last_layout.lock().unwrap_or_else(|e| e.into_inner());
-                    if *prev == *layout {
-                        return;
-                    }
-                    *prev = layout.clone();
-                    drop(prev);
+            InputAction::Layout { layout } => {
+                let mut prev = last_layout.lock().unwrap_or_else(|e| e.into_inner());
+                if *prev == layout {
+                    return;
+                }
+                *prev = layout.clone();
+                drop(prev);
 
-                    let display_str = display.clone();
-                    let layout = layout.clone();
-                    std::thread::spawn(move || {
-                        match std::process::Command::new("setxkbmap")
-                            .arg(&layout)
-                            .env("DISPLAY", &display_str)
-                            .output()
-                        {
-                            Ok(output) if output.status.success() => {
-                                info!(layout = %layout, "Keyboard layout set via setxkbmap");
-                            }
-                            Ok(output) => {
-                                let stderr = String::from_utf8_lossy(&output.stderr);
-                                warn!(layout = %layout, "setxkbmap failed: {stderr}");
-                            }
-                            Err(e) => {
-                                warn!(layout = %layout, "Failed to run setxkbmap: {e}");
-                            }
+                let display_str = display.clone();
+                std::thread::spawn(move || {
+                    match std::process::Command::new("setxkbmap")
+                        .arg(&layout)
+                        .env("DISPLAY", &display_str)
+                        .output()
+                    {
+                        Ok(output) if output.status.success() => {
+                            info!(layout = %layout, "Keyboard layout set via setxkbmap");
                         }
-                    });
-                } else {
-                    warn!(layout = %layout, "Invalid keyboard layout name, ignoring");
-                }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            warn!(layout = %layout, "setxkbmap failed: {stderr}");
+                        }
+                        Err(e) => {
+                            warn!(layout = %layout, "Failed to run setxkbmap: {e}");
+                        }
+                    }
+                });
             }
-            InputEvent::Quality { .. } => {
-                // Quality selector removed — bitrate/framerate set by config
-            }
-            InputEvent::ClientMetricsPing { .. } | InputEvent::ClientMetrics(_) => {
-                // Browser metrics are handled by the server and should not be
-                // forwarded to the agent. Ignore defensively if one arrives.
-            }
-            InputEvent::VisibilityState { visible } => {
+            InputAction::Visibility { visible } => {
                 info!(visible, "Browser tab visibility changed");
-                tab_backgrounded.store(!visible, Ordering::Relaxed);
-                if visible {
-                    // Reset encoder pipeline to guarantee a fresh IDR frame.
-                    // GStreamer's ForceKeyUnit event is unreliable with nvcudah264enc
-                    // (it logs "Forced IDR" but the encoded frame isn't actually an
-                    // IDR). Pipeline recreation always starts with a real IDR.
-                    // video_needs_keyframe gates the video send loop to drop stale
-                    // P-frames until the IDR from the new pipeline arrives.
+                // Reset encoder pipeline to guarantee a fresh IDR frame on
+                // tab-visible. GStreamer's ForceKeyUnit event is unreliable
+                // with nvcudah264enc; pipeline recreation always starts with
+                // a real IDR.
+                let triggered_reset = handle_visibility_change(
+                    visible,
+                    &tab_backgrounded,
+                    &video_needs_keyframe,
+                    &capture_cmd_tx,
+                );
+                if triggered_reset {
                     info!("Resetting encoder for browser reconnect");
-                    video_needs_keyframe.store(true, Ordering::Relaxed);
-                    let _ = capture_cmd_tx.send(CaptureCommand::ResetEncoder);
                     // Wake capture thread immediately to restore full framerate
                     let (lock, cvar) = &*capture_wake;
                     let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -367,41 +615,42 @@ fn build_input_callback(ctx: InputCallbackCtx) -> Arc<dyn Fn(InputEvent) + Send 
                     cvar.notify_one();
                 }
             }
-            InputEvent::FileStart {
-                ref id,
-                ref name,
-                size,
-            } => {
+            InputAction::FileStart { id, name, size } => {
                 if let Err(e) = file_transfer
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .handle_file_start(id, name, size)
+                    .handle_file_start(&id, &name, size)
                 {
                     warn!(id, name, "File transfer start error: {e:#}");
                 }
             }
-            InputEvent::FileChunk { ref id, ref data } => {
+            InputAction::FileChunk { id, data } => {
                 if let Err(e) = file_transfer
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .handle_file_chunk(id, data)
+                    .handle_file_chunk(&id, &data)
                 {
                     warn!(id, "File chunk error: {e:#}");
                 }
             }
-            InputEvent::FileDone { ref id } => {
+            InputAction::FileDone { id } => {
                 if let Err(e) = file_transfer
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .handle_file_done(id)
+                    .handle_file_done(&id)
                 {
                     warn!(id, "File done error: {e:#}");
                 }
             }
-            InputEvent::FileDownloadRequest { ref path } => {
+            InputAction::FileDownload { path } => {
                 if let Err(e) = download_request_tx.try_send(path.clone()) {
                     warn!(path, "File download request dropped: {e:#}");
                 }
+            }
+            InputAction::Ignore => {
+                // Oversized clipboard, malformed delta, unknown layout name,
+                // invalid resize dimensions, browser metrics, or the removed
+                // Quality selector. Defensively ignored — caller logs context.
             }
         }
     })
@@ -490,10 +739,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Get the xrandr output name for resize operations.
     // Virtual displays know their output name; existing displays detect it.
-    let output_name = match &virtual_display {
-        Some(vd) => vd.output_name().to_string(),
-        None => DEFAULT_OUTPUT_NAME.to_string(),
-    };
+    let output_name = resolve_output_name(virtual_display.as_ref().map(|vd| vd.output_name()));
 
     // Create screen capture (now the display should be available)
     let mut screen_capture =
@@ -606,9 +852,7 @@ async fn main() -> anyhow::Result<()> {
     let tab_backgrounded_for_capture = Arc::clone(&tab_backgrounded);
 
     // File transfer manager
-    let home_dir = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    let home_dir = resolve_home_dir(std::env::var("HOME").ok().as_deref());
     let file_transfer = Arc::new(Mutex::new(filetransfer::FileTransferManager::new(home_dir)));
     let file_transfer_for_download = Arc::clone(&file_transfer);
 
@@ -693,7 +937,12 @@ async fn main() -> anyhow::Result<()> {
                 while let Ok(cmd) = capture_cmd_rx.try_recv() {
                     match cmd {
                         CaptureCommand::Resize { width, height } => {
-                            if width == screen_capture.width() && height == screen_capture.height() {
+                            if is_resize_noop(
+                                screen_capture.width(),
+                                screen_capture.height(),
+                                width,
+                                height,
+                            ) {
                                 debug!(width, height, "Resize skipped (same dimensions)");
                                 continue;
                             }
@@ -729,7 +978,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                         CaptureCommand::ResetEncoder => {
                             let elapsed = last_encoder_reset.elapsed();
-                            if elapsed < ENCODER_RESET_COOLDOWN {
+                            if !encoder_reset_cooldown_elapsed(
+                                elapsed.as_millis() as u64,
+                                ENCODER_RESET_COOLDOWN.as_millis() as u64,
+                            ) {
                                 debug!(
                                     cooldown_remaining_ms = (ENCODER_RESET_COOLDOWN - elapsed).as_millis() as u64,
                                     "ResetEncoder throttled, sending force_keyframe instead"
@@ -815,15 +1067,15 @@ async fn main() -> anyhow::Result<()> {
                     .unwrap_or_default()
                     .as_millis() as u64;
                 let last_input_ms = last_input_for_capture.load(Ordering::Relaxed);
-                let is_idle = last_input_ms > 0 && (now_ms - last_input_ms) > IDLE_TIMEOUT_MS;
+                let is_idle = is_idle_state(last_input_ms, now_ms, IDLE_TIMEOUT_MS);
 
-                let frame_duration_ns = if is_backgrounded {
-                    background_frame_duration_ns
-                } else if is_idle {
-                    idle_frame_duration_ns
-                } else {
-                    active_frame_duration_ns
-                };
+                let frame_duration_ns = select_frame_duration_ns(
+                    is_backgrounded,
+                    is_idle,
+                    active_frame_duration_ns,
+                    idle_frame_duration_ns,
+                    background_frame_duration_ns,
+                );
 
                 if is_backgrounded != was_backgrounded {
                     if is_backgrounded {
@@ -884,13 +1136,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         consecutive_capture_errors += 1;
-                        if consecutive_capture_errors <= 3 || consecutive_capture_errors.is_multiple_of(100) {
+                        if should_log_capture_error(consecutive_capture_errors) {
                             warn!(
                                 consecutive_errors = consecutive_capture_errors,
                                 "Capture frame failed: {e:#}"
                             );
                         }
-                        if consecutive_capture_errors >= 300 {
+                        if should_break_capture_loop(consecutive_capture_errors, 300) {
                             error!(
                                 consecutive_errors = consecutive_capture_errors,
                                 "Capture failing persistently, breaking capture loop"
@@ -998,15 +1250,15 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                     Err(e) => {
-                        let delay = if attempt < 20 { 500 } else { 2000 };
-                        if attempt < 20 || attempt % 10 == 0 {
+                        let delay = audio_retry_delay_ms(attempt);
+                        if should_log_audio_retry(attempt) {
                             info!(
                                 attempt = attempt + 1,
                                 delay_ms = delay,
                                 "PulseAudio not ready, retrying..."
                             );
                         }
-                        if attempt > 60 {
+                        if should_give_up_audio_retry(attempt) {
                             warn!("Audio capture unavailable after 60 attempts: {e:#}. Giving up.");
                             return;
                         }
@@ -1116,7 +1368,7 @@ async fn main() -> anyhow::Result<()> {
         _ = async {
             if let Some(ref mut rx) = cursor_rx {
                 while let Some(css) = rx.recv().await {
-                    let msg = serde_json::json!({ "t": "cur", "css": css }).to_string();
+                    let msg = build_cursor_message(&css);
                     if let Err(e) = ws_tx_for_cursor.send(Message::Text(msg.into())).await {
                         debug!("Failed to send cursor shape to browser: {e}");
                     }
@@ -1677,5 +1929,947 @@ mod tests {
         assert!(!is_interactive_input_event(&InputEvent::ClientMetrics(
             beam_protocol::ClientMetricsReport::default()
         )));
+    }
+
+    // --- classify_input_event ---
+    //
+    // The dispatcher is the agent's input router. Each event variant is
+    // exercised through `classify_input_event` so the dispatch decisions
+    // (delta clamps, clipboard size limits, layout validation, resize
+    // clamping, "ignore" branches) can be verified without owning an X11
+    // connection, the encoder, or the file transfer manager.
+
+    fn classify(event: InputEvent) -> InputAction {
+        classify_input_event(&event, 3840, 2160)
+    }
+
+    fn classify_with_max(event: InputEvent, mw: u32, mh: u32) -> InputAction {
+        classify_input_event(&event, mw, mh)
+    }
+
+    #[test]
+    fn classify_key_press_returns_inject_key_pressed_true() {
+        assert_eq!(
+            classify(InputEvent::Key { c: 65, d: true }),
+            InputAction::InjectKey {
+                code: 65,
+                pressed: true
+            }
+        );
+    }
+
+    #[test]
+    fn classify_key_release_returns_inject_key_pressed_false() {
+        assert_eq!(
+            classify(InputEvent::Key { c: 65, d: false }),
+            InputAction::InjectKey {
+                code: 65,
+                pressed: false
+            }
+        );
+    }
+
+    #[test]
+    fn classify_mouse_move_returns_inject_mouse_abs() {
+        match classify(InputEvent::MouseMove { x: 0.5, y: 0.25 }) {
+            InputAction::InjectMouseAbs { x, y } => {
+                assert!((x - 0.5).abs() < f64::EPSILON);
+                assert!((y - 0.25).abs() < f64::EPSILON);
+            }
+            other => panic!("Expected InjectMouseAbs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_relative_mouse_move_returns_inject_mouse_rel_when_bounded() {
+        match classify(InputEvent::RelativeMouseMove { dx: 10.0, dy: -5.0 }) {
+            InputAction::InjectMouseRel { dx, dy } => {
+                assert!((dx - 10.0).abs() < f64::EPSILON);
+                assert!((dy - (-5.0)).abs() < f64::EPSILON);
+            }
+            other => panic!("Expected InjectMouseRel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_relative_mouse_move_ignored_when_nan() {
+        assert_eq!(
+            classify(InputEvent::RelativeMouseMove {
+                dx: f64::NAN,
+                dy: 0.0,
+            }),
+            InputAction::Ignore
+        );
+        assert_eq!(
+            classify(InputEvent::RelativeMouseMove {
+                dx: 0.0,
+                dy: f64::NAN,
+            }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_relative_mouse_move_ignored_when_infinity() {
+        assert_eq!(
+            classify(InputEvent::RelativeMouseMove {
+                dx: f64::INFINITY,
+                dy: 0.0,
+            }),
+            InputAction::Ignore
+        );
+        assert_eq!(
+            classify(InputEvent::RelativeMouseMove {
+                dx: 0.0,
+                dy: f64::NEG_INFINITY,
+            }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_relative_mouse_move_ignored_when_beyond_max() {
+        assert_eq!(
+            classify(InputEvent::RelativeMouseMove {
+                dx: MAX_INPUT_DELTA + 1.0,
+                dy: 0.0,
+            }),
+            InputAction::Ignore
+        );
+        assert_eq!(
+            classify(InputEvent::RelativeMouseMove {
+                dx: -MAX_INPUT_DELTA - 1.0,
+                dy: 0.0,
+            }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_button_press_returns_inject_button_pressed_true() {
+        assert_eq!(
+            classify(InputEvent::Button { b: 0, d: true }),
+            InputAction::InjectButton {
+                b: 0,
+                pressed: true,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_button_release_returns_inject_button_pressed_false() {
+        assert_eq!(
+            classify(InputEvent::Button { b: 2, d: false }),
+            InputAction::InjectButton {
+                b: 2,
+                pressed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_scroll_returns_inject_scroll_when_bounded() {
+        match classify(InputEvent::Scroll { dx: 0.0, dy: 30.0 }) {
+            InputAction::InjectScroll { dx, dy } => {
+                assert!((dx - 0.0).abs() < f64::EPSILON);
+                assert!((dy - 30.0).abs() < f64::EPSILON);
+            }
+            other => panic!("Expected InjectScroll, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_scroll_ignored_when_unbounded() {
+        assert_eq!(
+            classify(InputEvent::Scroll {
+                dx: 999_999.0,
+                dy: 0.0,
+            }),
+            InputAction::Ignore
+        );
+        assert_eq!(
+            classify(InputEvent::Scroll {
+                dx: f64::NAN,
+                dy: f64::NAN,
+            }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_clipboard_returns_set_clipboard_when_small() {
+        assert_eq!(
+            classify(InputEvent::Clipboard {
+                text: "hello".to_string(),
+            }),
+            InputAction::SetClipboard {
+                text: "hello".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_clipboard_empty_text_is_set_clipboard() {
+        // Zero-byte clipboard payloads pass the size gate; they should
+        // still propagate through the dispatcher (production logs nothing
+        // unusual either).
+        assert_eq!(
+            classify(InputEvent::Clipboard {
+                text: String::new(),
+            }),
+            InputAction::SetClipboard {
+                text: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_clipboard_too_large_is_ignored() {
+        // 2 MiB exceeds MAX_CLIPBOARD_BYTES (1 MiB).
+        let big = "a".repeat(MAX_CLIPBOARD_BYTES + 1);
+        assert_eq!(
+            classify(InputEvent::Clipboard { text: big }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_clipboard_at_exact_max_is_set_clipboard() {
+        // The size gate uses <=, so the boundary value still propagates.
+        let payload = "a".repeat(MAX_CLIPBOARD_BYTES);
+        assert_eq!(
+            classify(InputEvent::Clipboard {
+                text: payload.clone(),
+            }),
+            InputAction::SetClipboard { text: payload }
+        );
+    }
+
+    #[test]
+    fn classify_clipboard_primary_small_is_set_primary() {
+        assert_eq!(
+            classify(InputEvent::ClipboardPrimary {
+                text: "middle-click".to_string(),
+            }),
+            InputAction::SetClipboardPrimary {
+                text: "middle-click".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_clipboard_primary_too_large_is_ignored() {
+        let big = "x".repeat(MAX_CLIPBOARD_BYTES + 100);
+        assert_eq!(
+            classify(InputEvent::ClipboardPrimary { text: big }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_resize_valid_dimensions_pass_through() {
+        // 1920x1080 within (320..=7680, 240..=4320) and under 3840x2160 max
+        // → falls through clamp_resize_dimensions unchanged.
+        assert_eq!(
+            classify(InputEvent::Resize { w: 1920, h: 1080 }),
+            InputAction::Resize {
+                width: 1920,
+                height: 1080,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_resize_too_small_is_ignored() {
+        // 100x100 fails the lower-bound gate (320, 240) → Ignore.
+        assert_eq!(
+            classify(InputEvent::Resize { w: 100, h: 100 }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_resize_too_large_is_ignored() {
+        // 8000x5000 exceeds the upper-bound gate (7680, 4320) → Ignore.
+        assert_eq!(
+            classify(InputEvent::Resize { w: 8000, h: 5000 }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_resize_clamps_to_max_bounds() {
+        // 4096x2160 with max 1920x1080 should clamp.
+        assert_eq!(
+            classify_with_max(InputEvent::Resize { w: 4096, h: 2160 }, 1920, 1080),
+            InputAction::Resize {
+                width: 1920,
+                height: 1080,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_resize_enforces_even_dimensions() {
+        // Odd values get rounded down to even (H.264 requirement).
+        assert_eq!(
+            classify(InputEvent::Resize { w: 1921, h: 1081 }),
+            InputAction::Resize {
+                width: 1920,
+                height: 1080,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_layout_valid_returns_layout_action() {
+        assert_eq!(
+            classify(InputEvent::Layout {
+                layout: "us".to_string(),
+            }),
+            InputAction::Layout {
+                layout: "us".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_layout_invalid_is_ignored() {
+        // Shell metacharacters → Ignore (security gate).
+        assert_eq!(
+            classify(InputEvent::Layout {
+                layout: "us;rm -rf /".to_string(),
+            }),
+            InputAction::Ignore
+        );
+        assert_eq!(
+            classify(InputEvent::Layout {
+                layout: String::new(),
+            }),
+            InputAction::Ignore
+        );
+        // Too long → Ignore.
+        assert_eq!(
+            classify(InputEvent::Layout {
+                layout: "a".repeat(50),
+            }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_quality_always_ignored() {
+        // Quality selector was removed; defensive Ignore on any incoming value.
+        assert_eq!(
+            classify(InputEvent::Quality {
+                mode: "high".to_string(),
+            }),
+            InputAction::Ignore
+        );
+        assert_eq!(
+            classify(InputEvent::Quality {
+                mode: "low".to_string(),
+            }),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_client_metrics_events_are_ignored() {
+        // Browser-side metrics are handled by the server; the agent should
+        // never inject or forward them.
+        assert_eq!(
+            classify(InputEvent::ClientMetricsPing {
+                id: 42,
+                sent_ms: 1000.0,
+            }),
+            InputAction::Ignore
+        );
+        assert_eq!(
+            classify(InputEvent::ClientMetrics(
+                beam_protocol::ClientMetricsReport::default(),
+            )),
+            InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_visibility_visible_true() {
+        assert_eq!(
+            classify(InputEvent::VisibilityState { visible: true }),
+            InputAction::Visibility { visible: true }
+        );
+    }
+
+    #[test]
+    fn classify_visibility_visible_false() {
+        assert_eq!(
+            classify(InputEvent::VisibilityState { visible: false }),
+            InputAction::Visibility { visible: false }
+        );
+    }
+
+    #[test]
+    fn classify_file_start_carries_id_name_and_size() {
+        assert_eq!(
+            classify(InputEvent::FileStart {
+                id: "uuid-1".to_string(),
+                name: "report.pdf".to_string(),
+                size: 12_345,
+            }),
+            InputAction::FileStart {
+                id: "uuid-1".to_string(),
+                name: "report.pdf".to_string(),
+                size: 12_345,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_file_chunk_carries_id_and_data() {
+        assert_eq!(
+            classify(InputEvent::FileChunk {
+                id: "uuid-1".to_string(),
+                data: "base64data==".to_string(),
+            }),
+            InputAction::FileChunk {
+                id: "uuid-1".to_string(),
+                data: "base64data==".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_file_done_carries_id() {
+        assert_eq!(
+            classify(InputEvent::FileDone {
+                id: "uuid-1".to_string(),
+            }),
+            InputAction::FileDone {
+                id: "uuid-1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_file_download_request_carries_path() {
+        assert_eq!(
+            classify(InputEvent::FileDownloadRequest {
+                path: "/home/user/file.txt".to_string(),
+            }),
+            InputAction::FileDownload {
+                path: "/home/user/file.txt".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_max_zero_bounds_means_unlimited() {
+        // max_width=0 means unlimited per clamp_resize_dimensions contract.
+        assert_eq!(
+            classify_with_max(InputEvent::Resize { w: 7680, h: 4320 }, 0, 0),
+            InputAction::Resize {
+                width: 7680,
+                height: 4320,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_resize_minimum_640x480_enforced() {
+        // Anything ≤ 640x480 (within the 320/240 lower gate) gets bumped up.
+        assert_eq!(
+            classify(InputEvent::Resize { w: 500, h: 400 }),
+            InputAction::Resize {
+                width: 640,
+                height: 480,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_relative_mouse_move_at_max_boundary_passes() {
+        // MAX_INPUT_DELTA is inclusive; exactly at the boundary should pass.
+        assert_eq!(
+            classify(InputEvent::RelativeMouseMove {
+                dx: MAX_INPUT_DELTA,
+                dy: -MAX_INPUT_DELTA,
+            }),
+            InputAction::InjectMouseRel {
+                dx: MAX_INPUT_DELTA,
+                dy: -MAX_INPUT_DELTA,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_scroll_at_max_boundary_passes() {
+        assert_eq!(
+            classify(InputEvent::Scroll {
+                dx: MAX_INPUT_DELTA,
+                dy: MAX_INPUT_DELTA,
+            }),
+            InputAction::InjectScroll {
+                dx: MAX_INPUT_DELTA,
+                dy: MAX_INPUT_DELTA,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_relative_mouse_move_zero_delta_still_classifies() {
+        // (0, 0) is the only "no-op" relative move; the dispatcher still
+        // classifies (the X11 injector deduplicates discrete=0 inside).
+        assert_eq!(
+            classify(InputEvent::RelativeMouseMove { dx: 0.0, dy: 0.0 }),
+            InputAction::InjectMouseRel { dx: 0.0, dy: 0.0 }
+        );
+    }
+
+    #[test]
+    fn classify_input_action_is_clonable() {
+        // Sanity: InputAction supports Clone so dispatchers can defer work
+        // (e.g. spawn a thread that takes ownership of a Layout payload).
+        let original = InputAction::SetClipboard {
+            text: "x".to_string(),
+        };
+        let copy = original.clone();
+        assert_eq!(original, copy);
+    }
+
+    // --- select_frame_duration_ns ---
+
+    #[test]
+    fn frame_duration_active_when_neither_idle_nor_backgrounded() {
+        // Standard hot-path: foreground + recently-active tab uses the
+        // configured framerate.
+        assert_eq!(
+            select_frame_duration_ns(false, false, 16_666_666, 200_000_000, 1_000_000_000),
+            16_666_666
+        );
+    }
+
+    #[test]
+    fn frame_duration_idle_uses_idle_ns() {
+        // Foreground but no input for >5 min: drop to ~5fps.
+        assert_eq!(
+            select_frame_duration_ns(false, true, 16_666_666, 200_000_000, 1_000_000_000),
+            200_000_000
+        );
+    }
+
+    #[test]
+    fn frame_duration_backgrounded_takes_priority_over_idle() {
+        // Even if idle, backgrounded wins → ~1fps.
+        assert_eq!(
+            select_frame_duration_ns(true, true, 16_666_666, 200_000_000, 1_000_000_000),
+            1_000_000_000
+        );
+    }
+
+    #[test]
+    fn frame_duration_backgrounded_active_uses_background_ns() {
+        // Active input but tab backgrounded — still throttle to ~1fps.
+        assert_eq!(
+            select_frame_duration_ns(true, false, 16_666_666, 200_000_000, 1_000_000_000),
+            1_000_000_000
+        );
+    }
+
+    #[test]
+    fn frame_duration_lockstep_with_inputs() {
+        // The three inputs are passed through verbatim — no scaling or
+        // capping inside the selector itself.
+        let active = 33_333_333u64;
+        let idle = 250_000_000u64;
+        let background = 2_000_000_000u64;
+        assert_eq!(
+            select_frame_duration_ns(false, false, active, idle, background),
+            active
+        );
+        assert_eq!(
+            select_frame_duration_ns(false, true, active, idle, background),
+            idle
+        );
+        assert_eq!(
+            select_frame_duration_ns(true, false, active, idle, background),
+            background
+        );
+    }
+
+    // --- is_idle_state ---
+
+    #[test]
+    fn idle_state_false_when_no_input_yet() {
+        // last_input_ms == 0 means "no input observed since startup" —
+        // not idle by definition.
+        assert!(!is_idle_state(0, 1_000_000, 300_000));
+    }
+
+    #[test]
+    fn idle_state_false_when_within_timeout() {
+        // 100s ago, timeout is 300s → still active.
+        let now = 1_000_000u64;
+        let last = now - 100_000;
+        assert!(!is_idle_state(last, now, 300_000));
+    }
+
+    #[test]
+    fn idle_state_true_when_beyond_timeout() {
+        // 400s ago, timeout is 300s → idle.
+        let now = 1_000_000u64;
+        let last = now - 400_000;
+        assert!(is_idle_state(last, now, 300_000));
+    }
+
+    #[test]
+    fn idle_state_handles_now_before_last_input_gracefully() {
+        // Clock skew: if now somehow precedes last_input_ms, the saturating
+        // subtraction floors to zero → not idle.
+        assert!(!is_idle_state(2000, 1000, 300));
+    }
+
+    #[test]
+    fn idle_state_exactly_at_timeout_boundary_is_not_idle() {
+        // The condition is `>` not `>=` — exactly the timeout still counts
+        // as active. One millisecond more flips to idle.
+        let now = 1_000_000u64;
+        assert!(!is_idle_state(now - 300_000, now, 300_000));
+        assert!(is_idle_state(now - 300_001, now, 300_000));
+    }
+
+    // --- is_resize_noop ---
+
+    #[test]
+    fn resize_noop_when_dims_match() {
+        assert!(is_resize_noop(1920, 1080, 1920, 1080));
+        assert!(is_resize_noop(640, 480, 640, 480));
+        assert!(is_resize_noop(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn resize_noop_false_when_width_differs() {
+        assert!(!is_resize_noop(1920, 1080, 1280, 1080));
+    }
+
+    #[test]
+    fn resize_noop_false_when_height_differs() {
+        assert!(!is_resize_noop(1920, 1080, 1920, 720));
+    }
+
+    #[test]
+    fn resize_noop_false_when_both_differ() {
+        assert!(!is_resize_noop(1920, 1080, 2560, 1440));
+    }
+
+    // --- audio_retry_delay_ms ---
+
+    #[test]
+    fn audio_retry_delay_500ms_for_first_20_attempts() {
+        for n in 0..20 {
+            assert_eq!(audio_retry_delay_ms(n), 500, "attempt {n}");
+        }
+    }
+
+    #[test]
+    fn audio_retry_delay_2s_at_attempt_20() {
+        // Boundary: attempt 20 (the 21st attempt) flips to 2000ms.
+        assert_eq!(audio_retry_delay_ms(20), 2000);
+        assert_eq!(audio_retry_delay_ms(21), 2000);
+        assert_eq!(audio_retry_delay_ms(100), 2000);
+    }
+
+    // --- should_log_audio_retry ---
+
+    #[test]
+    fn audio_retry_log_first_20_attempts() {
+        for n in 0..20 {
+            assert!(should_log_audio_retry(n), "attempt {n} should log");
+        }
+    }
+
+    #[test]
+    fn audio_retry_log_every_10th_after_20() {
+        assert!(should_log_audio_retry(20), "n=20 is divisible by 10");
+        assert!(!should_log_audio_retry(21));
+        assert!(!should_log_audio_retry(29));
+        assert!(should_log_audio_retry(30));
+        assert!(!should_log_audio_retry(31));
+        assert!(should_log_audio_retry(40));
+        assert!(should_log_audio_retry(50));
+    }
+
+    // --- should_give_up_audio_retry ---
+
+    #[test]
+    fn audio_retry_give_up_after_60() {
+        assert!(!should_give_up_audio_retry(0));
+        assert!(!should_give_up_audio_retry(60));
+        assert!(should_give_up_audio_retry(61));
+        assert!(should_give_up_audio_retry(1000));
+    }
+
+    #[test]
+    fn audio_retry_total_time_to_giveup_is_predictable() {
+        // Sum of delays over attempts 0..=60: attempts 0..20 give 20 × 500ms,
+        // attempts 20..=60 give 41 × 2000ms. The math should be deterministic
+        // for the runbook (and reproducibly bug-free).
+        let mut total = 0u64;
+        for n in 0..=60 {
+            total += audio_retry_delay_ms(n);
+        }
+        // 20 * 500ms + 41 * 2000ms = 10_000 + 82_000 = 92_000ms (~92s)
+        assert_eq!(total, 20 * 500 + 41 * 2000);
+        assert_eq!(total, 92_000);
+    }
+
+    // --- build_cursor_message ---
+
+    #[test]
+    fn cursor_message_format_is_t_cur_css() {
+        // The browser expects {"t":"cur", "css":"..."} so the cursor-shape
+        // dispatcher key matches.
+        let msg = build_cursor_message("default");
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["t"], "cur");
+        assert_eq!(v["css"], "default");
+    }
+
+    #[test]
+    fn cursor_message_handles_empty_css() {
+        let msg = build_cursor_message("");
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["css"], "");
+    }
+
+    #[test]
+    fn cursor_message_escapes_special_chars() {
+        // CSS strings can contain quotes that JSON must escape.
+        let msg = build_cursor_message(r#"url("data:image/png;base64,X") 0 0, default"#);
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["css"], r#"url("data:image/png;base64,X") 0 0, default"#);
+    }
+
+    #[test]
+    fn cursor_message_preserves_unicode() {
+        // Unicode in CSS should survive the JSON encode round-trip.
+        let css = "cursor: pointer; /* ✓ */";
+        let msg = build_cursor_message(css);
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["css"], css);
+    }
+
+    // --- resolve_home_dir ---
+
+    #[test]
+    fn home_dir_uses_env_value_when_set() {
+        assert_eq!(
+            resolve_home_dir(Some("/home/test")),
+            std::path::PathBuf::from("/home/test"),
+        );
+    }
+
+    #[test]
+    fn home_dir_falls_back_when_none() {
+        // HOME not set → fall back to /tmp.
+        assert_eq!(resolve_home_dir(None), std::path::PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn home_dir_falls_back_when_empty() {
+        // HOME="" → empty string also falls back (production avoids using
+        // CWD-relative paths in this case).
+        assert_eq!(resolve_home_dir(Some("")), std::path::PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn home_dir_accepts_absolute_paths_with_trailing_slash() {
+        // PathBuf does not normalize on construction; trailing slash is kept.
+        assert_eq!(
+            resolve_home_dir(Some("/home/test/")),
+            std::path::PathBuf::from("/home/test/"),
+        );
+    }
+
+    // --- resolve_output_name ---
+
+    #[test]
+    fn output_name_uses_virtual_display_when_some() {
+        assert_eq!(resolve_output_name(Some("DFP-1")), "DFP-1");
+        assert_eq!(resolve_output_name(Some("DUMMY0")), "DUMMY0");
+        assert_eq!(resolve_output_name(Some("HDMI-A-1")), "HDMI-A-1");
+    }
+
+    #[test]
+    fn output_name_falls_back_when_none() {
+        assert_eq!(resolve_output_name(None), "DUMMY0");
+    }
+
+    #[test]
+    fn output_name_falls_back_when_empty() {
+        // Empty output name shouldn't pass through — fall back to default.
+        assert_eq!(resolve_output_name(Some("")), "DUMMY0");
+    }
+
+    #[test]
+    fn output_name_fallback_matches_default_constant() {
+        // The fallback must equal DEFAULT_OUTPUT_NAME so the rest of the
+        // capture pipeline stays in sync.
+        assert_eq!(resolve_output_name(None), DEFAULT_OUTPUT_NAME);
+    }
+
+    // --- should_log_capture_error / should_break_capture_loop ---
+
+    #[test]
+    fn capture_error_log_first_three() {
+        // First 3 errors always log.
+        assert!(should_log_capture_error(1));
+        assert!(should_log_capture_error(2));
+        assert!(should_log_capture_error(3));
+    }
+
+    #[test]
+    fn capture_error_log_skip_until_multiple_of_100() {
+        // After 3, only multiples of 100 log to keep the log volume tame.
+        assert!(!should_log_capture_error(4));
+        assert!(!should_log_capture_error(50));
+        assert!(!should_log_capture_error(99));
+        assert!(should_log_capture_error(100));
+        assert!(!should_log_capture_error(101));
+        assert!(should_log_capture_error(200));
+        assert!(should_log_capture_error(300));
+    }
+
+    #[test]
+    fn capture_error_log_zero_is_multiple_of_100() {
+        // Zero is divisible by 100 (mathematically), so the predicate logs.
+        // (Production never asks at consecutive_errors=0, but the fn is
+        // deterministic.)
+        assert!(should_log_capture_error(0));
+    }
+
+    #[test]
+    fn capture_break_threshold_300_by_default() {
+        assert!(!should_break_capture_loop(299, 300));
+        assert!(should_break_capture_loop(300, 300));
+        assert!(should_break_capture_loop(1000, 300));
+    }
+
+    #[test]
+    fn capture_break_threshold_is_customizable() {
+        // Defensive: caller can tighten/loosen the threshold per env.
+        assert!(should_break_capture_loop(50, 50));
+        assert!(!should_break_capture_loop(49, 50));
+        assert!(should_break_capture_loop(1, 1));
+    }
+
+    // --- encoder_reset_cooldown_elapsed ---
+
+    #[test]
+    fn encoder_reset_cooldown_blocks_within_window() {
+        // 1 second elapsed, 5 second cooldown — still cooling.
+        assert!(!encoder_reset_cooldown_elapsed(1_000, 5_000));
+        assert!(!encoder_reset_cooldown_elapsed(4_999, 5_000));
+    }
+
+    #[test]
+    fn encoder_reset_cooldown_passes_exactly_at_boundary() {
+        // The condition is `>=` so equal value is allowed.
+        assert!(encoder_reset_cooldown_elapsed(5_000, 5_000));
+    }
+
+    #[test]
+    fn encoder_reset_cooldown_passes_after_window() {
+        assert!(encoder_reset_cooldown_elapsed(5_001, 5_000));
+        assert!(encoder_reset_cooldown_elapsed(60_000, 5_000));
+        assert!(encoder_reset_cooldown_elapsed(u64::MAX, 5_000));
+    }
+
+    #[test]
+    fn encoder_reset_cooldown_zero_value_blocks() {
+        // last_reset_elapsed_ms=0 means we just reset — blocked.
+        assert!(!encoder_reset_cooldown_elapsed(0, 5_000));
+    }
+
+    #[test]
+    fn encoder_reset_cooldown_zero_cooldown_always_passes() {
+        // cooldown=0 disables throttling.
+        assert!(encoder_reset_cooldown_elapsed(0, 0));
+        assert!(encoder_reset_cooldown_elapsed(1, 0));
+    }
+
+    // --- handle_visibility_change ---
+
+    #[test]
+    fn visibility_visible_true_sets_backgrounded_false() {
+        let bg = AtomicBool::new(true);
+        let kf = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        let triggered = handle_visibility_change(true, &bg, &kf, &tx);
+        assert!(triggered, "visible=true should trigger encoder reset");
+        assert!(!bg.load(Ordering::Relaxed), "backgrounded cleared");
+        assert!(kf.load(Ordering::Relaxed), "keyframe requested");
+    }
+
+    #[test]
+    fn visibility_visible_false_sets_backgrounded_true() {
+        let bg = AtomicBool::new(false);
+        let kf = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        let triggered = handle_visibility_change(false, &bg, &kf, &tx);
+        assert!(!triggered, "visible=false should NOT trigger encoder reset");
+        assert!(bg.load(Ordering::Relaxed), "backgrounded set");
+        assert!(
+            !kf.load(Ordering::Relaxed),
+            "keyframe NOT requested on backgrounded"
+        );
+    }
+
+    #[test]
+    fn visibility_visible_true_sends_reset_encoder_command() {
+        let bg = AtomicBool::new(true);
+        let kf = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        handle_visibility_change(true, &bg, &kf, &tx);
+        let cmd = rx.try_recv().expect("ResetEncoder should be sent");
+        assert!(matches!(cmd, CaptureCommand::ResetEncoder));
+    }
+
+    #[test]
+    fn visibility_visible_false_does_not_send_command() {
+        let bg = AtomicBool::new(false);
+        let kf = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        handle_visibility_change(false, &bg, &kf, &tx);
+        // Channel should be empty
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn visibility_handles_disconnected_capture_channel() {
+        // If the capture thread already dropped the receiver, the send fails
+        // silently — the function still flips the flags and reports triggered.
+        let bg = AtomicBool::new(true);
+        let kf = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        drop(rx); // Capture thread gone
+        let triggered = handle_visibility_change(true, &bg, &kf, &tx);
+        assert!(triggered);
+        assert!(!bg.load(Ordering::Relaxed));
+        assert!(kf.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn visibility_subsequent_calls_toggle_state() {
+        let bg = AtomicBool::new(false);
+        let kf = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        // visible=false → backgrounded
+        handle_visibility_change(false, &bg, &kf, &tx);
+        assert!(bg.load(Ordering::Relaxed));
+        // visible=true → foreground, keyframe
+        handle_visibility_change(true, &bg, &kf, &tx);
+        assert!(!bg.load(Ordering::Relaxed));
+        assert!(kf.load(Ordering::Relaxed));
     }
 }

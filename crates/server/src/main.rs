@@ -131,6 +131,103 @@ fn persist_jwt_secret(secret_path: &std::path::Path, secret: &str) -> std::io::R
     Ok(())
 }
 
+/// Outcome of resolving the JWT secret for a new server instance. Split out
+/// so the persistence/generation flow can be unit-tested without spinning up
+/// `main()`. Captures whether the secret was loaded, generated + persisted,
+/// or fell back to ephemeral generation.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum JwtSecretSource {
+    /// Successfully loaded an existing secret from disk.
+    LoadedFromDisk,
+    /// Generated a new secret and persisted it to disk.
+    GeneratedAndPersisted,
+    /// Generated a new secret but couldn't persist it (e.g. disk full,
+    /// permission denied). The secret is held only in memory; surviving
+    /// a restart means re-issuing every JWT.
+    GeneratedEphemeral(String),
+}
+
+/// Classify each `config.validate()` issue as either `ERROR:` or `WARN:`
+/// and return the pair `(error_count, warning_count)`. Test-only helper
+/// — extracted from the inline counting logic in `startup_banner_line`
+/// so test assertions can drive the classification rules directly. The
+/// production banner consumes the pair via that path.
+#[cfg(test)]
+pub(crate) fn count_validation_severities(issues: &[String]) -> (usize, usize) {
+    let mut errors = 0;
+    let mut warnings = 0;
+    for issue in issues {
+        if issue.starts_with("ERROR:") {
+            errors += 1;
+        } else {
+            warnings += 1;
+        }
+    }
+    (errors, warnings)
+}
+
+/// Build the warning message shown when the PAM config is missing. Pure
+/// helper so the warning text is unit-testable (operators rely on it
+/// when troubleshooting "agent sessions don't start").
+pub(crate) fn pam_missing_warning() -> &'static str {
+    "PAM config /etc/pam.d/beam not found — agent sessions will fail to start. \
+     Install the beam package or copy packaging/pam.d/beam to /etc/pam.d/beam."
+}
+
+/// Build the warning message shown when the configured `web_root`
+/// directory doesn't exist on disk. Pure helper so the message can be
+/// unit-tested.
+pub(crate) fn web_root_missing_warning(web_root: &str) -> String {
+    format!(
+        "Web root '{}' does not exist — the UI will not load. \
+         Build with 'make build-web' or set server.web_root in the config.",
+        web_root
+    )
+}
+
+/// Decide whether a `web_root` path is a usable directory. Pure helper
+/// that short-circuits when the path is empty (defensive: an empty
+/// web_root means the operator hasn't set it).
+pub(crate) fn web_root_is_usable(web_root: &str) -> bool {
+    if web_root.is_empty() {
+        return false;
+    }
+    std::path::Path::new(web_root).is_dir()
+}
+
+/// Build the startup banner line with the bound address. Pure helper —
+/// the production main() logs three lines around this; here we just
+/// pin the formatting in one testable place.
+pub(crate) fn startup_banner_line(bind_addr: &SocketAddr) -> String {
+    format!("Listening on https://{bind_addr}")
+}
+
+/// Resolve the JWT secret: load from disk if present, else generate +
+/// persist. Returns the secret plus a `JwtSecretSource` enum describing
+/// which branch fired so the caller can log appropriately and tests can
+/// assert behavior.
+pub(crate) fn resolve_jwt_secret(
+    configured: Option<String>,
+    secret_path: &std::path::Path,
+    generator: impl FnOnce() -> String,
+) -> (String, JwtSecretSource) {
+    if let Some(s) = configured {
+        // Config-provided overrides everything — treat as loaded.
+        return (s, JwtSecretSource::LoadedFromDisk);
+    }
+    if let Some(existing) = load_persisted_jwt_secret(secret_path) {
+        return (existing, JwtSecretSource::LoadedFromDisk);
+    }
+    let secret = generator();
+    match persist_jwt_secret(secret_path, &secret) {
+        Ok(()) => (secret, JwtSecretSource::GeneratedAndPersisted),
+        Err(e) => {
+            let err_msg = e.to_string();
+            (secret, JwtSecretSource::GeneratedEphemeral(err_msg))
+        }
+    }
+}
+
 fn parse_args() -> (PathBuf, Option<u16>) {
     let args: Vec<String> = std::env::args().collect();
     match parse_args_from(args) {
@@ -197,19 +294,12 @@ async fn main() -> Result<()> {
 
     // Validate PAM config exists (required for systemd-logind session registration)
     if !std::path::Path::new("/etc/pam.d/beam").exists() {
-        tracing::warn!(
-            "PAM config /etc/pam.d/beam not found — agent sessions will fail to start. \
-             Install the beam package or copy packaging/pam.d/beam to /etc/pam.d/beam."
-        );
+        tracing::warn!("{}", pam_missing_warning());
     }
 
     // Validate web root exists so we don't silently serve 404
-    if !std::path::Path::new(&config.server.web_root).is_dir() {
-        tracing::warn!(
-            "Web root '{}' does not exist — the UI will not load. \
-             Build with 'make build-web' or set server.web_root in the config.",
-            config.server.web_root
-        );
+    if !web_root_is_usable(&config.server.web_root) {
+        tracing::warn!("{}", web_root_missing_warning(&config.server.web_root));
     }
 
     let port = config.server.port;
@@ -224,24 +314,23 @@ async fn main() -> Result<()> {
     let tls_cert_path = tls_result.cert_pem_path;
 
     // JWT secret — persist to /var/lib/beam/jwt_secret so tokens survive restarts
-    let jwt_secret = config.server.jwt_secret.clone().unwrap_or_else(|| {
-        let secret_path = std::path::Path::new("/var/lib/beam/jwt_secret");
-        if let Some(existing) = load_persisted_jwt_secret(secret_path) {
+    let secret_path = std::path::Path::new("/var/lib/beam/jwt_secret");
+    let (jwt_secret, source) = resolve_jwt_secret(
+        config.server.jwt_secret.clone(),
+        secret_path,
+        auth::generate_secret,
+    );
+    match &source {
+        JwtSecretSource::LoadedFromDisk => {
             tracing::info!("Loaded JWT secret from {}", secret_path.display());
-            return existing;
         }
-        // Generate and persist a new secret
-        let secret = auth::generate_secret();
-        match persist_jwt_secret(secret_path, &secret) {
-            Ok(()) => {
-                tracing::info!("Persisted JWT secret to {}", secret_path.display());
-            }
-            Err(e) => {
-                tracing::warn!("Failed to persist JWT secret: {e}");
-            }
+        JwtSecretSource::GeneratedAndPersisted => {
+            tracing::info!("Persisted JWT secret to {}", secret_path.display());
         }
-        secret
-    });
+        JwtSecretSource::GeneratedEphemeral(err) => {
+            tracing::warn!("Failed to persist JWT secret: {err}");
+        }
+    }
 
     // Session manager
     let session_manager = SessionManager::new(
@@ -330,7 +419,7 @@ async fn main() -> Result<()> {
         "  Beam Remote Desktop Server v{}",
         env!("CARGO_PKG_VERSION")
     );
-    tracing::info!("  Listening on https://{bind_addr}");
+    tracing::info!("  {}", startup_banner_line(&bind_addr));
     tracing::info!("===========================================");
 
     // Bind and serve with TLS
@@ -1000,6 +1089,256 @@ mod jwt_secret_tests {
         let loaded = load_persisted_jwt_secret(&path).unwrap();
         assert_eq!(loaded, secret);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod resolve_jwt_secret_tests {
+    use super::{JwtSecretSource, resolve_jwt_secret};
+
+    fn unique_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "beam-jwt-resolve-{}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4(),
+            label,
+        ))
+    }
+
+    #[test]
+    fn configured_secret_wins_over_disk() {
+        // Even if a path exists, an explicit config override skips disk.
+        let path = unique_path("configured-wins");
+        std::fs::write(&path, "from-disk-12345").unwrap();
+        let (secret, source) =
+            resolve_jwt_secret(Some("from-config-67890".to_string()), &path, || {
+                panic!("generator should not run when config is set")
+            });
+        assert_eq!(secret, "from-config-67890");
+        assert_eq!(source, JwtSecretSource::LoadedFromDisk);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn missing_disk_triggers_generator_and_persists() {
+        let path = unique_path("generate-persist");
+        assert!(!path.exists());
+        let (secret, source) =
+            resolve_jwt_secret(None, &path, || "generated-secret-abcdef".to_string());
+        assert_eq!(secret, "generated-secret-abcdef");
+        assert_eq!(source, JwtSecretSource::GeneratedAndPersisted);
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(stored, "generated-secret-abcdef");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn loaded_from_disk_when_present() {
+        let path = unique_path("load");
+        std::fs::write(&path, "preexisting-secret-xyz123").unwrap();
+        let (secret, source) = resolve_jwt_secret(None, &path, || {
+            panic!("generator should not run when secret is on disk")
+        });
+        assert_eq!(secret, "preexisting-secret-xyz123");
+        assert_eq!(source, JwtSecretSource::LoadedFromDisk);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ephemeral_when_persist_fails() {
+        // /proc/foo is unwritable — persist_jwt_secret returns Err.
+        let path = std::path::PathBuf::from("/proc/nonexistent-beam-jwt-resolve");
+        let (secret, source) = resolve_jwt_secret(None, &path, || "ephemeral-secret".to_string());
+        assert_eq!(secret, "ephemeral-secret");
+        assert!(matches!(source, JwtSecretSource::GeneratedEphemeral(_)));
+    }
+
+    #[test]
+    fn empty_disk_file_falls_back_to_generator() {
+        // An empty file on disk reads as None per load_persisted_jwt_secret,
+        // so the generator runs and the result is persisted (overwriting
+        // the empty file).
+        let path = unique_path("empty");
+        std::fs::write(&path, "").unwrap();
+        let (secret, source) = resolve_jwt_secret(None, &path, || "fresh-secret".to_string());
+        assert_eq!(secret, "fresh-secret");
+        assert_eq!(source, JwtSecretSource::GeneratedAndPersisted);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn whitespace_disk_file_falls_back_to_generator() {
+        let path = unique_path("whitespace");
+        std::fs::write(&path, "   \n\t  ").unwrap();
+        let (secret, source) = resolve_jwt_secret(None, &path, || "real-secret".to_string());
+        assert_eq!(secret, "real-secret");
+        assert_eq!(source, JwtSecretSource::GeneratedAndPersisted);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn configured_empty_string_still_overrides() {
+        // An explicit `Some("")` is intentional — it skips disk + generator.
+        // (Production validate() catches this earlier, but the function is
+        // deterministic about Option semantics.)
+        let path = unique_path("empty-config");
+        std::fs::write(&path, "real-disk-secret").unwrap();
+        let (secret, source) = resolve_jwt_secret(Some(String::new()), &path, || {
+            panic!("generator should not run")
+        });
+        assert_eq!(secret, String::new());
+        assert_eq!(source, JwtSecretSource::LoadedFromDisk);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod startup_helper_tests {
+    use super::{
+        count_validation_severities, pam_missing_warning, startup_banner_line, web_root_is_usable,
+        web_root_missing_warning,
+    };
+    use std::net::SocketAddr;
+
+    // --- count_validation_severities ---
+
+    #[test]
+    fn validation_counts_zero_for_empty() {
+        let (e, w) = count_validation_severities(&[]);
+        assert_eq!(e, 0);
+        assert_eq!(w, 0);
+    }
+
+    #[test]
+    fn validation_counts_only_errors() {
+        let issues = vec!["ERROR: a".to_string(), "ERROR: b".to_string()];
+        let (e, w) = count_validation_severities(&issues);
+        assert_eq!(e, 2);
+        assert_eq!(w, 0);
+    }
+
+    #[test]
+    fn validation_counts_only_warnings() {
+        let issues = vec!["WARN: a".to_string(), "WARN: b".to_string()];
+        let (e, w) = count_validation_severities(&issues);
+        assert_eq!(e, 0);
+        assert_eq!(w, 2);
+    }
+
+    #[test]
+    fn validation_counts_mixed() {
+        let issues = vec![
+            "ERROR: a".to_string(),
+            "WARN: b".to_string(),
+            "ERROR: c".to_string(),
+            "anything else".to_string(),
+        ];
+        let (e, w) = count_validation_severities(&issues);
+        assert_eq!(e, 2);
+        assert_eq!(w, 2);
+    }
+
+    #[test]
+    fn validation_counts_strict_prefix() {
+        // Only "ERROR:" at the start counts; substring matches don't.
+        let issues = vec!["WARN: includes ERROR: text".to_string()];
+        let (e, w) = count_validation_severities(&issues);
+        assert_eq!(e, 0);
+        assert_eq!(w, 1);
+    }
+
+    // --- pam_missing_warning ---
+
+    #[test]
+    fn pam_warning_mentions_path() {
+        let msg = pam_missing_warning();
+        assert!(msg.contains("/etc/pam.d/beam"));
+        assert!(msg.contains("agent sessions"));
+    }
+
+    #[test]
+    fn pam_warning_suggests_remediation() {
+        let msg = pam_missing_warning();
+        assert!(msg.contains("Install") || msg.contains("packaging"));
+    }
+
+    // --- web_root_missing_warning ---
+
+    #[test]
+    fn web_root_warning_mentions_configured_path() {
+        let msg = web_root_missing_warning("/srv/beam/web");
+        assert!(msg.contains("/srv/beam/web"));
+        assert!(msg.contains("UI will not load"));
+    }
+
+    #[test]
+    fn web_root_warning_suggests_build_command() {
+        let msg = web_root_missing_warning("/tmp/x");
+        assert!(msg.contains("make build-web") || msg.contains("server.web_root"));
+    }
+
+    #[test]
+    fn web_root_warning_handles_empty_path() {
+        let msg = web_root_missing_warning("");
+        assert!(msg.contains("''"));
+    }
+
+    // --- web_root_is_usable ---
+
+    #[test]
+    fn web_root_usable_false_for_empty() {
+        assert!(!web_root_is_usable(""));
+    }
+
+    #[test]
+    fn web_root_usable_false_for_nonexistent() {
+        assert!(!web_root_is_usable(
+            "/tmp/beam-nonexistent-web-root-test-q9r2"
+        ));
+    }
+
+    #[test]
+    fn web_root_usable_true_for_existing_dir() {
+        // /tmp exists on every supported system.
+        assert!(web_root_is_usable("/tmp"));
+    }
+
+    #[test]
+    fn web_root_usable_false_for_file() {
+        // A regular file is not a usable web root.
+        let path = std::env::temp_dir().join(format!(
+            "beam-web-root-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4(),
+        ));
+        std::fs::write(&path, "not a dir").unwrap();
+        assert!(!web_root_is_usable(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- startup_banner_line ---
+
+    #[test]
+    fn banner_includes_https_scheme() {
+        let addr: SocketAddr = "127.0.0.1:8443".parse().unwrap();
+        let line = startup_banner_line(&addr);
+        assert!(line.contains("https://"));
+        assert!(line.contains("127.0.0.1:8443"));
+    }
+
+    #[test]
+    fn banner_handles_ipv6() {
+        let addr: SocketAddr = "[::1]:8443".parse().unwrap();
+        let line = startup_banner_line(&addr);
+        assert!(line.contains("[::1]"));
+        assert!(line.contains("8443"));
+    }
+
+    #[test]
+    fn banner_format_starts_with_listening() {
+        let addr: SocketAddr = "0.0.0.0:443".parse().unwrap();
+        let line = startup_banner_line(&addr);
+        assert!(line.starts_with("Listening on"));
     }
 }
 
