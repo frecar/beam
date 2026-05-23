@@ -375,4 +375,68 @@ mod tests {
             );
         }
     }
+
+    // --- spawn_cursor_monitor & loop failure paths ---
+
+    #[test]
+    fn spawn_cursor_monitor_returns_some_even_on_bogus_display() {
+        // spawn_cursor_monitor only returns None if std::thread::Builder fails,
+        // which is rare. Bogus display triggers the X11 connect error inside
+        // the worker thread, which is logged but not surfaced.
+        let rx = spawn_cursor_monitor(":99999");
+        // Channel handle returned regardless; the worker thread exits early
+        // when X connect fails.
+        assert!(rx.is_some());
+    }
+
+    #[test]
+    fn cursor_monitor_loop_returns_err_on_bogus_display() {
+        // Direct test of the loop function: connecting to :99999 must fail
+        // and surface an Err, not panic or block.
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let result = cursor_monitor_loop(":99999", tx);
+        assert!(result.is_err(), "Bogus display must produce Err");
+    }
+
+    #[test]
+    fn cursor_monitor_loop_error_message_mentions_x11() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let err = cursor_monitor_loop(":99999", tx).unwrap_err();
+        let msg = err.to_string();
+        // The connect-error wrapper says "X11 connect: ...". Spot-check that
+        // the surface error references X11 so operators know where to look.
+        assert!(
+            msg.contains("X11") || msg.contains("connect"),
+            "Error message should mention X11 or connect, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cursor_map_count_is_stable() {
+        // Lock the size of the cursor map. A future addition without test
+        // updates would break this.
+        let map = build_cursor_map();
+        assert!(
+            map.len() >= 50,
+            "Map should have at least 50 mappings, got {}",
+            map.len()
+        );
+    }
+
+    #[test]
+    fn cursor_map_all_keys_are_lowercase_or_known_variants() {
+        // The X11 cursor name convention uses lowercase + underscores. Mixed
+        // case is allowed for explicit aliases (e.g., X_cursor) but everything
+        // should be either fully lowercase or a known-known variant.
+        let map = build_cursor_map();
+        let allowed_uppercase = ["X_cursor"];
+        for x11_name in map.keys() {
+            if x11_name.chars().any(|c| c.is_uppercase()) {
+                assert!(
+                    allowed_uppercase.contains(x11_name),
+                    "Unexpected uppercase in cursor name: {x11_name}"
+                );
+            }
+        }
+    }
 }

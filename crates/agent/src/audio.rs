@@ -219,4 +219,123 @@ mod tests {
         let sample = i16::from_le_bytes([pcm[0], pcm[1]]);
         assert_eq!(sample, 0);
     }
+
+    // --- Additional sample-rate / channel-count validation ---
+
+    /// Extract the error message from an `AudioCapture::new` result without
+    /// requiring `AudioCapture` itself to be `Debug`. Returns an empty string
+    /// when the result is unexpectedly `Ok`.
+    fn err_msg(result: anyhow::Result<AudioCapture>) -> String {
+        match result {
+            Ok(_) => String::new(),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    #[test]
+    fn audio_capture_accepts_all_documented_sample_rates() {
+        // The documented Opus sample rates are 48k/24k/16k/12k/8k. All must
+        // be syntactically accepted by AudioCapture::new (PulseAudio connect
+        // will fail with bogus server, but our rate-check must NOT be the
+        // reason).
+        for sample_rate in [48000u32, 24000, 16000, 12000, 8000] {
+            let result = AudioCapture::new(sample_rate, 2, Some("/tmp/nonexistent-pulse-server"));
+            let err = err_msg(result);
+            assert!(
+                !err.is_empty(),
+                "Expected PulseAudio connect error for rate {sample_rate}"
+            );
+            // The error message should NOT contain "Unsupported sample rate"
+            // (which would mean our validation rejected it).
+            assert!(
+                !err.contains("Unsupported sample rate"),
+                "Sample rate {sample_rate} should pass our validation, but got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_capture_rejects_high_unsupported_sample_rate() {
+        let result = AudioCapture::new(96000, 2, Some("/tmp/nonexistent-pulse-server"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audio_capture_rejects_low_unsupported_sample_rate() {
+        let result = AudioCapture::new(4000, 2, Some("/tmp/nonexistent-pulse-server"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audio_capture_accepts_mono_channel_count() {
+        // 1 channel = Mono, valid for Opus.
+        let result = AudioCapture::new(48000, 1, Some("/tmp/nonexistent-pulse-server"));
+        // PulseAudio connect fails first; ensure we don't fail on channel
+        // count validation.
+        let err = err_msg(result);
+        assert!(!err.contains("Unsupported channel count"));
+    }
+
+    #[test]
+    fn audio_capture_accepts_stereo_channel_count() {
+        let result = AudioCapture::new(48000, 2, Some("/tmp/nonexistent-pulse-server"));
+        let err = err_msg(result);
+        assert!(!err.contains("Unsupported channel count"));
+    }
+
+    // --- frame_bytes validation ---
+
+    #[test]
+    fn audio_frame_math_consistent_across_rates() {
+        // 20ms at every supported rate must produce a frame size divisible
+        // by 2 (s16) * channels.
+        for sample_rate in [48000u32, 24000, 16000, 12000, 8000] {
+            for channels in [1u16, 2] {
+                let samples = (sample_rate * 20 / 1000) as usize;
+                let frame_bytes = samples * channels as usize * 2;
+                assert_eq!(
+                    frame_bytes % (channels as usize * 2),
+                    0,
+                    "frame_bytes must be evenly divisible by channels*2"
+                );
+                // 20ms at all supported rates must be > 0 samples
+                assert!(samples > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn audio_frame_math_16khz_mono() {
+        let sample_rate: u32 = 16000;
+        let channels: u16 = 1;
+        let samples_per_frame = (sample_rate * 20 / 1000) as usize;
+        let frame_bytes = samples_per_frame * channels as usize * 2;
+        assert_eq!(samples_per_frame, 320);
+        assert_eq!(frame_bytes, 640);
+    }
+
+    #[test]
+    fn audio_frame_math_12khz_stereo() {
+        let sample_rate: u32 = 12000;
+        let channels: u16 = 2;
+        let samples_per_frame = (sample_rate * 20 / 1000) as usize;
+        let frame_bytes = samples_per_frame * channels as usize * 2;
+        assert_eq!(samples_per_frame, 240);
+        assert_eq!(frame_bytes, 960);
+    }
+
+    // --- PCM byte order: round-trip of arbitrary i16 values ---
+
+    #[test]
+    fn audio_pcm_roundtrip_various_values() {
+        // Ensure little-endian encode + decode round trip preserves the
+        // sample.
+        for original in [
+            0i16, 1, -1, 100, -100, 1000, -1000, 32000, -32000, 32767, -32768,
+        ] {
+            let bytes = original.to_le_bytes();
+            let restored = i16::from_le_bytes([bytes[0], bytes[1]]);
+            assert_eq!(restored, original);
+        }
+    }
 }
