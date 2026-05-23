@@ -10,6 +10,18 @@ const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 const MAX_FILENAME_LEN: usize = 255;
 const MAX_CONCURRENT_TRANSFERS: usize = 8;
 
+/// Trait abstracting the inbound-file-transfer surface that the input
+/// callback drives.
+///
+/// Production uses [`FileTransferManager`] which writes to /tmp + ~/Downloads.
+/// Tests can swap in a recording mock so the callback dispatch can be
+/// driven without filesystem side effects.
+pub trait FileSink: Send {
+    fn handle_file_start(&mut self, id: &str, name: &str, size: u64) -> Result<()>;
+    fn handle_file_chunk(&mut self, id: &str, data: &str) -> Result<()>;
+    fn handle_file_done(&mut self, id: &str) -> Result<()>;
+}
+
 struct ActiveTransfer {
     name: String,
     size: u64,
@@ -263,6 +275,18 @@ impl FileTransferManager {
         );
 
         Ok(())
+    }
+}
+
+impl FileSink for FileTransferManager {
+    fn handle_file_start(&mut self, id: &str, name: &str, size: u64) -> Result<()> {
+        FileTransferManager::handle_file_start(self, id, name, size)
+    }
+    fn handle_file_chunk(&mut self, id: &str, data: &str) -> Result<()> {
+        FileTransferManager::handle_file_chunk(self, id, data)
+    }
+    fn handle_file_done(&mut self, id: &str) -> Result<()> {
+        FileTransferManager::handle_file_done(self, id)
     }
 }
 
@@ -1082,6 +1106,55 @@ mod tests {
         );
 
         drop(mgr); // cleanup
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- FileSink trait impl exercise ---
+
+    #[test]
+    fn file_sink_trait_handle_file_start_delegates() {
+        let dir = std::env::temp_dir().join(format!("beam-test-sink-start-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut mgr = FileTransferManager::new(dir.clone());
+        let unique_id = format!("sink-start-{}", std::process::id());
+        let sink: &mut dyn FileSink = &mut mgr;
+        sink.handle_file_start(&unique_id, "x.bin", 5).unwrap();
+        // Verify a temp file exists at the standard path.
+        let expected = PathBuf::from(format!("/tmp/beam-transfer-{unique_id}"));
+        assert!(expected.exists());
+        // Drop will clean up.
+        drop(mgr);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_sink_trait_handle_file_chunk_delegates() {
+        let dir = std::env::temp_dir().join(format!("beam-test-sink-chunk-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut mgr = FileTransferManager::new(dir.clone());
+        let unique_id = format!("sink-chunk-{}", std::process::id());
+        let sink: &mut dyn FileSink = &mut mgr;
+        sink.handle_file_start(&unique_id, "x.bin", 4).unwrap();
+        // base64("AAA=") = [0, 0]
+        sink.handle_file_chunk(&unique_id, "AAA=").unwrap();
+        drop(mgr);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_sink_trait_handle_file_done_delegates() {
+        let dir = std::env::temp_dir().join(format!("beam-test-sink-done-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut mgr = FileTransferManager::new(dir.clone());
+        let unique_id = format!("sink-done-{}", std::process::id());
+        let sink: &mut dyn FileSink = &mut mgr;
+        // Start a transfer with size 0, then immediately complete it.
+        sink.handle_file_start(&unique_id, "x.bin", 0).unwrap();
+        sink.handle_file_done(&unique_id).unwrap();
+        // File should be in Downloads.
+        let dest = dir.join("Downloads").join("x.bin");
+        assert!(dest.exists(), "expected file at {dest:?}");
+        drop(mgr);
         fs::remove_dir_all(&dir).ok();
     }
 }

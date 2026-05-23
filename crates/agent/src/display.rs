@@ -745,6 +745,95 @@ pub fn clamp_resize_dimensions(
     Some((cw, ch))
 }
 
+/// Result of a single xrandr invocation, parsed from the underlying
+/// `Command::output()` so the caller can branch on the outcome without
+/// caring about exit codes or stderr encoding directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum XrandrOutcome {
+    /// xrandr ran and exited with status 0.
+    Success,
+    /// xrandr ran and exited non-zero. Carries the captured stderr so the
+    /// caller can decide whether the failure is benign (mode already exists)
+    /// or real (and worth logging).
+    Failure { stderr: String },
+    /// `Command::output()` itself failed (binary missing, permission error).
+    SpawnError { reason: String },
+}
+
+/// Run an xrandr subprocess with the given args + DISPLAY env var.
+/// Returns an [`XrandrOutcome`] capturing the three possible result shapes.
+/// Pulled out so the bookkeeping is testable independently of the binary
+/// availability.
+pub(crate) fn run_xrandr(x_display: &str, args: &[&str]) -> XrandrOutcome {
+    let result = Command::new("xrandr")
+        .env("DISPLAY", x_display)
+        .args(args)
+        .output();
+    match result {
+        Ok(output) if output.status.success() => XrandrOutcome::Success,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            XrandrOutcome::Failure { stderr }
+        }
+        Err(e) => XrandrOutcome::SpawnError {
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// Same as [`run_xrandr`] but discards stdout/stderr — used for the probe
+/// step where the only thing the caller cares about is success/fail.
+pub(crate) fn run_xrandr_probe(x_display: &str) -> XrandrOutcome {
+    let result = Command::new("xrandr")
+        .env("DISPLAY", x_display)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    match result {
+        Ok(output) if output.status.success() => XrandrOutcome::Success,
+        Ok(output) => XrandrOutcome::Failure {
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        },
+        Err(e) => XrandrOutcome::SpawnError {
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// Decide whether the per-attempt xrandr probe outcome is the final
+/// success or a transient failure that should retry. Pure helper so the
+/// retry-loop bookkeeping (10 attempts, 200ms between) is testable.
+pub(crate) fn xrandr_probe_should_retry(
+    outcome: &XrandrOutcome,
+    attempt: u32,
+    max_attempts: u32,
+) -> bool {
+    !matches!(outcome, XrandrOutcome::Success) && attempt + 1 < max_attempts
+}
+
+/// Build the human-readable warn line for an xrandr command failure.
+/// Pure helper so the format is testable.
+pub(crate) fn xrandr_warn_line(cmd_label: &str, target: &str, stderr: &str) -> String {
+    format!("xrandr {cmd_label} {target} failed: {stderr}")
+}
+
+/// Build the human-readable bail message for "X display not ready"
+/// after the retry budget is exhausted.
+pub(crate) fn xrandr_probe_exhausted_message(x_display: &str) -> String {
+    format!("X display {x_display} not ready after 2 seconds")
+}
+
+/// Build the bail message for the final xrandr --output --mode failure.
+pub(crate) fn xrandr_mode_set_failed_message(mode_name: &str, stderr: &str) -> String {
+    format!("Failed to set resolution to {mode_name}: {stderr}")
+}
+
+/// Pure helper deciding whether the addmode/newmode error stderr is a
+/// real failure (true → log warn) or benign noise (false → suppress).
+pub(crate) fn xrandr_should_log_warn(stderr: &str) -> bool {
+    !is_benign_xrandr_stderr(stderr)
+}
+
 /// Change display resolution using xrandr. Standalone function that only needs
 /// the X display string (e.g. ":10"), so it can be called from the capture thread
 /// without owning a VirtualDisplay reference.
@@ -757,63 +846,64 @@ pub fn set_display_resolution(
     // Wait for X display to be connectable (xrandr can talk to it).
     // On arm64 (e.g. NVIDIA GB10), Xorg needs more than 500ms to fully
     // initialize. Without this, xrandr fails with "Can't open display".
-    for attempt in 0..10 {
-        let probe = Command::new("xrandr")
-            .env("DISPLAY", x_display)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
-        match probe {
-            Ok(output) if output.status.success() => break,
-            _ if attempt < 9 => {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            _ => bail!("X display {x_display} not ready after 2 seconds"),
+    const MAX_PROBE_ATTEMPTS: u32 = 10;
+    for attempt in 0..MAX_PROBE_ATTEMPTS {
+        let outcome = run_xrandr_probe(x_display);
+        if matches!(outcome, XrandrOutcome::Success) {
+            break;
         }
+        if !xrandr_probe_should_retry(&outcome, attempt, MAX_PROBE_ATTEMPTS) {
+            bail!("{}", xrandr_probe_exhausted_message(x_display));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
     let mode_name = format!("{width}x{height}");
     let modeline = generate_modeline(width, height, 60);
 
     // Try to add the mode (may already exist from a previous resize).
-    // Log failures — these help diagnose xrandr issues.
-    let newmode_output = Command::new("xrandr")
-        .env("DISPLAY", x_display)
-        .args(["--newmode", &mode_name])
-        .args(modeline.split_whitespace())
-        .output()
-        .context("Failed to run xrandr --newmode")?;
-    if !newmode_output.status.success() {
-        let stderr = String::from_utf8_lossy(&newmode_output.stderr);
-        // "already exists" is expected for repeated resizes
-        if !is_benign_xrandr_stderr(&stderr) {
-            warn!("xrandr --newmode {mode_name} failed: {stderr}");
+    let mut newmode_args = vec!["--newmode", &mode_name];
+    let modeline_parts: Vec<&str> = modeline.split_whitespace().collect();
+    newmode_args.extend(&modeline_parts);
+    let newmode_outcome = run_xrandr(x_display, &newmode_args);
+    match newmode_outcome {
+        XrandrOutcome::Success => {}
+        XrandrOutcome::Failure { stderr } => {
+            // "already exists" is expected for repeated resizes
+            if xrandr_should_log_warn(&stderr) {
+                warn!("{}", xrandr_warn_line("--newmode", &mode_name, &stderr));
+            }
+        }
+        XrandrOutcome::SpawnError { reason } => {
+            return Err(anyhow::anyhow!("Failed to run xrandr --newmode: {reason}"));
         }
     }
 
     // Add mode to the output (may already be added)
-    let addmode_output = Command::new("xrandr")
-        .env("DISPLAY", x_display)
-        .args(["--addmode", output_name, &mode_name])
-        .output()
-        .context("Failed to run xrandr --addmode")?;
-    if !addmode_output.status.success() {
-        let stderr = String::from_utf8_lossy(&addmode_output.stderr);
-        if !is_benign_xrandr_stderr(&stderr) {
-            warn!("xrandr --addmode {output_name} {mode_name} failed: {stderr}");
+    let addmode_outcome = run_xrandr(x_display, &["--addmode", output_name, &mode_name]);
+    match addmode_outcome {
+        XrandrOutcome::Success => {}
+        XrandrOutcome::Failure { stderr } => {
+            if xrandr_should_log_warn(&stderr) {
+                let target = format!("{output_name} {mode_name}");
+                warn!("{}", xrandr_warn_line("--addmode", &target, &stderr));
+            }
+        }
+        XrandrOutcome::SpawnError { reason } => {
+            return Err(anyhow::anyhow!("Failed to run xrandr --addmode: {reason}"));
         }
     }
 
     // Switch to the new mode
-    let output = Command::new("xrandr")
-        .env("DISPLAY", x_display)
-        .args(["--output", output_name, "--mode", &mode_name])
-        .output()
-        .context("Failed to run xrandr --output")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to set resolution to {mode_name}: {stderr}");
+    let output_outcome = run_xrandr(x_display, &["--output", output_name, "--mode", &mode_name]);
+    match output_outcome {
+        XrandrOutcome::Success => {}
+        XrandrOutcome::Failure { stderr } => {
+            bail!("{}", xrandr_mode_set_failed_message(&mode_name, &stderr));
+        }
+        XrandrOutcome::SpawnError { reason } => {
+            return Err(anyhow::anyhow!("Failed to run xrandr --output: {reason}"));
+        }
     }
 
     info!(
@@ -3391,5 +3481,189 @@ DP-2 disconnected (normal)
         let path = systemd_user_bus_path(1234);
         let addr = systemd_user_bus_address(1234);
         assert!(addr.contains(&path));
+    }
+
+    // ========================================================================
+    // xrandr helpers — pure logic that was previously bundled into the
+    // monolithic set_display_resolution function.
+    // ========================================================================
+
+    #[test]
+    fn xrandr_outcome_success_equality() {
+        assert_eq!(XrandrOutcome::Success, XrandrOutcome::Success);
+    }
+
+    #[test]
+    fn xrandr_outcome_failure_carries_stderr() {
+        let f = XrandrOutcome::Failure {
+            stderr: "bad".into(),
+        };
+        match f {
+            XrandrOutcome::Failure { stderr } => assert_eq!(stderr, "bad"),
+            _ => panic!("expected failure"),
+        }
+    }
+
+    #[test]
+    fn xrandr_outcome_spawn_error_carries_reason() {
+        let s = XrandrOutcome::SpawnError {
+            reason: "no such file".into(),
+        };
+        match s {
+            XrandrOutcome::SpawnError { reason } => assert_eq!(reason, "no such file"),
+            _ => panic!("expected spawn error"),
+        }
+    }
+
+    #[test]
+    fn xrandr_outcome_inequality() {
+        assert_ne!(
+            XrandrOutcome::Success,
+            XrandrOutcome::Failure { stderr: "".into() }
+        );
+        assert_ne!(
+            XrandrOutcome::Success,
+            XrandrOutcome::SpawnError { reason: "".into() }
+        );
+    }
+
+    // --- xrandr_probe_should_retry ---
+
+    #[test]
+    fn xrandr_probe_should_retry_success_returns_false() {
+        // Even with budget remaining, Success should NOT retry.
+        assert!(!xrandr_probe_should_retry(&XrandrOutcome::Success, 0, 10));
+    }
+
+    #[test]
+    fn xrandr_probe_should_retry_failure_within_budget_returns_true() {
+        let f = XrandrOutcome::Failure {
+            stderr: "Can't open display".into(),
+        };
+        assert!(xrandr_probe_should_retry(&f, 0, 10));
+        assert!(xrandr_probe_should_retry(&f, 5, 10));
+        assert!(xrandr_probe_should_retry(&f, 8, 10));
+    }
+
+    #[test]
+    fn xrandr_probe_should_retry_failure_at_last_attempt_returns_false() {
+        // attempt+1 == max_attempts → no more retries.
+        let f = XrandrOutcome::Failure { stderr: "x".into() };
+        assert!(!xrandr_probe_should_retry(&f, 9, 10));
+    }
+
+    #[test]
+    fn xrandr_probe_should_retry_spawn_error_within_budget_retries() {
+        let s = XrandrOutcome::SpawnError {
+            reason: "no binary".into(),
+        };
+        assert!(xrandr_probe_should_retry(&s, 0, 10));
+    }
+
+    #[test]
+    fn xrandr_probe_should_retry_spawn_error_at_last_attempt_stops() {
+        let s = XrandrOutcome::SpawnError {
+            reason: "no binary".into(),
+        };
+        assert!(!xrandr_probe_should_retry(&s, 9, 10));
+    }
+
+    // --- xrandr_warn_line ---
+
+    #[test]
+    fn xrandr_warn_line_format() {
+        assert_eq!(
+            xrandr_warn_line("--newmode", "1920x1080", "mode already exists"),
+            "xrandr --newmode 1920x1080 failed: mode already exists"
+        );
+    }
+
+    #[test]
+    fn xrandr_warn_line_with_empty_stderr() {
+        assert_eq!(
+            xrandr_warn_line("--addmode", "DUMMY0 1920x1080", ""),
+            "xrandr --addmode DUMMY0 1920x1080 failed: "
+        );
+    }
+
+    // --- xrandr_probe_exhausted_message ---
+
+    #[test]
+    fn xrandr_probe_exhausted_message_includes_display() {
+        assert_eq!(
+            xrandr_probe_exhausted_message(":10"),
+            "X display :10 not ready after 2 seconds"
+        );
+    }
+
+    #[test]
+    fn xrandr_probe_exhausted_message_handles_localhost_display() {
+        assert!(xrandr_probe_exhausted_message("localhost:0").contains("localhost:0"));
+    }
+
+    // --- xrandr_mode_set_failed_message ---
+
+    #[test]
+    fn xrandr_mode_set_failed_message_format() {
+        assert_eq!(
+            xrandr_mode_set_failed_message("1920x1080", "no such mode"),
+            "Failed to set resolution to 1920x1080: no such mode"
+        );
+    }
+
+    // --- xrandr_should_log_warn ---
+
+    #[test]
+    fn xrandr_should_log_warn_returns_true_for_real_error() {
+        assert!(xrandr_should_log_warn("genuine xrandr failure"));
+    }
+
+    #[test]
+    fn xrandr_should_log_warn_returns_false_for_benign_already_exists() {
+        // is_benign_xrandr_stderr catches "already exists".
+        assert!(!xrandr_should_log_warn(
+            "Failed to add mode: already exists"
+        ));
+    }
+
+    // --- run_xrandr / run_xrandr_probe smoke tests ---
+    // These tests don't require xrandr to be installed: the SpawnError
+    // outcome is the expected result in CI. They verify the function
+    // surfaces an XrandrOutcome rather than panicking.
+
+    #[test]
+    fn run_xrandr_against_unreachable_display_returns_outcome() {
+        let outcome = run_xrandr(":99999", &["--version"]);
+        // Either Success (xrandr --version works regardless of display),
+        // Failure (some xrandr versions check display first), or SpawnError
+        // (xrandr not installed). Any variant means we didn't panic.
+        match outcome {
+            XrandrOutcome::Success
+            | XrandrOutcome::Failure { .. }
+            | XrandrOutcome::SpawnError { .. } => {}
+        }
+    }
+
+    #[test]
+    fn run_xrandr_probe_against_unreachable_display_does_not_panic() {
+        let outcome = run_xrandr_probe(":99999");
+        match outcome {
+            XrandrOutcome::Success
+            | XrandrOutcome::Failure { .. }
+            | XrandrOutcome::SpawnError { .. } => {}
+        }
+    }
+
+    // --- set_display_resolution end-to-end (bogus display) ---
+
+    #[test]
+    fn set_display_resolution_against_bogus_display_returns_err() {
+        // Against an unreachable display, the probe retry exhausts and we
+        // bail. The function must surface an Err and not panic.
+        let result = set_display_resolution(":99999", 1920, 1080, "DUMMY0");
+        assert!(
+            result.is_err(),
+            "Bogus display should fail to set resolution"
+        );
     }
 }

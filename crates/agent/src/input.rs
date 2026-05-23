@@ -7,6 +7,29 @@ use x11rb::protocol::xproto;
 use x11rb::protocol::xtest;
 use x11rb::rust_connection::RustConnection;
 
+/// Trait over the X11 input-injection methods exposed by [`InputInjector`].
+///
+/// The production binary uses [`InputInjector`] which owns a live X11
+/// connection. Tests need to drive the input-dispatch logic without an X
+/// display, so we abstract over the surface the input callback needs and
+/// hand around `&mut dyn Inject` instead of `&mut InputInjector`. This lets
+/// callbacks be exercised against a mock that records each call.
+pub trait Inject: Send {
+    /// Inject a keyboard event. `code` is a Linux evdev keycode; the impl
+    /// performs the +8 X11 offset internally.
+    fn inject_key(&mut self, code: u16, pressed: bool) -> anyhow::Result<()>;
+    /// Inject absolute mouse movement using normalized [0.0, 1.0] coords.
+    fn inject_mouse_move_abs(&mut self, x: f64, y: f64) -> anyhow::Result<()>;
+    /// Inject relative mouse movement (pointer lock mode).
+    fn inject_mouse_move_rel(&mut self, dx: f64, dy: f64) -> anyhow::Result<()>;
+    /// Inject a mouse-button press/release event. `button` uses the browser
+    /// index (0=left, 1=middle, 2=right).
+    fn inject_button(&mut self, button: u8, pressed: bool) -> anyhow::Result<()>;
+    /// Inject scroll events. `dx`/`dy` are raw pixel deltas; the impl
+    /// accumulates fractional pixels and dispatches discrete X11 notches.
+    fn inject_scroll(&mut self, dx: f64, dy: f64) -> anyhow::Result<()>;
+}
+
 /// Input injector using X11 XTEST extension.
 ///
 /// Injects keyboard, mouse, and scroll events directly into the X server
@@ -52,12 +75,7 @@ impl InputInjector {
     /// Inject a keyboard event. `code` is a Linux evdev keycode.
     /// X11 keycode = evdev keycode + 8.
     pub fn inject_key(&mut self, code: u16, pressed: bool) -> anyhow::Result<()> {
-        let x_keycode = Self::evdev_to_x11_keycode(code);
-        let event_type = if pressed {
-            xproto::KEY_PRESS_EVENT
-        } else {
-            xproto::KEY_RELEASE_EVENT
-        };
+        let (event_type, x_keycode) = key_inject_params(code, pressed);
         xtest::fake_input(&self.conn, event_type, x_keycode, 0, self.root, 0, 0, 0)?;
         self.conn.flush()?;
         Ok(())
@@ -67,8 +85,7 @@ impl InputInjector {
     pub fn inject_mouse_move_abs(&mut self, x: f64, y: f64) -> anyhow::Result<()> {
         let w = self.width.load(Ordering::Relaxed);
         let h = self.height.load(Ordering::Relaxed);
-        let px = (x.clamp(0.0, 1.0) * w as f64) as i16;
-        let py = (y.clamp(0.0, 1.0) * h as f64) as i16;
+        let (px, py) = mouse_abs_to_pixels(x, y, w, h);
         // detail=0 for absolute motion, root=target window
         xtest::fake_input(
             &self.conn,
@@ -86,11 +103,9 @@ impl InputInjector {
 
     /// Inject relative mouse movement (pointer lock mode).
     pub fn inject_mouse_move_rel(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
-        let dx_i = dx.round() as i16;
-        let dy_i = dy.round() as i16;
-        if dx_i == 0 && dy_i == 0 {
+        let Some((dx_i, dy_i)) = mouse_rel_round(dx, dy) else {
             return Ok(());
-        }
+        };
         // detail=1 for relative motion
         xtest::fake_input(
             &self.conn,
@@ -258,9 +273,179 @@ impl InputInjector {
     }
 }
 
+/// Compute the `(event_type, x_keycode)` tuple passed to XTestFakeInput
+/// for a keyboard event. Pure helper so the offset + press/release
+/// classification is testable without an X connection.
+pub(crate) fn key_inject_params(evdev_code: u16, pressed: bool) -> (u8, u8) {
+    let x_keycode = InputInjector::evdev_to_x11_keycode(evdev_code);
+    let event_type = if pressed {
+        xproto::KEY_PRESS_EVENT
+    } else {
+        xproto::KEY_RELEASE_EVENT
+    };
+    (event_type, x_keycode)
+}
+
+/// Convert normalized [0.0, 1.0] mouse coords to pixel coordinates inside
+/// the current viewport. Values outside the bounds are clamped, so the
+/// produced i16 always falls inside [0, width or height].
+pub(crate) fn mouse_abs_to_pixels(x: f64, y: f64, width: u32, height: u32) -> (i16, i16) {
+    let px = (x.clamp(0.0, 1.0) * width as f64) as i16;
+    let py = (y.clamp(0.0, 1.0) * height as f64) as i16;
+    (px, py)
+}
+
+/// Round (dx, dy) to integer pixels. Returns `None` if both rounded
+/// deltas are zero — in that case the caller should skip the inject.
+pub(crate) fn mouse_rel_round(dx: f64, dy: f64) -> Option<(i16, i16)> {
+    let dx_i = dx.round() as i16;
+    let dy_i = dy.round() as i16;
+    if dx_i == 0 && dy_i == 0 {
+        None
+    } else {
+        Some((dx_i, dy_i))
+    }
+}
+
+impl Inject for InputInjector {
+    fn inject_key(&mut self, code: u16, pressed: bool) -> anyhow::Result<()> {
+        InputInjector::inject_key(self, code, pressed)
+    }
+
+    fn inject_mouse_move_abs(&mut self, x: f64, y: f64) -> anyhow::Result<()> {
+        InputInjector::inject_mouse_move_abs(self, x, y)
+    }
+
+    fn inject_mouse_move_rel(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
+        InputInjector::inject_mouse_move_rel(self, dx, dy)
+    }
+
+    fn inject_button(&mut self, button: u8, pressed: bool) -> anyhow::Result<()> {
+        InputInjector::inject_button(self, button, pressed)
+    }
+
+    fn inject_scroll(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
+        InputInjector::inject_scroll(self, dx, dy)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Button mapping ---
+
+    // --- key_inject_params ---
+
+    #[test]
+    fn key_inject_params_press_is_key_press_event() {
+        let (event_type, x_keycode) = key_inject_params(30, true);
+        assert_eq!(event_type, xproto::KEY_PRESS_EVENT);
+        assert_eq!(x_keycode, 38); // 30 + 8
+    }
+
+    #[test]
+    fn key_inject_params_release_is_key_release_event() {
+        let (event_type, x_keycode) = key_inject_params(30, false);
+        assert_eq!(event_type, xproto::KEY_RELEASE_EVENT);
+        assert_eq!(x_keycode, 38);
+    }
+
+    #[test]
+    fn key_inject_params_applies_evdev_offset() {
+        let (_, x_keycode) = key_inject_params(0, true);
+        assert_eq!(x_keycode, 8);
+    }
+
+    #[test]
+    fn key_inject_params_max_u8_keycode() {
+        // 247 + 8 = 255 = u8::MAX
+        let (_, x_keycode) = key_inject_params(247, true);
+        assert_eq!(x_keycode, 255);
+    }
+
+    // --- mouse_abs_to_pixels ---
+
+    #[test]
+    fn mouse_abs_to_pixels_center() {
+        let (px, py) = mouse_abs_to_pixels(0.5, 0.5, 1920, 1080);
+        assert_eq!(px, 960);
+        assert_eq!(py, 540);
+    }
+
+    #[test]
+    fn mouse_abs_to_pixels_top_left() {
+        let (px, py) = mouse_abs_to_pixels(0.0, 0.0, 1920, 1080);
+        assert_eq!(px, 0);
+        assert_eq!(py, 0);
+    }
+
+    #[test]
+    fn mouse_abs_to_pixels_bottom_right() {
+        let (px, py) = mouse_abs_to_pixels(1.0, 1.0, 1920, 1080);
+        assert_eq!(px, 1920);
+        assert_eq!(py, 1080);
+    }
+
+    #[test]
+    fn mouse_abs_to_pixels_clamps_out_of_range_high() {
+        let (px, py) = mouse_abs_to_pixels(2.0, 5.0, 1920, 1080);
+        assert_eq!(px, 1920);
+        assert_eq!(py, 1080);
+    }
+
+    #[test]
+    fn mouse_abs_to_pixels_clamps_out_of_range_low() {
+        let (px, py) = mouse_abs_to_pixels(-1.5, -10.0, 1920, 1080);
+        assert_eq!(px, 0);
+        assert_eq!(py, 0);
+    }
+
+    #[test]
+    fn mouse_abs_to_pixels_small_viewport() {
+        let (px, py) = mouse_abs_to_pixels(0.5, 0.5, 800, 600);
+        assert_eq!(px, 400);
+        assert_eq!(py, 300);
+    }
+
+    // --- mouse_rel_round ---
+
+    #[test]
+    fn mouse_rel_round_nonzero_returns_some() {
+        let result = mouse_rel_round(1.4, -2.6);
+        assert_eq!(result, Some((1, -3)));
+    }
+
+    #[test]
+    fn mouse_rel_round_zero_returns_none() {
+        assert_eq!(mouse_rel_round(0.0, 0.0), None);
+    }
+
+    #[test]
+    fn mouse_rel_round_sub_half_returns_none() {
+        // 0.4 rounds to 0, 0.4 rounds to 0 → None
+        assert_eq!(mouse_rel_round(0.4, 0.4), None);
+    }
+
+    #[test]
+    fn mouse_rel_round_one_zero_one_nonzero() {
+        // dx rounds to nonzero, dy rounds to zero → Some
+        let r = mouse_rel_round(1.0, 0.0);
+        assert_eq!(r, Some((1, 0)));
+    }
+
+    #[test]
+    fn mouse_rel_round_zero_then_nonzero() {
+        let r = mouse_rel_round(0.0, -5.5);
+        assert_eq!(r, Some((0, -6)));
+    }
+
+    #[test]
+    fn mouse_rel_round_at_negative_boundary_returns_some() {
+        // -0.5 rounds away from zero per Rust's f64::round() semantics
+        let r = mouse_rel_round(-0.6, 0.0);
+        assert_eq!(r, Some((-1, 0)));
+    }
 
     // --- Button mapping ---
 

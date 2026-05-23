@@ -27,6 +27,28 @@ pub fn spawn_cursor_monitor(display: &str) -> Option<mpsc::Receiver<String>> {
     Some(rx)
 }
 
+/// Pure helper that resolves an XFixes cursor name to its CSS counterpart,
+/// using the mapping built by [`build_cursor_map`]. Unknown names fall
+/// through to `"default"`. Pulled out so the lookup branch in the cursor
+/// monitor loop is unit-testable without an X11 connection.
+pub(crate) fn cursor_name_to_css(map: &HashMap<&'static str, &'static str>, name: &str) -> String {
+    map.get(name).copied().unwrap_or("default").to_string()
+}
+
+/// Predicate that decides whether the cursor monitor should emit a new
+/// `(name, serial)` pair. Returns `true` when the serial differs from the
+/// previously-observed one. Pure helper around the dedup-by-serial gate.
+pub(crate) fn cursor_serial_changed(current_serial: u32, previous_serial: u32) -> bool {
+    current_serial != previous_serial
+}
+
+/// Decide whether to push a fresh css onto the channel. Returns `true`
+/// when the new css differs from the last-sent one. Pure mirror of the
+/// "Only send if changed" branch in the loop.
+pub(crate) fn cursor_css_changed(new_css: &str, last_css: &str) -> bool {
+    new_css != last_css
+}
+
 fn cursor_monitor_loop(display: &str, tx: mpsc::Sender<String>) -> anyhow::Result<()> {
     let (conn, screen_num) =
         RustConnection::connect(Some(display)).map_err(|e| anyhow::anyhow!("X11 connect: {e}"))?;
@@ -64,11 +86,7 @@ fn cursor_monitor_loop(display: &str, tx: mpsc::Sender<String>) -> anyhow::Resul
     // Send initial cursor state
     if let Ok(reply) = xfixes::get_cursor_image_and_name(&conn)?.reply() {
         let name = String::from_utf8_lossy(&reply.name).to_string();
-        let css = map
-            .get(name.as_str())
-            .copied()
-            .unwrap_or("default")
-            .to_string();
+        let css = cursor_name_to_css(&map, &name);
         last_css = css.clone();
         last_serial = reply.cursor_serial;
         let _ = tx.blocking_send(css);
@@ -79,7 +97,7 @@ fn cursor_monitor_loop(display: &str, tx: mpsc::Sender<String>) -> anyhow::Resul
 
         if let Event::XfixesCursorNotify(notify) = event {
             // Dedup by serial — same cursor shape, skip
-            if notify.cursor_serial == last_serial {
+            if !cursor_serial_changed(notify.cursor_serial, last_serial) {
                 continue;
             }
             last_serial = notify.cursor_serial;
@@ -89,16 +107,13 @@ fn cursor_monitor_loop(display: &str, tx: mpsc::Sender<String>) -> anyhow::Resul
                 Ok(reply) => {
                     let name = String::from_utf8_lossy(&reply.name).to_string();
                     debug!(cursor_name = %name, "Cursor changed");
-                    map.get(name.as_str())
-                        .copied()
-                        .unwrap_or("default")
-                        .to_string()
+                    cursor_name_to_css(&map, &name)
                 }
                 Err(_) => "default".to_string(),
             };
 
             // Only send if changed
-            if css != last_css {
+            if cursor_css_changed(&css, &last_css) {
                 last_css = css.clone();
                 if tx.blocking_send(css).is_err() {
                     break; // receiver dropped, agent shutting down
@@ -438,5 +453,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- cursor_name_to_css ---
+
+    #[test]
+    fn cursor_name_to_css_known_name() {
+        let map = build_cursor_map();
+        // "watch" should map to wait per the standard CSS cursor types.
+        assert_eq!(cursor_name_to_css(&map, "watch"), "wait");
+    }
+
+    #[test]
+    fn cursor_name_to_css_unknown_falls_back_to_default() {
+        let map = build_cursor_map();
+        assert_eq!(cursor_name_to_css(&map, "no-such-cursor"), "default");
+    }
+
+    #[test]
+    fn cursor_name_to_css_empty_name() {
+        let map = build_cursor_map();
+        assert_eq!(cursor_name_to_css(&map, ""), "default");
+    }
+
+    #[test]
+    fn cursor_name_to_css_returns_owned_string() {
+        let map = build_cursor_map();
+        let s: String = cursor_name_to_css(&map, "left_ptr");
+        assert_eq!(s, "default");
+    }
+
+    // --- cursor_serial_changed ---
+
+    #[test]
+    fn cursor_serial_changed_different_returns_true() {
+        assert!(cursor_serial_changed(2, 1));
+    }
+
+    #[test]
+    fn cursor_serial_changed_same_returns_false() {
+        assert!(!cursor_serial_changed(7, 7));
+    }
+
+    #[test]
+    fn cursor_serial_changed_zero_baseline() {
+        assert!(cursor_serial_changed(1, 0));
+    }
+
+    // --- cursor_css_changed ---
+
+    #[test]
+    fn cursor_css_changed_different_returns_true() {
+        assert!(cursor_css_changed("wait", "default"));
+    }
+
+    #[test]
+    fn cursor_css_changed_same_returns_false() {
+        assert!(!cursor_css_changed("wait", "wait"));
+    }
+
+    #[test]
+    fn cursor_css_changed_empty_vs_nonempty() {
+        assert!(cursor_css_changed("", "default"));
+        assert!(cursor_css_changed("default", ""));
+        assert!(!cursor_css_changed("", ""));
+    }
+
+    // --- spawn_cursor_monitor entry-point ---
+
+    #[test]
+    fn spawn_cursor_monitor_with_bogus_display_returns_rx() {
+        // The spawn always returns Some(rx) even when the inner loop will
+        // fail on connect — the failure is logged from the worker thread,
+        // not surfaced to the caller.
+        let rx = spawn_cursor_monitor(":99999");
+        assert!(rx.is_some(), "spawn_cursor_monitor should return Some");
+        // Drop the rx to let the worker exit quickly.
+        drop(rx);
+    }
+
+    #[test]
+    fn spawn_cursor_monitor_with_empty_display_returns_some() {
+        let rx = spawn_cursor_monitor("");
+        assert!(rx.is_some());
+        drop(rx);
     }
 }
