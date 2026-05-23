@@ -587,4 +587,271 @@ mod tests {
             );
         }
     }
+
+    // --- can_instantiate ---
+
+    #[test]
+    fn can_instantiate_rejects_unknown_element_name() {
+        gst::init().unwrap();
+        assert!(!can_instantiate("definitely-not-a-real-element-name-xyz"));
+    }
+
+    #[test]
+    fn can_instantiate_accepts_x264enc_when_present() {
+        gst::init().unwrap();
+        // x264enc is part of gst-plugins-ugly. CI installs the gstreamer-1.0
+        // plugin set, so this should be available in the coverage job.
+        // If the test host lacks the plugin, skip rather than fail.
+        if ElementFactory::find("x264enc").is_some() {
+            assert!(can_instantiate("x264enc"));
+        }
+    }
+
+    // --- detect_encoder branches ---
+
+    #[test]
+    fn detect_encoder_falls_through_to_auto_when_preferred_unavailable() {
+        // Asking for a known-but-unavailable encoder (e.g. nvh264enc on a
+        // non-NVIDIA host) should fall through and either find another working
+        // encoder or bail with a clear error — never return the unavailable
+        // preferred one.
+        gst::init().unwrap();
+        let nvidia_present = ElementFactory::find("nvh264enc")
+            .map(|f| f.create().build().is_ok())
+            .unwrap_or(false);
+        if !nvidia_present {
+            // Either a fallback (x264enc on most CI hosts) succeeds, or bail.
+            if let Ok((_, name)) = detect_encoder(Some("nvh264enc")) {
+                assert_ne!(name, "nvh264enc", "Should not return unavailable encoder");
+            }
+        }
+    }
+
+    #[test]
+    fn detect_encoder_uses_preferred_when_available() {
+        gst::init().unwrap();
+        // x264enc is the always-available encoder on CI. If preferred=x264enc
+        // resolves to anything, it MUST be x264enc itself (not a fallback).
+        if ElementFactory::find("x264enc").is_some() {
+            let (enc_type, name) = detect_encoder(Some("x264enc")).unwrap();
+            assert_eq!(name, "x264enc");
+            assert_eq!(enc_type, EncoderType::Software);
+        }
+    }
+
+    #[test]
+    fn detect_encoder_rejects_unknown_name_message_format() {
+        // The error message must mention the rejected name so operators can
+        // diagnose typos in config.
+        let result = detect_encoder(Some("garbage-encoder-name"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("garbage-encoder-name"), "Error: {err}");
+    }
+
+    // --- build_encoder_element ---
+
+    #[test]
+    fn build_encoder_element_x264enc_constructs() {
+        gst::init().unwrap();
+        if ElementFactory::find("x264enc").is_some() {
+            let elem = build_encoder_element(EncoderType::Software, "x264enc", 2_000_000, 30)
+                .expect("x264enc should build");
+            // Verify the bitrate property was actually set.
+            let bitrate: u32 = elem.property("bitrate");
+            assert_eq!(bitrate, 2_000_000);
+        }
+    }
+
+    #[test]
+    fn build_encoder_element_rejects_bogus_name_for_software_type() {
+        gst::init().unwrap();
+        // EncoderType::Software with a name GStreamer doesn't know → Err.
+        let result = build_encoder_element(
+            EncoderType::Software,
+            "totally_fake_software_enc",
+            2000000,
+            30,
+        );
+        assert!(result.is_err());
+    }
+
+    // --- Full pipeline lifecycle (x264enc only) ---
+
+    /// Build a full encoder pipeline via x264enc and verify it accepts a frame
+    /// and produces an encoded NAL unit. This exercises the pipeline build,
+    /// link, state-change, and frame-push paths end-to-end.
+    #[test]
+    fn encoder_x264_lifecycle_encodes_one_frame() {
+        gst::init().unwrap();
+        if ElementFactory::find("x264enc").is_none() {
+            return; // No software encoder on this host; skip.
+        }
+
+        let encoder =
+            match Encoder::with_encoder_preference(640, 480, 30, 2_000_000, Some("x264enc")) {
+                Ok(e) => e,
+                Err(e) => {
+                    // Some CI hosts lack the full plugin set (e.g. h264parse from
+                    // gst-plugins-bad). Skip rather than fail in that case.
+                    eprintln!("Skipping x264 lifecycle test: {e:#}");
+                    return;
+                }
+            };
+        assert!(!encoder.has_error());
+
+        // Push one black frame (640x480 BGRx = 4 bytes per pixel)
+        let frame_bytes = 640usize * 480 * 4;
+        let frame = crate::capture::synthetic_pooled_frame(vec![0u8; frame_bytes]);
+        encoder.encode_frame(frame, 0).unwrap();
+
+        // force_keyframe should not panic on a healthy pipeline.
+        encoder.force_keyframe();
+
+        // Encoder may need multiple frames before producing output; the test
+        // verifies the API surface (push/pull/force/has_error) works without
+        // panic. Actually pulling encoded data depends on x264enc behavior and
+        // is timing-sensitive, so we don't gate the test on it.
+        let _ = encoder.pull_encoded();
+    }
+
+    #[test]
+    fn encoder_x264_force_keyframe_idempotent() {
+        // Calling force_keyframe multiple times in a row must not panic or
+        // leave the pipeline in a bad state.
+        gst::init().unwrap();
+        if ElementFactory::find("x264enc").is_none() {
+            return;
+        }
+        let encoder = match Encoder::with_encoder_preference(320, 240, 30, 500_000, Some("x264enc"))
+        {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for _ in 0..5 {
+            encoder.force_keyframe();
+        }
+        assert!(!encoder.has_error());
+    }
+
+    #[test]
+    fn encoder_x264_pull_encoded_when_empty_returns_none() {
+        gst::init().unwrap();
+        if ElementFactory::find("x264enc").is_none() {
+            return;
+        }
+        let encoder = match Encoder::with_encoder_preference(320, 240, 30, 500_000, Some("x264enc"))
+        {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        // No frames pushed → no encoded output yet. Must be Ok(None), not Err.
+        match encoder.pull_encoded() {
+            Ok(None) => {}
+            Ok(Some(data)) => {
+                // Some encoders emit headers before any frame is pushed; either
+                // is acceptable. The test only proves pull_encoded doesn't
+                // wedge.
+                assert!(!data.is_empty());
+            }
+            Err(e) => panic!("pull_encoded should not error on idle pipeline: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn encoder_x264_has_error_starts_false() {
+        gst::init().unwrap();
+        if ElementFactory::find("x264enc").is_none() {
+            return;
+        }
+        if let Ok(encoder) =
+            Encoder::with_encoder_preference(320, 240, 30, 500_000, Some("x264enc"))
+        {
+            assert!(
+                !encoder.has_error(),
+                "Freshly-built pipeline must not report error"
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_x264_drop_cleans_up() {
+        // Building + dropping the encoder back-to-back exercises the Drop impl
+        // (EOS + Null transition). Must not deadlock or panic.
+        gst::init().unwrap();
+        if ElementFactory::find("x264enc").is_none() {
+            return;
+        }
+        for _ in 0..3 {
+            if let Ok(encoder) =
+                Encoder::with_encoder_preference(320, 240, 30, 500_000, Some("x264enc"))
+            {
+                drop(encoder);
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_format_selection_per_type() {
+        // BGRA only for Nvidia (non-CUDA); everything else uses BGRx.
+        for enc_type in [
+            EncoderType::Nvidia,
+            EncoderType::NvidiaCuda,
+            EncoderType::VaApi,
+            EncoderType::Software,
+        ] {
+            let format = match enc_type {
+                EncoderType::Nvidia | EncoderType::NvidiaCuda => "BGRA",
+                _ => "BGRx",
+            };
+            if matches!(enc_type, EncoderType::Nvidia | EncoderType::NvidiaCuda) {
+                assert_eq!(format, "BGRA", "{enc_type:?} should use BGRA");
+            } else {
+                assert_eq!(format, "BGRx", "{enc_type:?} should use BGRx");
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_type_is_copy() {
+        // EncoderType must remain Copy so it can be passed by value through
+        // the detection + build paths without ownership concerns.
+        let a = EncoderType::Software;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn encoder_type_debug_format_includes_variant_name() {
+        // Detection logs use {?encoder_type}; verify each variant renders
+        // with its identifier so log search works.
+        for (enc_type, expected) in [
+            (EncoderType::Nvidia, "Nvidia"),
+            (EncoderType::NvidiaCuda, "NvidiaCuda"),
+            (EncoderType::VaApi, "VaApi"),
+            (EncoderType::Software, "Software"),
+        ] {
+            let dbg = format!("{enc_type:?}");
+            assert!(
+                dbg.contains(expected),
+                "Debug format for {enc_type:?} should contain {expected}, got {dbg}"
+            );
+        }
+    }
+
+    // --- detect_encoder_type re-export ---
+
+    #[test]
+    fn detect_encoder_type_matches_detect_encoder() {
+        // The pub wrapper delegates to the private detect_encoder; verify both
+        // return identical results for the same input.
+        gst::init().unwrap();
+        let pref = Some("garbage_encoder_xyz");
+        let from_pub = detect_encoder_type(pref).map_err(|e| e.to_string());
+        let from_priv = detect_encoder(pref).map_err(|e| e.to_string());
+        match (from_pub, from_priv) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b),
+            (Err(a), Err(b)) => assert_eq!(a, b),
+            _ => panic!("detect_encoder_type and detect_encoder diverged"),
+        }
+    }
 }

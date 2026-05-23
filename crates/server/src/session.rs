@@ -1835,4 +1835,408 @@ mod tests {
 
         assert_eq!(manager.get_idle_timeout(id, 3600).await, 0);
     }
+
+    // ---------- PersistedSession serialization ----------
+
+    #[test]
+    fn persisted_session_serde_roundtrip() {
+        // Make sure every field survives a JSON round trip. The on-disk format
+        // is what restore_sessions reads on next boot.
+        let original = PersistedSession {
+            session_id: Uuid::new_v4(),
+            username: "alice".to_string(),
+            display: 101,
+            width: 1920,
+            height: 1080,
+            created_at: 1_700_000_000,
+            agent_pid: 0,
+            agent_token: "tok-abc".to_string(),
+            release_token: "rel-xyz".to_string(),
+            systemd_unit: Some("beam-agent-abc.service".to_string()),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: PersistedSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.session_id, original.session_id);
+        assert_eq!(restored.username, original.username);
+        assert_eq!(restored.display, original.display);
+        assert_eq!(restored.width, original.width);
+        assert_eq!(restored.height, original.height);
+        assert_eq!(restored.created_at, original.created_at);
+        assert_eq!(restored.agent_pid, original.agent_pid);
+        assert_eq!(restored.agent_token, original.agent_token);
+        assert_eq!(restored.release_token, original.release_token);
+        assert_eq!(restored.systemd_unit, original.systemd_unit);
+    }
+
+    #[test]
+    fn persisted_session_defaults_missing_fields() {
+        // Older session files (pre-systemd) lack agent_pid/release_token/systemd_unit;
+        // serde must default them.
+        let json = r#"{
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "username": "alice",
+            "display": 100,
+            "width": 1024,
+            "height": 768,
+            "created_at": 1700000000,
+            "agent_token": "tok"
+        }"#;
+        let parsed: PersistedSession = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.username, "alice");
+        assert_eq!(parsed.agent_pid, 0); // default
+        assert_eq!(parsed.release_token, ""); // default
+        assert!(parsed.systemd_unit.is_none()); // default
+    }
+
+    #[test]
+    fn persisted_session_handles_legacy_pid_only_format() {
+        // Legacy session file from the pre-systemd era. Restoration code must
+        // gracefully fall through to PID check when systemd_unit is missing.
+        let json = r#"{
+            "session_id": "00000000-0000-0000-0000-000000000002",
+            "username": "bob",
+            "display": 102,
+            "width": 800,
+            "height": 600,
+            "created_at": 1700000001,
+            "agent_pid": 12345,
+            "agent_token": "tok-old"
+        }"#;
+        let parsed: PersistedSession = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.agent_pid, 12345);
+        assert!(parsed.systemd_unit.is_none());
+    }
+
+    #[test]
+    fn persisted_session_systemd_unit_optional() {
+        // New format: systemd_unit present, agent_pid=0.
+        let session_id = Uuid::new_v4();
+        let original = PersistedSession {
+            session_id,
+            username: "carol".to_string(),
+            display: 200,
+            width: 1366,
+            height: 768,
+            created_at: 1_700_000_002,
+            agent_pid: 0,
+            agent_token: "tok-new".to_string(),
+            release_token: "rel-new".to_string(),
+            systemd_unit: None, // explicit None
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: PersistedSession = serde_json::from_str(&json).unwrap();
+        assert!(restored.systemd_unit.is_none());
+        assert_eq!(restored.session_id, session_id);
+    }
+
+    // ---------- DisplayPool: additional edge cases ----------
+
+    #[test]
+    fn display_pool_allocation_after_release_reuses() {
+        // After releasing several numbers, the next allocate should grab one
+        // from the free set (any one), not bump `next`.
+        let mut pool = DisplayPool::new(100);
+        let n1 = pool.allocate();
+        let n2 = pool.allocate();
+        assert_eq!((n1, n2), (100, 101));
+        pool.release(100);
+        // Next allocation reuses the freed number; we don't pin which one
+        // because HashSet ordering is undefined, but it must come from {100}.
+        let reused = pool.allocate();
+        assert_eq!(reused, 100);
+        // Next bumps `next`
+        let n3 = pool.allocate();
+        assert_eq!(n3, 102);
+    }
+
+    #[test]
+    fn display_pool_double_release_does_not_panic() {
+        // Releasing the same number twice → no panic. The HashSet swallows
+        // duplicate inserts. This shouldn't happen in practice but defensive.
+        let mut pool = DisplayPool::new(50);
+        pool.release(99);
+        pool.release(99);
+    }
+
+    // ---------- list_sessions ordering invariance ----------
+
+    #[tokio::test]
+    async fn list_sessions_with_activity_returns_all_rows() {
+        let manager = make_manager();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let id3 = Uuid::new_v4();
+        insert(&manager, make_session(id1, "u1", 100, 100, None)).await;
+        insert(&manager, make_session(id2, "u2", 101, 200, None)).await;
+        insert(&manager, make_session(id3, "u3", 102, 300, None)).await;
+
+        let rows = manager.list_sessions_with_activity().await;
+        assert_eq!(rows.len(), 3);
+        // Sum of timestamps should equal 100+200+300 regardless of order
+        let total: u64 = rows.iter().map(|(_, t)| t).sum();
+        assert_eq!(total, 600);
+    }
+
+    // ---------- get_release_token / get_systemd_unit ----------
+
+    #[tokio::test]
+    async fn get_release_token_returns_real_value() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 100, 0, None);
+        s.release_token = "specific-release-value".to_string();
+        insert(&manager, s).await;
+
+        let token = manager.get_release_token(id).await.unwrap();
+        assert_eq!(token, "specific-release-value");
+    }
+
+    // ---------- generate_agent_token / generate_release_token ----------
+
+    #[test]
+    fn generate_agent_token_is_hex_only() {
+        let token = generate_agent_token();
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generate_release_token_is_hex_only() {
+        let token = generate_release_token();
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generate_agent_token_high_entropy() {
+        // 256-bit token → repeated calls should never collide. Sample 100.
+        let tokens: HashSet<String> = (0..100).map(|_| generate_agent_token()).collect();
+        assert_eq!(tokens.len(), 100, "All 100 tokens should be unique");
+    }
+
+    #[test]
+    fn generate_release_token_high_entropy() {
+        // 64-bit token has 1/2^64 collision probability per pair; 100 samples
+        // should be unique with overwhelming likelihood.
+        let tokens: HashSet<String> = (0..100).map(|_| generate_release_token()).collect();
+        assert_eq!(tokens.len(), 100, "All 100 release tokens should be unique");
+    }
+
+    // ---------- constant_time_eq: additional cases ----------
+
+    #[test]
+    fn constant_time_eq_empty_inputs() {
+        // Two empty slices are equal.
+        assert!(constant_time_eq(&[], &[]));
+    }
+
+    #[test]
+    fn constant_time_eq_empty_vs_nonempty() {
+        assert!(!constant_time_eq(&[], b"x"));
+        assert!(!constant_time_eq(b"x", &[]));
+    }
+
+    #[test]
+    fn constant_time_eq_matches_long_strings() {
+        let a: Vec<u8> = (0..256).map(|i| i as u8).collect();
+        let b = a.clone();
+        assert!(constant_time_eq(&a, &b));
+    }
+
+    #[test]
+    fn constant_time_eq_first_byte_differs() {
+        let a = b"abcdef";
+        let b = b"xbcdef";
+        assert!(!constant_time_eq(a, b));
+    }
+
+    // ---------- verify_agent_token: empty token rejected when session has none ----------
+
+    #[tokio::test]
+    async fn verify_agent_token_with_legacy_empty_token_rejects_nonempty() {
+        // Documents current behavior: verify_agent_token uses raw
+        // constant_time_eq, so a session with an empty stored agent_token
+        // matches *only* an empty presented token. The token-presence guard
+        // happens at the web layer (see web::tests::verify_agent_token_*).
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 100, 0, None);
+        s.agent_token = String::new();
+        insert(&manager, s).await;
+        // Empty vs any non-empty token must fail.
+        assert!(!manager.verify_agent_token(id, "any-token").await);
+        assert!(!manager.verify_agent_token(id, " ").await);
+    }
+
+    // ---------- heartbeat / stale_sessions interactions ----------
+
+    #[tokio::test]
+    async fn heartbeat_then_stale_sessions_excludes_fresh() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        // Insert with very old activity
+        insert(&manager, make_session(id, "alice", 100, 1, None)).await;
+
+        // Heartbeat updates activity to current time
+        assert!(manager.heartbeat(id).await);
+
+        // Now the session is fresh; stale check with 60s timeout should NOT
+        // include it.
+        let stale = manager.stale_sessions(60).await;
+        assert!(
+            !stale.contains(&id),
+            "Fresh session must not be marked stale"
+        );
+    }
+
+    // ---------- restart_count behavior across multiple sessions ----------
+
+    #[tokio::test]
+    async fn restart_count_increments_monotonically() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        for expected in 1..=10 {
+            let count = manager.increment_restart_count(id).await.unwrap();
+            assert_eq!(count, expected);
+        }
+    }
+
+    // ---------- find_by_username: empty manager ----------
+
+    #[tokio::test]
+    async fn find_by_username_on_empty_manager_returns_none() {
+        let manager = make_manager();
+        assert!(manager.find_by_username("anyone").await.is_none());
+    }
+
+    // ---------- start_grace_period bumps gen multiple times ----------
+
+    #[tokio::test]
+    async fn start_grace_period_returns_increasing_generation() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        let (gen1, _) = manager.start_grace_period(id).await.unwrap();
+        let g1 = gen1.load(Ordering::Relaxed);
+        let (gen2, _) = manager.start_grace_period(id).await.unwrap();
+        let g2 = gen2.load(Ordering::Relaxed);
+        assert!(g2 > g1, "Generation should increase across grace periods");
+    }
+
+    // ---------- cancel grace flips the counter ----------
+
+    // ---------- respawn_agent: missing session ----------
+
+    #[tokio::test]
+    async fn respawn_agent_returns_none_for_missing_session() {
+        // The early-return path for unknown session IDs is a pure check —
+        // no systemctl invocation. Verifying it returns Ok(None) cleanly is
+        // safe in CI without root or systemd.
+        let manager = make_manager();
+        let result = manager
+            .respawn_agent(Uuid::new_v4(), "wss://example.test")
+            .await;
+        assert!(
+            matches!(result, Ok(None)),
+            "Unknown session_id should return Ok(None)"
+        );
+    }
+
+    // ---------- destroy_session: missing session ----------
+
+    #[tokio::test]
+    async fn destroy_session_silent_on_missing_session() {
+        // Documents current behavior: destroy_session on an unknown id is a
+        // no-op (Ok). The caller can be lazy about which IDs it still tracks.
+        let manager = make_manager();
+        let result = manager.destroy_session(Uuid::new_v4()).await;
+        assert!(
+            result.is_ok(),
+            "destroy_session on unknown id should be Ok (no-op)"
+        );
+    }
+
+    // ---------- get_systemd_unit ----------
+
+    #[tokio::test]
+    async fn get_systemd_unit_with_set_value() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        let mut s = make_session(id, "alice", 100, 0, None);
+        s.systemd_unit = Some("beam-agent-test.service".to_string());
+        insert(&manager, s).await;
+
+        let unit = manager.get_systemd_unit(id).await;
+        assert_eq!(unit, Some("beam-agent-test.service".to_string()));
+    }
+
+    // ---------- create_session ceiling check ----------
+
+    #[tokio::test]
+    async fn create_session_rejects_when_max_reached() {
+        // max_sessions=0 means no sessions allowed — the ceiling check must
+        // fire before lookup_user, so this doesn't need an actual user.
+        let manager = make_manager();
+        let result = manager
+            .create_session("root", "wss://example.test", 0, Some(1024), Some(768), None)
+            .await;
+        assert!(result.is_err(), "max_sessions=0 should reject creation");
+        let err = result.unwrap_err().to_string();
+        // Don't assert exact wording; just that we got an error.
+        assert!(!err.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_session_dimensions_clamp_to_defaults_when_out_of_range() {
+        // Asking for a 100x100 viewport falls outside the 320..=3840 range and
+        // should be discarded; create_session falls back to defaults but will
+        // still fail later because PAM/systemd aren't available in CI. We only
+        // assert the early arms (clamping branch) execute without panic.
+        let manager = make_manager();
+        let _ = manager
+            .create_session(
+                "root",
+                "wss://example.test",
+                10,
+                Some(100),    // below 320 → discarded
+                Some(100000), // above 2160 → discarded
+                None,
+            )
+            .await;
+        // No assertion on the spawn result; the test only proves the input
+        // path executes the validation branch without panicking.
+    }
+
+    // ---------- find_by_username with whitespace ----------
+
+    #[tokio::test]
+    async fn find_by_username_is_exact_match() {
+        // The username field is a literal exact match — whitespace and case
+        // must NOT be normalized away (otherwise "Alice " could log in as
+        // "alice").
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        assert!(manager.find_by_username("alice").await.is_some());
+        assert!(manager.find_by_username("Alice").await.is_none());
+        assert!(manager.find_by_username("alice ").await.is_none());
+        assert!(manager.find_by_username(" alice").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancel_grace_increments_generation() {
+        let manager = make_manager();
+        let id = Uuid::new_v4();
+        insert(&manager, make_session(id, "alice", 100, 0, None)).await;
+
+        let (gen_arc, _) = manager.start_grace_period(id).await.unwrap();
+        let pre = gen_arc.load(Ordering::Relaxed);
+        manager.cancel_grace_period(id).await;
+        // The cancel path increments the generation again so any in-flight
+        // grace-period timer notices it shouldn't fire.
+        let post = gen_arc.load(Ordering::Relaxed);
+        assert!(post > pre, "cancel must bump the generation");
+    }
 }

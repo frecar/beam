@@ -375,4 +375,92 @@ mod tests {
             );
         }
     }
+
+    // --- Constructor failure path ---
+
+    #[test]
+    fn input_injector_new_rejects_bogus_display() {
+        // Connecting to a clearly-unreachable display must return an error
+        // (not panic). This exercises the `?` in RustConnection::connect.
+        let width = Arc::new(AtomicU32::new(1920));
+        let height = Arc::new(AtomicU32::new(1080));
+        let result = InputInjector::new(":99999", Arc::clone(&width), Arc::clone(&height));
+        assert!(result.is_err(), "Bogus display should fail to connect");
+    }
+
+    #[test]
+    fn input_injector_new_rejects_empty_display() {
+        // Empty display string also fails (no socket path).
+        let width = Arc::new(AtomicU32::new(1920));
+        let height = Arc::new(AtomicU32::new(1080));
+        let result = InputInjector::new("", Arc::clone(&width), Arc::clone(&height));
+        assert!(result.is_err(), "Empty display should fail to connect");
+    }
+
+    // --- Scroll accumulator: extreme inputs ---
+
+    #[test]
+    fn accumulate_scroll_handles_very_large_positive() {
+        // 1000 pixels of scroll should yield 1000 notches.
+        let mut accum = 0.0;
+        let discrete = InputInjector::accumulate_scroll(&mut accum, 1000.0);
+        assert_eq!(discrete, 1000);
+        assert!(accum.abs() < 0.001);
+    }
+
+    #[test]
+    fn accumulate_scroll_handles_very_large_negative() {
+        let mut accum = 0.0;
+        let discrete = InputInjector::accumulate_scroll(&mut accum, -1000.0);
+        assert_eq!(discrete, -1000);
+        assert!(accum.abs() < 0.001);
+    }
+
+    #[test]
+    fn accumulate_scroll_converges_after_thousand_subnotch_pushes() {
+        // Stress: 1000 pushes of 0.001 = 1.000 total, which should produce
+        // exactly 1 notch with residue close to zero.
+        let mut accum = 0.0;
+        let mut total = 0i32;
+        for _ in 0..1000 {
+            total += InputInjector::accumulate_scroll(&mut accum, 0.001);
+        }
+        assert_eq!(total, 1);
+        assert!(accum.abs() < 0.01);
+    }
+
+    #[test]
+    fn accumulate_scroll_zero_input_with_positive_residue() {
+        // Zero input should NOT clear the existing residue.
+        let mut accum = 0.4;
+        assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.0), 0);
+        assert!((accum - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn accumulate_scroll_pixel_to_notch_division() {
+        // Calling sites use `dy / 30.0` to convert pixels-to-notches. Verify
+        // that exactly 30 pixels produce 1 notch.
+        let mut accum = 0.0;
+        let discrete = InputInjector::accumulate_scroll(&mut accum, 30.0 / 30.0);
+        assert_eq!(discrete, 1);
+    }
+
+    // --- map_button: full boundary ---
+
+    #[test]
+    fn map_button_rejects_u8_max() {
+        assert!(InputInjector::map_button(u8::MAX).is_err());
+    }
+
+    #[test]
+    fn map_button_rejects_three_specifically() {
+        // 3 is the first invalid value (the next one after 2=right).
+        // Browser events never produce 3+, but defensive check.
+        let err = InputInjector::map_button(3).unwrap_err();
+        assert!(
+            err.to_string().contains('3'),
+            "Error must mention the bad index"
+        );
+    }
 }

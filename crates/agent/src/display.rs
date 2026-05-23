@@ -1869,4 +1869,356 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    // --- pa_config ---
+
+    #[test]
+    fn pa_config_inserts_runtime_dir_into_socket_path() {
+        let config = pa_config("/tmp/beam-pulse-42");
+        assert!(
+            config.contains("socket=/tmp/beam-pulse-42/native"),
+            "pa_config must template the runtime dir into the socket path"
+        );
+    }
+
+    #[test]
+    fn pa_config_loads_required_modules() {
+        let config = pa_config("/tmp/beam-pulse-42");
+        // The 3 modules + set-default-sink line are all required.
+        assert!(config.contains("module-null-sink"));
+        assert!(config.contains("module-native-protocol-unix"));
+        assert!(config.contains("module-always-sink"));
+        assert!(config.contains("set-default-sink beam"));
+    }
+
+    #[test]
+    fn pa_config_uses_auth_anonymous_for_local_socket() {
+        // The agent runs in the same user namespace as PulseAudio; the socket
+        // is permission-bound at the filesystem level, so auth-anonymous=1 is
+        // correct (no shared-cookie dance needed).
+        let config = pa_config("/tmp/beam-pulse-1");
+        assert!(config.contains("auth-anonymous=1"));
+    }
+
+    #[test]
+    fn pa_config_uses_beam_sink_name() {
+        // The sink name "beam" is referenced by name in audio capture code;
+        // changing it requires coordination with the agent's audio side.
+        let config = pa_config("/tmp/beam-pulse-1");
+        assert!(config.contains("sink_name=beam"));
+    }
+
+    // --- which_exists ---
+
+    #[test]
+    fn which_exists_returns_true_for_real_binary() {
+        // `sh` exists on every POSIX system. If `which` itself is missing the
+        // function returns false — that's an acceptable fallback.
+        let result = which_exists("sh");
+        // If `which` is itself missing, the test can't make claims; otherwise
+        // sh must be found.
+        if Command::new("which")
+            .arg("sh")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            assert!(result, "sh should always be found");
+        }
+    }
+
+    #[test]
+    fn which_exists_returns_false_for_bogus_binary() {
+        assert!(!which_exists("definitely-not-a-real-binary-xyz-123"));
+    }
+
+    // --- is_snap_binary ---
+
+    #[test]
+    fn is_snap_binary_returns_false_for_missing_binary() {
+        // A binary that doesn't exist is not a snap binary (and the path
+        // lookup fails). The function returns false silently.
+        assert!(!is_snap_binary("definitely-not-real-binary-xyz"));
+    }
+
+    #[test]
+    fn is_snap_binary_returns_false_for_sh() {
+        // /bin/sh on real systems isn't under /snap/ and isn't a snap wrapper
+        // script. Verify the function correctly identifies it as not-snap.
+        // (If sh is missing, the test is a no-op.)
+        if Command::new("which")
+            .arg("sh")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            assert!(!is_snap_binary("sh"));
+        }
+    }
+
+    // --- find_non_snap_app ---
+
+    #[test]
+    fn find_non_snap_app_returns_none_for_all_missing() {
+        let result = find_non_snap_app(&["bogus-app-1", "bogus-app-2", "bogus-app-3"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_non_snap_app_returns_first_real_binary() {
+        // sh and (probably) cat exist on every Unix; the function returns the
+        // first one in the list. We use it with multiple candidates so the
+        // test doesn't presume which specific binary is present.
+        if Command::new("which")
+            .arg("sh")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            let result = find_non_snap_app(&["sh"]);
+            assert_eq!(result, Some("sh"));
+        }
+    }
+
+    #[test]
+    fn find_non_snap_app_skips_missing_to_reach_real() {
+        if Command::new("which")
+            .arg("sh")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            let result = find_non_snap_app(&["bogus-1", "bogus-2", "sh"]);
+            assert_eq!(result, Some("sh"));
+        }
+    }
+
+    // --- generate_nvidia_xorg_config ---
+
+    #[test]
+    fn nvidia_xorg_config_includes_bus_id() {
+        let cfg = generate_nvidia_xorg_config("PCI:42:0:0", "DFP-1", "/tmp/edid.bin");
+        assert!(cfg.contains("BusID       \"PCI:42:0:0\""));
+    }
+
+    #[test]
+    fn nvidia_xorg_config_includes_dfp_output() {
+        let cfg = generate_nvidia_xorg_config("PCI:1:0:0", "DFP-2", "/tmp/edid.bin");
+        assert!(cfg.contains(r#"ConnectedMonitor" "DFP-2""#));
+        assert!(cfg.contains("DFP-2:/tmp/edid.bin"));
+    }
+
+    #[test]
+    fn nvidia_xorg_config_uses_nvidia_driver() {
+        let cfg = generate_nvidia_xorg_config("PCI:0:0:0", "DFP-0", "/tmp/edid.bin");
+        assert!(cfg.contains("Driver      \"nvidia\""));
+    }
+
+    #[test]
+    fn nvidia_xorg_config_sets_24bit_depth() {
+        let cfg = generate_nvidia_xorg_config("PCI:0:0:0", "DFP-0", "/tmp/edid.bin");
+        assert!(cfg.contains("DefaultDepth 24"));
+    }
+
+    #[test]
+    fn nvidia_xorg_config_disables_auto_devices() {
+        let cfg = generate_nvidia_xorg_config("PCI:0:0:0", "DFP-0", "/tmp/edid.bin");
+        // ServerFlags section must disable autodetection so Xorg uses our
+        // explicit Device entry.
+        assert!(cfg.contains(r#""AutoAddDevices" "false""#));
+        assert!(cfg.contains(r#""AutoAddGPU" "false""#));
+        assert!(cfg.contains(r#""DontVTSwitch" "true""#));
+    }
+
+    // --- is_display_running ---
+
+    #[test]
+    fn is_display_running_false_for_missing_lock_file() {
+        // No lock file → display is not running.
+        // Use a display number high enough that it cannot conflict with any
+        // real session.
+        assert!(!is_display_running(99998));
+    }
+
+    #[test]
+    fn is_display_running_false_for_stale_lock_file() {
+        // Write a lock file with a PID that almost certainly doesn't exist
+        // (i32::MAX). The function should detect the missing process and
+        // return false.
+        // Use a display number unique to this test process.
+        let display_num = 99999u32;
+        let lock_file = format!("/tmp/.X{display_num}-lock");
+        let _ = fs::remove_file(&lock_file);
+
+        let _ = fs::write(&lock_file, "2147483646");
+        assert!(!is_display_running(display_num));
+
+        let _ = fs::remove_file(&lock_file);
+    }
+
+    #[test]
+    fn is_display_running_false_for_garbage_lock_content() {
+        let display_num = 99997u32;
+        let lock_file = format!("/tmp/.X{display_num}-lock");
+        let _ = fs::remove_file(&lock_file);
+
+        let _ = fs::write(&lock_file, "not-a-pid");
+        assert!(!is_display_running(display_num));
+
+        let _ = fs::remove_file(&lock_file);
+    }
+
+    #[test]
+    fn is_display_running_true_for_current_process_pid() {
+        // Write our own PID to the lock file. The signal-0 check should
+        // confirm the process exists.
+        let display_num = 99996u32;
+        let lock_file = format!("/tmp/.X{display_num}-lock");
+        let _ = fs::remove_file(&lock_file);
+
+        let pid = std::process::id();
+        let _ = fs::write(&lock_file, pid.to_string());
+        assert!(is_display_running(display_num));
+
+        let _ = fs::remove_file(&lock_file);
+    }
+
+    // --- ensure_persistent_config: fallback when HOME points at /proc ---
+
+    #[test]
+    fn ensure_persistent_config_returns_fallback_for_unwritable_home() {
+        // HOME=/proc/nonexistent → try_persistent_config_in fails → fallback
+        // to /tmp/beam-xfce-<num>.
+        let original_home = std::env::var("HOME").unwrap();
+        unsafe { std::env::set_var("HOME", "/proc/nonexistent-12345") };
+
+        let (path, is_first) = ensure_persistent_config(99995);
+        assert!(is_first, "Fallback should report first session");
+        assert_eq!(path, "/tmp/beam-xfce-99995");
+        // Cleanup
+        let _ = fs::remove_dir_all(&path);
+
+        unsafe { std::env::set_var("HOME", &original_home) };
+    }
+
+    // --- generate_modeline: invariants ---
+
+    #[test]
+    fn modeline_pixel_clock_scales_with_refresh() {
+        // Pixel clock = width * height * refresh / 1M * 1.2. At 30Hz it's
+        // exactly half what it is at 60Hz.
+        let ml30 = generate_modeline(1920, 1080, 30);
+        let ml60 = generate_modeline(1920, 1080, 60);
+        let clock30: f64 = ml30.split_whitespace().next().unwrap().parse().unwrap();
+        let clock60: f64 = ml60.split_whitespace().next().unwrap().parse().unwrap();
+        // Allow a small float tolerance.
+        assert!(
+            (clock60 - clock30 * 2.0).abs() < 0.01,
+            "60Hz clock should be exactly 2x 30Hz clock"
+        );
+    }
+
+    #[test]
+    fn modeline_high_resolution_does_not_overflow() {
+        // 7680x4320 @ 120Hz — biggest sane resolution. Make sure no overflow
+        // and the structure is still well-formed.
+        let ml = generate_modeline(7680, 4320, 120);
+        let parts: Vec<&str> = ml.split_whitespace().collect();
+        assert_eq!(parts.len(), 11);
+        let clock: f64 = parts[0].parse().unwrap();
+        assert!(
+            clock > 0.0 && clock.is_finite(),
+            "Pixel clock must be a finite positive number"
+        );
+    }
+
+    // --- xorg config: dummy driver section ---
+
+    #[test]
+    fn xorg_config_uses_dummy_driver() {
+        let cfg = generate_xorg_config(1920, 1080);
+        assert!(cfg.contains("Driver      \"dummy\""));
+    }
+
+    #[test]
+    fn xorg_config_locks_auto_devices_disabled() {
+        // ServerFlags must keep AutoAddDevices off to prevent Xorg from
+        // grabbing real input devices on hosts with a physical keyboard.
+        let cfg = generate_xorg_config(800, 600);
+        assert!(cfg.contains(r#""AutoAddDevices" "false""#));
+        assert!(cfg.contains(r#""DontVTSwitch" "true""#));
+    }
+
+    // --- clamp_resize_dimensions: exhaustive boundary tests ---
+
+    #[test]
+    fn clamp_resize_minimum_valid_input() {
+        // 320x240 is on the lower boundary of the validation window.
+        // It must pass through and be clamped UP to the 640x480 floor.
+        let (w, h) = clamp_resize_dimensions(320, 240, 0, 0).unwrap();
+        assert!(w >= 640);
+        assert!(h >= 480);
+    }
+
+    #[test]
+    fn clamp_resize_maximum_valid_input() {
+        let (w, h) = clamp_resize_dimensions(7680, 4320, 0, 0).unwrap();
+        assert_eq!(w, 7680);
+        assert_eq!(h, 4320);
+    }
+
+    #[test]
+    fn clamp_resize_lower_width_boundary() {
+        // Exactly 320 passes; 319 fails.
+        assert!(clamp_resize_dimensions(320, 480, 0, 0).is_some());
+        assert!(clamp_resize_dimensions(319, 480, 0, 0).is_none());
+    }
+
+    #[test]
+    fn clamp_resize_upper_width_boundary() {
+        // Exactly 7680 passes; 7681 fails.
+        assert!(clamp_resize_dimensions(7680, 1080, 0, 0).is_some());
+        assert!(clamp_resize_dimensions(7681, 1080, 0, 0).is_none());
+    }
+
+    #[test]
+    fn clamp_resize_lower_height_boundary() {
+        // Exactly 240 passes; 239 fails.
+        assert!(clamp_resize_dimensions(640, 240, 0, 0).is_some());
+        assert!(clamp_resize_dimensions(640, 239, 0, 0).is_none());
+    }
+
+    #[test]
+    fn clamp_resize_upper_height_boundary() {
+        assert!(clamp_resize_dimensions(1920, 4320, 0, 0).is_some());
+        assert!(clamp_resize_dimensions(1920, 4321, 0, 0).is_none());
+    }
+
+    #[test]
+    fn clamp_resize_max_zero_is_unlimited() {
+        // max=0 must NOT clamp anything; only the absolute validation window
+        // matters.
+        let (w, h) = clamp_resize_dimensions(5000, 3000, 0, 0).unwrap();
+        assert_eq!(w, 5000);
+        assert_eq!(h, 3000);
+    }
+
+    #[test]
+    fn clamp_resize_partial_max_constraints() {
+        // Only max_width set; height passes through.
+        let (w, h) = clamp_resize_dimensions(3000, 1500, 1920, 0).unwrap();
+        assert_eq!(w, 1920);
+        assert_eq!(h, 1500);
+    }
+
+    #[test]
+    fn clamp_resize_partial_max_height_only() {
+        let (w, h) = clamp_resize_dimensions(2000, 1500, 0, 1080).unwrap();
+        assert_eq!(w, 2000);
+        assert_eq!(h, 1080);
+    }
 }

@@ -25,6 +25,18 @@ impl PooledFrame {
     }
 }
 
+/// Test-only helper: construct a `PooledFrame` backed by a synthetic buffer
+/// with a fresh return channel. Lets sibling modules build encoder/video tests
+/// without needing a real X11 connection.
+#[cfg(test)]
+pub(crate) fn synthetic_pooled_frame(data: Vec<u8>) -> PooledFrame {
+    let (tx, _rx) = std_mpsc::channel();
+    PooledFrame {
+        data,
+        return_tx: tx,
+    }
+}
+
 impl AsRef<[u8]> for PooledFrame {
     fn as_ref(&self) -> &[u8] {
         &self.data

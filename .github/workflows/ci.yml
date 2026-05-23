@@ -158,22 +158,25 @@ jobs:
           LLVM_PROFILE_FILE: beam-%p-%m.profraw
         run: |
           # Ratchet protocol: --fail-under-lines locks current
-          # coverage as a floor. Baseline measured in #46 was 55.40%;
-          # PR #64 added 49 tests across gpu, client_metrics, and
-          # tls modules — re-measurement showed 60.81% lines. PR #68
-          # added 32 server::web tests; PR #72 added 36 more tests
-          # across main.rs/input.rs/audio.rs, lifting measured
-          # coverage to 65.67% lines. PR #78 raised floor to 65.
-          # Issue #45 big lift added ~100 tests across server::session
-          # (manual ManagedSession fixtures), agent::cli (refactored
-          # parse_args_from with 29 tests), agent::signaling (TLS
-          # connector tests with rcgen), and agent::capture
-          # (PooledFrame pool semantics) — measured coverage rose to
-          # 69.71% lines. floor(69.71 - 1) = 68. Every subsequent PR
-          # that raises actual coverage may bump this; never lower.
+          # coverage as a floor. Baseline measured in #46 was 55.40%.
+          # Several PRs (#64, #68, #72, #78, #79) lifted coverage in
+          # steady increments; the #45 big-lift series most recently
+          # measured 69.71% lines (floor 68). This PR adds ~210 tests
+          # across encoder (x264enc lifecycle), session (PersistedSession
+          # serde + display pool), display (pa_config, nvidia/dummy xorg
+          # config, is_display_running, find_non_snap_app, clamp
+          # boundary cases), video (audio_send_loop, outbox-full
+          # branches), h264 (high-profile SPS branches, BitReader edge
+          # cases), clipboard_sync (build_clipboard_payload extracted +
+          # tested), agent/signaling (run_signaling empty-URL branch,
+          # SignalingCtx field round-trip), audio (sample-rate validation
+          # matrix), input (InputInjector::new rejection, scroll edge
+          # cases), cursor (cursor_monitor_loop error path), and
+          # clipboard (sanitize boundary cases, new() rejection).
+          # Measured coverage rose to 75.84% lines. floor(75.84 - 1) = 74.
           # --ignore-filename-regex 'tests?/' excludes the test harness
           # modules from the floor so it tracks real source coverage
           # only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 68
+            --fail-under-lines 74

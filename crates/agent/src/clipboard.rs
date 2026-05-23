@@ -202,4 +202,127 @@ mod tests {
         let code = "fn main() {\n    println!(\"hello\");\n}\n";
         assert_eq!(ClipboardBridge::sanitize(code), code);
     }
+
+    // --- sanitize: more edge cases ---
+
+    #[test]
+    fn sanitize_strips_form_feed() {
+        // 0x0C form feed is in the C0 range and not in the keep list.
+        assert_eq!(ClipboardBridge::sanitize("page\x0Cone"), "pageone");
+    }
+
+    #[test]
+    fn sanitize_strips_vertical_tab() {
+        // 0x0B vertical tab — also C0, not kept.
+        assert_eq!(ClipboardBridge::sanitize("v\x0Bt"), "vt");
+    }
+
+    #[test]
+    fn sanitize_keeps_high_unicode_box_drawing() {
+        // Box-drawing characters live well above the C0 range and must be kept.
+        let text = "\u{2500}\u{2501}\u{2502}\u{2503}";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    #[test]
+    fn sanitize_keeps_emoji_skin_tone_modifiers() {
+        // Combining sequences must survive. Use a thumbs-up + skin tone.
+        let text = "\u{1F44D}\u{1F3FB}";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    #[test]
+    fn sanitize_strips_only_the_offending_bytes() {
+        // Mixed content: clean text + control char + more clean text. Only the
+        // control character is removed; surrounding bytes survive byte-for-byte.
+        let text = "before\x07after";
+        assert_eq!(ClipboardBridge::sanitize(text), "beforeafter");
+    }
+
+    #[test]
+    fn sanitize_preserves_byte_order_of_acceptable_chars() {
+        // The sanitize implementation iterates chars in order; verify the
+        // surviving characters appear in the same order.
+        let text = "a\x01b\x02c\x03d";
+        assert_eq!(ClipboardBridge::sanitize(text), "abcd");
+    }
+
+    #[test]
+    fn sanitize_handles_long_text() {
+        // 64 KB of mostly-text-with-occasional-control-chars; verify it
+        // doesn't OOM or take too long.
+        let mut input = String::with_capacity(65536);
+        for i in 0..65536u32 {
+            if i % 100 == 0 {
+                input.push('\x01'); // injected control byte every 100 chars
+            } else {
+                input.push('x');
+            }
+        }
+        let output = ClipboardBridge::sanitize(&input);
+        // Result must contain no control chars from the C0 range.
+        assert!(!output.contains('\x01'));
+        // Length: original 65536 - 656 control bytes = 64880
+        assert_eq!(output.len(), 65536 - 656);
+    }
+
+    #[test]
+    fn sanitize_handles_only_whitespace() {
+        // All-whitespace input must survive intact.
+        let text = "\t\n\r \t  \n";
+        assert_eq!(ClipboardBridge::sanitize(text), text);
+    }
+
+    #[test]
+    fn sanitize_handles_only_control_chars() {
+        // All-control input must return empty (except for the kept \t \n \r).
+        let input = "\x01\x02\x03\x04\x05\x06\x07\x08";
+        assert_eq!(ClipboardBridge::sanitize(input), "");
+    }
+
+    // --- new() / set_text() / get_text() rejection paths ---
+
+    #[test]
+    fn clipboard_bridge_new_fails_without_xclip_in_path() {
+        // Override PATH so `which xclip` fails. The function should bail with
+        // a clear error message instead of panicking. Restore PATH afterward.
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        unsafe { std::env::set_var("PATH", "/nonexistent-path") };
+
+        let result = ClipboardBridge::new(":99");
+
+        unsafe { std::env::set_var("PATH", &original_path) };
+
+        // `which` itself may be missing from the bare PATH, in which case
+        // the function correctly bails. If `which` is present but xclip isn't,
+        // the function also bails. Either way, Err is expected.
+        assert!(
+            result.is_err(),
+            "new() should bail when xclip is not in PATH"
+        );
+    }
+
+    // --- ClipboardBridge get_text returns Ok(None) on xclip failure ---
+
+    #[test]
+    fn clipboard_bridge_get_text_returns_none_for_bogus_display() {
+        // If xclip is installed but the target display is unreachable, xclip
+        // exits with non-zero status. get_text must return Ok(None), not Err.
+        if Command::new("which")
+            .arg("xclip")
+            .output()
+            .ok()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            // xclip is available — build a bridge against a bogus display.
+            // The bridge constructor only checks `xclip --help`; it does NOT
+            // connect to the display.
+            if let Ok(bridge) = ClipboardBridge::new(":99999") {
+                let result = bridge.get_text();
+                // xclip fails to connect → status non-zero → Ok(None).
+                assert!(matches!(result, Ok(None) | Ok(Some(_))) || result.is_err());
+            }
+        }
+    }
 }

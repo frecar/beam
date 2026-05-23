@@ -262,4 +262,68 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Helper to build a no-op InputCallback for tests that need a
+    /// SignalingCtx but don't fire input events.
+    fn noop_input_callback() -> Arc<dyn Fn(InputEvent) + Send + Sync> {
+        Arc::new(|_event| {})
+    }
+
+    #[tokio::test]
+    async fn run_signaling_returns_immediately_when_server_url_empty() {
+        // The function logs and parks on std::future::pending(). Wrap with a
+        // short timeout: if the empty-URL branch is taken, the future will
+        // sit forever; the timeout fires and we know the early-return arm ran.
+        ensure_crypto_provider();
+        let force_kf = Arc::new(AtomicBool::new(false));
+        let tab_bg = Arc::new(AtomicBool::new(false));
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        let ctx = SignalingCtx {
+            server_url: "",
+            session_id: Uuid::new_v4(),
+            agent_token: None,
+            tls_cert_path: None,
+            force_keyframe: force_kf,
+            input_callback: noop_input_callback(),
+            capture_cmd_tx: &cmd_tx,
+            tab_backgrounded: tab_bg,
+        };
+        let (_tx, mut rx) = mpsc::channel::<tokio_tungstenite::tungstenite::Message>(1);
+
+        // The empty-URL branch parks on pending(). Confirm that's the path by
+        // observing the timeout fires before the loop would otherwise complete.
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), run_signaling(&ctx, &mut rx)).await;
+        assert!(
+            result.is_err(),
+            "Empty server_url should park on pending(), causing the timeout"
+        );
+    }
+
+    #[test]
+    fn signaling_ctx_carries_all_fields() {
+        // Smoke test: construct the SignalingCtx with every field populated and
+        // verify each field reads back cleanly. Locks the struct shape.
+        ensure_crypto_provider();
+        let id = Uuid::new_v4();
+        let force_kf = Arc::new(AtomicBool::new(true));
+        let tab_bg = Arc::new(AtomicBool::new(true));
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        let ctx = SignalingCtx {
+            server_url: "wss://example.test",
+            session_id: id,
+            agent_token: Some("agent-token-abc"),
+            tls_cert_path: Some("/tmp/cert.pem"),
+            force_keyframe: Arc::clone(&force_kf),
+            input_callback: noop_input_callback(),
+            capture_cmd_tx: &cmd_tx,
+            tab_backgrounded: Arc::clone(&tab_bg),
+        };
+        assert_eq!(ctx.server_url, "wss://example.test");
+        assert_eq!(ctx.session_id, id);
+        assert_eq!(ctx.agent_token, Some("agent-token-abc"));
+        assert_eq!(ctx.tls_cert_path, Some("/tmp/cert.pem"));
+        assert!(ctx.force_keyframe.load(Ordering::Relaxed));
+        assert!(ctx.tab_backgrounded.load(Ordering::Relaxed));
+    }
 }
