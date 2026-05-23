@@ -24,9 +24,7 @@ import indexHtml from '../index.html?raw';
 
 describe('index.html — narrow-desktop status bar (#87 B2)', () => {
   it('declares the 769-1100px media query block', () => {
-    expect(indexHtml).toMatch(
-      /@media\s*\(min-width:\s*769px\)\s*and\s*\(max-width:\s*1100px\)/
-    );
+    expect(indexHtml).toMatch(/@media\s*\(min-width:\s*769px\)\s*and\s*\(max-width:\s*1100px\)/);
   });
 
   it('hides .btn-label inside #status-bar within that block', () => {
