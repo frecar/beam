@@ -160,33 +160,20 @@ jobs:
           # Ratchet protocol: --fail-under-lines locks current
           # coverage as a floor. Baseline measured was 55.40%.
           # Several PRs lifted coverage in steady increments. This
-          # PR (#45 big-lift-5) further refactors:
-          # - agent/main.rs: extracts more pure helpers from
-          #   build_input_callback (now_unix_millis, layout dedup,
-          #   setxkbmap-result classifier, sched-fifo log message,
-          #   capture-state transitions, frame_duration_ns_from_framerate,
-          #   xrandr-resize log helpers, encoder-cooldown helpers,
-          #   appsrc_queue_max_bytes, dispatch_resize/file_download,
-          #   dispatch_capture_wake/update_last_input).
-          # - agent/input.rs: scroll-button helpers (vertical/horizontal
-          #   compute, deadzone check, evdev→x11 keycode).
-          # - agent/display.rs: more pure path helpers (pulse_runtime_dir,
-          #   xdg_runtime_dir, keyring paths, pulse_server_socket_url,
-          #   browser→helper/desktop mappings, build_helpers_rc,
-          #   build_mimeapps_list, parse_environ_for_dbus,
-          #   systemd_user_bus_address).
-          # - agent/signaling.rs: log-message helpers for the reconnect
-          #   loop (connecting/closed/error/reconnecting/no_server_url).
-          # - agent/cli.rs: extracts help_text + version_line.
-          # - server/main.rs: extracts JWT/restore/admin/reaper log
-          #   helpers, startup banner title, sigint/sigterm/shutdown
-          #   messages, rate-limiter constants, agent-log retention
-          #   constants, TLS handshake timeout constant, request_id_or_dash.
-          # - server/signaling.rs: should_log_initial_video_frame,
-          #   pong_timeout_elapsed, browser_replaced_message,
-          #   invalid_browser_message_format.
-          # Measured coverage rose to 86.53% regions / 85.99% lines.
-          # Lines is the lower axis; floor(85.99 - 1) = 84.
+          # PR (#45 big-lift-6) adds:
+          # - agent/video.rs: extracts the IDR-wait state machine
+          #   (IdrWaitInputs + IdrWaitStep + classify_idr_wait_step)
+          #   so the timeout / encoder-reset / proceed-with-p-frames
+          #   branches can be unit-tested without sleeping >500ms.
+          # - agent/signaling.rs: extracts classify_ws_incoming +
+          #   WsIncomingAction so the connect-and-handle inbound
+          #   dispatch (input / shutdown / invalid / close / error /
+          #   ignore branches) is testable without a live WebSocket.
+          # - server/auth.rs: adds within-grace + past-grace +
+          #   round-trip tests for validate_jwt_for_refresh so the
+          #   grace-window code path is exercised.
+          # Measured coverage rose to 86.64% regions / 86.15% lines.
+          # Lines is the lower axis; floor(86.15 - 1) = 85.
           # --ignore-filename-regex 'tests?/' excludes the test harness
           # modules from the floor so it tracks real source coverage
           # only.
