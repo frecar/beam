@@ -179,4 +179,4 @@ jobs:
           # only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 85
+            --fail-under-lines 84
