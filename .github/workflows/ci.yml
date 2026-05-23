@@ -159,21 +159,31 @@ jobs:
         run: |
           # Ratchet protocol: --fail-under-lines locks current
           # coverage as a floor. Baseline measured was 55.40%.
-          # Several PRs lifted coverage in steady increments; the
-          # preceding big-lift PR measured 80.07% lines (floor 77).
-          # This PR (#45 big-lift-3) refactors several X11/X-server-bound
-          # functions to expose pure-logic helpers (URL builder, frame
-          # magic validator, browser/server message dispatchers, backoff
-          # math, JWT secret load/persist, bind-addr parser, encoder type
-          # routing, audio sample rate/channel mapping, validator splits)
-          # so the dispatch logic can be tested without driving X11,
-          # GStreamer, or PulseAudio. It also drives the WebSocket
-          # handler bodies via a real TCP server + tokio-tungstenite
-          # client (handle_browser_ws + handle_agent_ws end-to-end).
-          # Measured coverage rose to 83.47% lines. floor(83.47 - 1) = 82.
+          # Several PRs lifted coverage in steady increments. This
+          # PR (#45 big-lift-4) refactors:
+          # - agent/main.rs: extracts an InputAction enum + a pure
+          #   classify_input_event so the input-dispatch decisions can
+          #   be tested without X11; adds handle_visibility_change
+          #   (channel + AtomicBool side effects), audio retry backoff
+          #   math, capture-error logging predicates, encoder reset
+          #   cooldown, idle-state + framerate selectors, resize-noop
+          #   check, home_dir + output_name resolvers, and cursor
+          #   message builder.
+          # - agent/display.rs: extracts parse_xrandr_connected_output,
+          #   is_benign_xrandr_stderr, resolve_xorg_invocation,
+          #   xorg_config_needs_cleanup; adds tests for pa_config,
+          #   generate_nvidia_xorg_config, try_persistent_config_in,
+          #   seed_default_config, is_snap_binary, which_exists,
+          #   is_display_running, find_non_snap_app.
+          # - server/main.rs: extracts resolve_jwt_secret with a
+          #   JwtSecretSource enum + count_validation_severities,
+          #   pam_missing_warning, web_root_is_usable,
+          #   web_root_missing_warning, startup_banner_line.
+          # Measured coverage rose to 85.57% regions / 84.79% lines.
+          # Lines is the lower axis; floor(84.79 - 1) = 83.
           # --ignore-filename-regex 'tests?/' excludes the test harness
           # modules from the floor so it tracks real source coverage
           # only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 81
+            --fail-under-lines 83
