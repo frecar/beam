@@ -12,7 +12,7 @@
 # - Minor (0.x.0): breaking config/protocol changes requiring simultaneous update
 
 .PHONY: build build-release build-web build-rust \
-        dev run test lint fmt check ci pre-push install-hooks version-check bump-version \
+        dev stop run test lint fmt fix check ci pre-push install-hooks version-check bump-version \
         install uninstall deploy clean setup doctor help
 
 CARGO := cargo
@@ -26,11 +26,13 @@ help:
 	@echo ""
 	@echo "Development:"
 	@echo "  make dev            Build everything (debug) and run server"
+	@echo "  make stop           Stop the foreground dev server (no-op; use Ctrl-C)"
 	@echo "  make build          Build everything (debug)"
 	@echo "  make build-release  Build everything (release)"
 	@echo "  make test           Run all tests"
 	@echo "  make lint           Run clippy + TypeScript type check"
 	@echo "  make fmt            Format all Rust code"
+	@echo "  make fix            Auto-fix lint + format (Rust + web)"
 	@echo "  make check          Full pre-commit check (fmt + lint + test)"
 	@echo "  make pre-push       Fast pre-push checks (fmt + type-check, no link)"
 	@echo "  make ci             Run exact CI checks (verify before pushing)"
@@ -74,6 +76,12 @@ dev: build
 	RUST_LOG=$${RUST_LOG:-info} \
 	$(CARGO) run -p beam-server
 
+# `make dev` runs cargo in the foreground; stop it with Ctrl-C in that terminal.
+# `make stop` exists to satisfy the cross-project Makefile contract (help/dev/stop/
+# lint/fix/test/ci/build) and is a no-op here because nothing is daemonized.
+stop:
+	@echo "No background dev services to stop (make dev runs in the foreground; use Ctrl-C)."
+
 # Run from release build
 run: build-release
 	PATH="$(CURDIR)/target/release:$$PATH" \
@@ -97,6 +105,14 @@ lint:
 
 fmt:
 	$(CARGO) fmt --all
+	cd web && $(NPM) run format
+
+# Auto-fix lint + format issues across Rust and web. Counterpart to `make lint`/
+# `make check`, which only verify. Mirrors the cross-project Makefile contract.
+fix:
+	$(CARGO) fmt --all
+	$(CARGO) clippy --workspace --fix --allow-dirty --allow-staged -- -D warnings
+	cd web && $(NPM) run lint:fix
 	cd web && $(NPM) run format
 
 check:
