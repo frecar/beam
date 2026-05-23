@@ -52,7 +52,7 @@ impl InputInjector {
     /// Inject a keyboard event. `code` is a Linux evdev keycode.
     /// X11 keycode = evdev keycode + 8.
     pub fn inject_key(&mut self, code: u16, pressed: bool) -> anyhow::Result<()> {
-        let x_keycode = (code + 8) as u8;
+        let x_keycode = Self::evdev_to_x11_keycode(code);
         let event_type = if pressed {
             xproto::KEY_PRESS_EVENT
         } else {
@@ -106,6 +106,13 @@ impl InputInjector {
         Ok(())
     }
 
+    /// Build the X11 keycode from a Linux evdev keycode. X11 keycode =
+    /// evdev keycode + 8. Pure helper exposed for unit testing without
+    /// owning an X11 connection.
+    pub(crate) fn evdev_to_x11_keycode(evdev: u16) -> u8 {
+        (evdev + 8) as u8
+    }
+
     /// Map browser button index to X11 button number.
     /// Browser: 0=left, 1=middle, 2=right → X11: 1=left, 2=middle, 3=right
     fn map_button(button: u8) -> anyhow::Result<u8> {
@@ -139,75 +146,110 @@ impl InputInjector {
         discrete
     }
 
+    /// Pixels-per-notch divisor that converts raw scroll deltas into X11
+    /// scroll notches. Exposed so callers + tests can share the constant.
+    pub(crate) const PIXELS_PER_NOTCH: f64 = 30.0;
+
+    /// Minimum delta magnitude at which the scroll dispatch fires. Anything
+    /// at or below this is treated as no movement, avoiding wasted XTEST
+    /// round-trips for trackpad jitter.
+    pub(crate) const SCROLL_DEADZONE: f64 = 0.001;
+
+    /// Decide the X11 scroll button + notch count for a vertical scroll
+    /// delta. Returns `None` for zero or sub-notch movement. The caller
+    /// emits `count` press+release pairs of `button` via XTestFakeInput.
+    ///
+    /// Pure helper so the dispatch logic can be unit-tested without owning
+    /// an X11 connection.
+    pub(crate) fn vertical_scroll_button(discrete: i32) -> Option<(u8, u32)> {
+        if discrete > 0 {
+            Some((4u8, discrete as u32))
+        } else if discrete < 0 {
+            Some((5u8, discrete.unsigned_abs()))
+        } else {
+            None
+        }
+    }
+
+    /// Decide the X11 scroll button + notch count for a horizontal scroll
+    /// delta. Returns `None` for zero or sub-notch movement.
+    pub(crate) fn horizontal_scroll_button(discrete: i32) -> Option<(u8, u32)> {
+        if discrete > 0 {
+            Some((7u8, discrete as u32))
+        } else if discrete < 0 {
+            Some((6u8, discrete.unsigned_abs()))
+        } else {
+            None
+        }
+    }
+
+    /// Decide whether a raw scroll delta is large enough to dispatch. Pure
+    /// helper that matches the production dead-zone (0.001 pixel).
+    pub(crate) fn scroll_delta_is_active(delta: f64) -> bool {
+        delta.abs() > Self::SCROLL_DEADZONE
+    }
+
     /// Inject scroll events.
     /// X11 scroll uses button 4/5 (vertical) and 6/7 (horizontal).
     /// Each scroll notch is a press+release of the corresponding button.
     pub fn inject_scroll(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
         // Vertical scroll: button 4 = up, button 5 = down
-        if dy.abs() > 0.001 {
-            let discrete_y = Self::accumulate_scroll(&mut self.scroll_accum_y, -dy / 30.0);
-            let (button, count) = if discrete_y > 0 {
-                (4u8, discrete_y as u32) // scroll up
-            } else if discrete_y < 0 {
-                (5u8, (-discrete_y) as u32) // scroll down
-            } else {
-                (0, 0)
-            };
-            for _ in 0..count {
-                xtest::fake_input(
-                    &self.conn,
-                    xproto::BUTTON_PRESS_EVENT,
-                    button,
-                    0,
-                    self.root,
-                    0,
-                    0,
-                    0,
-                )?;
-                xtest::fake_input(
-                    &self.conn,
-                    xproto::BUTTON_RELEASE_EVENT,
-                    button,
-                    0,
-                    self.root,
-                    0,
-                    0,
-                    0,
-                )?;
+        if Self::scroll_delta_is_active(dy) {
+            let discrete_y =
+                Self::accumulate_scroll(&mut self.scroll_accum_y, -dy / Self::PIXELS_PER_NOTCH);
+            if let Some((button, count)) = Self::vertical_scroll_button(discrete_y) {
+                for _ in 0..count {
+                    xtest::fake_input(
+                        &self.conn,
+                        xproto::BUTTON_PRESS_EVENT,
+                        button,
+                        0,
+                        self.root,
+                        0,
+                        0,
+                        0,
+                    )?;
+                    xtest::fake_input(
+                        &self.conn,
+                        xproto::BUTTON_RELEASE_EVENT,
+                        button,
+                        0,
+                        self.root,
+                        0,
+                        0,
+                        0,
+                    )?;
+                }
             }
         }
 
         // Horizontal scroll: button 6 = left, button 7 = right
-        if dx.abs() > 0.001 {
-            let discrete_x = Self::accumulate_scroll(&mut self.scroll_accum_x, dx / 30.0);
-            let (button, count) = if discrete_x > 0 {
-                (7u8, discrete_x as u32) // scroll right
-            } else if discrete_x < 0 {
-                (6u8, (-discrete_x) as u32) // scroll left
-            } else {
-                (0, 0)
-            };
-            for _ in 0..count {
-                xtest::fake_input(
-                    &self.conn,
-                    xproto::BUTTON_PRESS_EVENT,
-                    button,
-                    0,
-                    self.root,
-                    0,
-                    0,
-                    0,
-                )?;
-                xtest::fake_input(
-                    &self.conn,
-                    xproto::BUTTON_RELEASE_EVENT,
-                    button,
-                    0,
-                    self.root,
-                    0,
-                    0,
-                    0,
-                )?;
+        if Self::scroll_delta_is_active(dx) {
+            let discrete_x =
+                Self::accumulate_scroll(&mut self.scroll_accum_x, dx / Self::PIXELS_PER_NOTCH);
+            if let Some((button, count)) = Self::horizontal_scroll_button(discrete_x) {
+                for _ in 0..count {
+                    xtest::fake_input(
+                        &self.conn,
+                        xproto::BUTTON_PRESS_EVENT,
+                        button,
+                        0,
+                        self.root,
+                        0,
+                        0,
+                        0,
+                    )?;
+                    xtest::fake_input(
+                        &self.conn,
+                        xproto::BUTTON_RELEASE_EVENT,
+                        button,
+                        0,
+                        self.root,
+                        0,
+                        0,
+                        0,
+                    )?;
+                }
             }
         }
 
@@ -462,5 +504,126 @@ mod tests {
             err.to_string().contains('3'),
             "Error must mention the bad index"
         );
+    }
+
+    // --- Scroll dispatch helpers (vertical / horizontal button selection) ---
+
+    #[test]
+    fn vertical_scroll_positive_yields_button_4() {
+        // Positive discrete = scroll up = X11 button 4.
+        let (button, count) = InputInjector::vertical_scroll_button(1).unwrap();
+        assert_eq!(button, 4);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn vertical_scroll_negative_yields_button_5() {
+        // Negative discrete = scroll down = X11 button 5.
+        let (button, count) = InputInjector::vertical_scroll_button(-3).unwrap();
+        assert_eq!(button, 5);
+        assert_eq!(count, 3, "Count must be the absolute value, not negative");
+    }
+
+    #[test]
+    fn vertical_scroll_zero_yields_none() {
+        assert!(InputInjector::vertical_scroll_button(0).is_none());
+    }
+
+    #[test]
+    fn vertical_scroll_large_magnitude() {
+        let (button, count) = InputInjector::vertical_scroll_button(120).unwrap();
+        assert_eq!(button, 4);
+        assert_eq!(count, 120);
+        let (button, count) = InputInjector::vertical_scroll_button(-120).unwrap();
+        assert_eq!(button, 5);
+        assert_eq!(count, 120);
+    }
+
+    #[test]
+    fn vertical_scroll_imin_does_not_panic() {
+        // i32::MIN can panic with naive `-x as u32` (signed overflow).
+        // `unsigned_abs` is the safe form — verify the helper handles it.
+        let (button, count) = InputInjector::vertical_scroll_button(i32::MIN).unwrap();
+        assert_eq!(button, 5);
+        assert_eq!(count, i32::MIN.unsigned_abs());
+    }
+
+    #[test]
+    fn horizontal_scroll_positive_yields_button_7() {
+        // Positive discrete = scroll right = X11 button 7.
+        let (button, count) = InputInjector::horizontal_scroll_button(1).unwrap();
+        assert_eq!(button, 7);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn horizontal_scroll_negative_yields_button_6() {
+        // Negative discrete = scroll left = X11 button 6.
+        let (button, count) = InputInjector::horizontal_scroll_button(-5).unwrap();
+        assert_eq!(button, 6);
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn horizontal_scroll_zero_yields_none() {
+        assert!(InputInjector::horizontal_scroll_button(0).is_none());
+    }
+
+    #[test]
+    fn horizontal_scroll_imin_does_not_panic() {
+        let (button, count) = InputInjector::horizontal_scroll_button(i32::MIN).unwrap();
+        assert_eq!(button, 6);
+        assert_eq!(count, i32::MIN.unsigned_abs());
+    }
+
+    // --- Scroll deadzone ---
+
+    #[test]
+    fn scroll_delta_active_above_deadzone() {
+        assert!(InputInjector::scroll_delta_is_active(0.002));
+        assert!(InputInjector::scroll_delta_is_active(-0.002));
+        assert!(InputInjector::scroll_delta_is_active(30.0));
+        assert!(InputInjector::scroll_delta_is_active(-30.0));
+    }
+
+    #[test]
+    fn scroll_delta_inactive_at_or_below_deadzone() {
+        // Strict `> 0.001`, so 0.001 itself is inactive.
+        assert!(!InputInjector::scroll_delta_is_active(0.0));
+        assert!(!InputInjector::scroll_delta_is_active(0.001));
+        assert!(!InputInjector::scroll_delta_is_active(-0.001));
+        assert!(!InputInjector::scroll_delta_is_active(0.0001));
+        assert!(!InputInjector::scroll_delta_is_active(-0.0001));
+    }
+
+    #[test]
+    fn scroll_pixels_per_notch_locks_to_30() {
+        // The constant pins the "30 pixels = 1 notch" UX agreed across the
+        // browser + agent. Changing it without a paired browser update
+        // produces visibly different scroll speed.
+        assert_eq!(InputInjector::PIXELS_PER_NOTCH, 30.0);
+    }
+
+    #[test]
+    fn scroll_deadzone_locks_to_one_thousandth() {
+        // Browsers occasionally emit residual sub-pixel deltas (~1e-5);
+        // the dead-zone must be small enough that intentional scrolls
+        // (≥0.01) always fire, but big enough that noise doesn't.
+        assert_eq!(InputInjector::SCROLL_DEADZONE, 0.001);
+    }
+
+    #[test]
+    fn vertical_scroll_imax_does_not_overflow() {
+        // i32::MAX as u32 is safe (no sign issue); verify the cast holds.
+        let (button, count) = InputInjector::vertical_scroll_button(i32::MAX).unwrap();
+        assert_eq!(button, 4);
+        assert_eq!(count, i32::MAX as u32);
+    }
+
+    #[test]
+    fn horizontal_scroll_imax_does_not_overflow() {
+        let (button, count) = InputInjector::horizontal_scroll_button(i32::MAX).unwrap();
+        assert_eq!(button, 7);
+        assert_eq!(count, i32::MAX as u32);
     }
 }

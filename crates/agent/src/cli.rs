@@ -193,7 +193,7 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
     match parse_args_from(args)? {
         ArgsOutcome::Run(args) => Ok(args),
         ArgsOutcome::PrintVersion => {
-            println!("beam-agent {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", version_line(env!("CARGO_PKG_VERSION")));
             std::process::exit(0);
         }
         ArgsOutcome::PrintHelp => {
@@ -204,30 +204,47 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
 }
 
 fn print_help() {
-    println!("beam-agent - Beam Remote Desktop capture agent");
-    println!();
-    println!("USAGE:");
-    println!("    beam-agent [OPTIONS]");
-    println!();
-    println!("OPTIONS:");
-    println!("    --display <DISPLAY>          X11 display [default: :0]");
-    println!("    --server-url <URL>           Signaling server WebSocket URL");
-    println!("    --session-id <UUID>          Session identifier (required)");
-    println!(
-        "    --agent-token <TOKEN>        Agent authentication token (prefer BEAM_AGENT_TOKEN env)"
+    print!("{}", help_text());
+}
+
+/// Build the agent --help output. Pure helper so the format can be
+/// unit-tested without process I/O.
+pub(crate) fn help_text() -> String {
+    let mut s = String::new();
+    s.push_str("beam-agent - Beam Remote Desktop capture agent\n");
+    s.push('\n');
+    s.push_str("USAGE:\n");
+    s.push_str("    beam-agent [OPTIONS]\n");
+    s.push('\n');
+    s.push_str("OPTIONS:\n");
+    s.push_str("    --display <DISPLAY>          X11 display [default: :0]\n");
+    s.push_str("    --server-url <URL>           Signaling server WebSocket URL\n");
+    s.push_str("    --session-id <UUID>          Session identifier (required)\n");
+    s.push_str(
+        "    --agent-token <TOKEN>        Agent authentication token (prefer BEAM_AGENT_TOKEN env)\n",
     );
-    println!("    --tls-cert <PATH>            TLS certificate to pin for server connection");
-    println!("    --width <PIXELS>             Initial display width [default: 1920]");
-    println!("    --height <PIXELS>            Initial display height [default: 1080]");
-    println!("    --framerate <FPS>            Target framerate [default: 120]");
-    println!("    --bitrate <KBPS>             Initial video bitrate [default: 100000]");
-    println!("    --encoder <NAME>             Force encoder (nvh264enc, vah264enc, x264enc)");
-    println!("    --max-width <PIXELS>         Maximum resize width [default: 3840]");
-    println!("    --max-height <PIXELS>        Maximum resize height [default: 2160]");
-    println!("    --gpu-driver <MODE>          GPU driver: auto, nvidia, dummy [default: auto]");
-    println!("    --display-start <N>          Starting display number [default: 10]");
-    println!("    -V, --version                Print version and exit");
-    println!("    -h, --help                   Print this help and exit");
+    s.push_str("    --tls-cert <PATH>            TLS certificate to pin for server connection\n");
+    s.push_str("    --width <PIXELS>             Initial display width [default: 1920]\n");
+    s.push_str("    --height <PIXELS>            Initial display height [default: 1080]\n");
+    s.push_str("    --framerate <FPS>            Target framerate [default: 120]\n");
+    s.push_str("    --bitrate <KBPS>             Initial video bitrate [default: 100000]\n");
+    s.push_str("    --encoder <NAME>             Force encoder (nvh264enc, vah264enc, x264enc)\n");
+    s.push_str("    --max-width <PIXELS>         Maximum resize width [default: 3840]\n");
+    s.push_str("    --max-height <PIXELS>        Maximum resize height [default: 2160]\n");
+    s.push_str(
+        "    --gpu-driver <MODE>          GPU driver: auto, nvidia, dummy [default: auto]\n",
+    );
+    s.push_str("    --display-start <N>          Starting display number [default: 10]\n");
+    s.push_str("    -V, --version                Print version and exit\n");
+    s.push_str("    -h, --help                   Print this help and exit\n");
+    s
+}
+
+/// Build the agent --version output. Pure helper. The production code
+/// reads CARGO_PKG_VERSION at compile time; here the caller passes the
+/// version explicitly so tests can verify the prefix.
+pub(crate) fn version_line(version: &str) -> String {
+    format!("beam-agent {version}")
 }
 
 #[cfg(test)]
@@ -510,5 +527,103 @@ mod tests {
         // Document and lock the default constants.
         assert_eq!(DEFAULT_BITRATE, 50_000);
         assert_eq!(DEFAULT_FRAMERATE, 120);
+    }
+
+    // --- help_text ---
+
+    #[test]
+    fn help_text_starts_with_program_name() {
+        let h = help_text();
+        assert!(h.starts_with("beam-agent"));
+    }
+
+    #[test]
+    fn help_text_lists_usage_section() {
+        let h = help_text();
+        assert!(h.contains("USAGE:"));
+        assert!(h.contains("beam-agent [OPTIONS]"));
+    }
+
+    #[test]
+    fn help_text_lists_options_section() {
+        let h = help_text();
+        assert!(h.contains("OPTIONS:"));
+        // Spot-check every major flag is documented.
+        for flag in [
+            "--display",
+            "--server-url",
+            "--session-id",
+            "--agent-token",
+            "--tls-cert",
+            "--width",
+            "--height",
+            "--framerate",
+            "--bitrate",
+            "--encoder",
+            "--max-width",
+            "--max-height",
+            "--gpu-driver",
+            "--display-start",
+            "-V, --version",
+            "-h, --help",
+        ] {
+            assert!(h.contains(flag), "Help text is missing {flag}");
+        }
+    }
+
+    #[test]
+    fn help_text_documents_defaults() {
+        let h = help_text();
+        // Spot-check default values are visible to operators.
+        assert!(h.contains("[default: :0]"));
+        assert!(h.contains("[default: 1920]"));
+        assert!(h.contains("[default: 1080]"));
+        assert!(h.contains("[default: 120]"));
+        assert!(h.contains("[default: 100000]"));
+        assert!(h.contains("[default: 3840]"));
+        assert!(h.contains("[default: 2160]"));
+        assert!(h.contains("[default: auto]"));
+        assert!(h.contains("[default: 10]"));
+    }
+
+    #[test]
+    fn help_text_documents_required_session_id() {
+        let h = help_text();
+        assert!(h.contains("(required)"));
+    }
+
+    #[test]
+    fn help_text_mentions_env_var_for_agent_token() {
+        let h = help_text();
+        assert!(h.contains("BEAM_AGENT_TOKEN"));
+    }
+
+    #[test]
+    fn help_text_ends_with_newline() {
+        // Operator-friendly: terminal stays aligned.
+        let h = help_text();
+        assert!(h.ends_with('\n'));
+    }
+
+    // --- version_line ---
+
+    #[test]
+    fn version_line_includes_version() {
+        let v = version_line("0.3.99");
+        assert_eq!(v, "beam-agent 0.3.99");
+    }
+
+    #[test]
+    fn version_line_includes_dev_suffix() {
+        let v = version_line("0.4.0-dev");
+        assert!(v.contains("0.4.0-dev"));
+    }
+
+    #[test]
+    fn version_line_handles_empty_version() {
+        // Defensive — pkg version is always set, but the formatter should
+        // not panic on empty.
+        let v = version_line("");
+        assert_eq!(v, "beam-agent ");
     }
 }

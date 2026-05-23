@@ -202,6 +202,134 @@ pub(crate) fn startup_banner_line(bind_addr: &SocketAddr) -> String {
     format!("Listening on https://{bind_addr}")
 }
 
+/// Build the warning shown when admin panel is disabled (no admin_users
+/// configured in beam.toml). Pure helper so the message text is testable.
+pub(crate) fn admin_panel_disabled_message() -> &'static str {
+    "Admin panel disabled (no admin_users configured in beam.toml)"
+}
+
+/// Build the info shown when session-restoration finds N previous-shutdown
+/// sessions to restore. Pure helper so the pluralization is testable.
+pub(crate) fn restore_sessions_message(restored: usize) -> String {
+    format!("Restored {restored} sessions from previous shutdown")
+}
+
+/// Build the info shown when idle_timeout disables the reaper. Pure
+/// helper so the gate condition + message are exercisable by unit tests.
+pub(crate) fn reaper_disabled_message() -> &'static str {
+    "Session idle timeout disabled (idle_timeout = 0)"
+}
+
+/// Decide whether the stale-session reaper task should run. Returns
+/// true iff `idle_timeout` is positive (zero disables the reaper).
+pub(crate) fn reaper_should_run(idle_timeout: u64) -> bool {
+    idle_timeout > 0
+}
+
+/// Build the per-session "reaping stale" message logged by the reaper
+/// background task. Pure helper so the format can be unit-tested.
+pub(crate) fn reaper_log_line(session_id: uuid::Uuid, idle_timeout: u64) -> String {
+    format!("Reaping stale session {session_id} (idle > {idle_timeout}s)")
+}
+
+/// Build the "Loaded JWT secret from {path}" info line. Pure helper.
+pub(crate) fn jwt_loaded_message(secret_path: &std::path::Path) -> String {
+    format!("Loaded JWT secret from {}", secret_path.display())
+}
+
+/// Build the "Persisted JWT secret to {path}" info line. Pure helper.
+pub(crate) fn jwt_persisted_message(secret_path: &std::path::Path) -> String {
+    format!("Persisted JWT secret to {}", secret_path.display())
+}
+
+/// Build the "Failed to persist JWT secret" warn line. Pure helper —
+/// keeps the error message format stable across refactors.
+pub(crate) fn jwt_persist_failure_message(err: &str) -> String {
+    format!("Failed to persist JWT secret: {err}")
+}
+
+/// Build the startup banner title line with the configured version.
+/// Pure helper that pins the formatting in one testable place.
+pub(crate) fn startup_banner_title(version: &str) -> String {
+    format!("  Beam Remote Desktop Server v{version}")
+}
+
+/// Build the "server ready" log line emitted right after the TCP
+/// listener binds. Constant string — kept as a helper for symmetry
+/// with the other banner-line helpers.
+pub(crate) fn server_ready_message() -> &'static str {
+    "Server ready, accepting connections"
+}
+
+/// Build the "received SIGINT" shutdown line. Pure constant helper.
+pub(crate) fn sigint_shutdown_message() -> &'static str {
+    "Received SIGINT, initiating graceful shutdown"
+}
+
+/// Build the "received SIGTERM" shutdown line. Pure constant helper.
+pub(crate) fn sigterm_shutdown_message() -> &'static str {
+    "Received SIGTERM, initiating graceful shutdown"
+}
+
+/// Build the "persisting sessions" graceful-shutdown line. Pure constant.
+pub(crate) fn persisting_sessions_message() -> &'static str {
+    "Persisting sessions for graceful restart..."
+}
+
+/// Build the "shut down cleanly" final line. Pure constant.
+pub(crate) fn shutdown_clean_message() -> &'static str {
+    "Beam server shut down cleanly (sessions persisted)"
+}
+
+// Login rate-limiter constants. Pure helpers so the budgets are
+// testable + locked in one place. The numbers mirror the choices
+// in `main()`: 5 attempts/min per username, 20/min per IP, 10
+// release attempts/min per IP.
+
+/// Maximum login attempts per username per minute. Higher than the
+/// per-IP limit so a normal user (typing wrong password a few times)
+/// isn't kicked off after one fat-finger typo. Mirrors `main()`.
+pub(crate) const LOGIN_USERNAME_RATE_LIMIT: usize = 5;
+
+/// Maximum login attempts per source IP per minute. Higher than the
+/// per-username limit so corporate NAT'd offices don't blow through
+/// the budget. Mirrors `main()`.
+pub(crate) const LOGIN_IP_RATE_LIMIT: usize = 20;
+
+/// Maximum session-release attempts per source IP per minute. Bounded
+/// so an attacker can't probe valid session IDs by spamming release.
+pub(crate) const SESSION_RELEASE_IP_RATE_LIMIT: usize = 10;
+
+/// Window (in seconds) over which the rate limit applies. 60s window
+/// is the shared budget across all login + release rate limiters.
+pub(crate) const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
+/// Build the request span info used by axum's tracing middleware. Pure
+/// helper for the "header missing → '-'" fallback so the format is
+/// testable. The production middleware uses the same fallback for the
+/// request_id field.
+pub(crate) fn request_id_or_dash(header_value: Option<&str>) -> &str {
+    header_value.unwrap_or("-")
+}
+
+/// Default agent-log retention in seconds (24h). Mirrors the `cleanup_old_agent_logs`
+/// argument in `main()`. Pure helper so the policy is testable.
+pub(crate) const AGENT_LOG_MAX_AGE_SECS: u64 = 24 * 3600;
+
+/// Default agent-log retention count. Mirrors the `cleanup_old_agent_logs`
+/// argument in `main()`. The N most-recent are kept regardless of age.
+pub(crate) const AGENT_LOG_MAX_COUNT: usize = 20;
+
+/// Reaper-task sleep interval (seconds). Pure constant kept alongside
+/// the other reaper helpers so a future scheduling change is reviewed
+/// against the test that pins it.
+pub(crate) const REAPER_SLEEP_SECS: u64 = 60;
+
+/// TLS handshake timeout for an inbound connection. 10s is enough for
+/// a slow client across continents but bounds the worst-case so the
+/// accept loop doesn't pile up half-open sockets under SYN flood.
+pub(crate) const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+
 /// Resolve the JWT secret: load from disk if present, else generate +
 /// persist. Returns the secret plus a `JwtSecretSource` enum describing
 /// which branch fired so the caller can log appropriately and tests can
@@ -322,13 +450,13 @@ async fn main() -> Result<()> {
     );
     match &source {
         JwtSecretSource::LoadedFromDisk => {
-            tracing::info!("Loaded JWT secret from {}", secret_path.display());
+            tracing::info!("{}", jwt_loaded_message(secret_path));
         }
         JwtSecretSource::GeneratedAndPersisted => {
-            tracing::info!("Persisted JWT secret to {}", secret_path.display());
+            tracing::info!("{}", jwt_persisted_message(secret_path));
         }
         JwtSecretSource::GeneratedEphemeral(err) => {
-            tracing::warn!("Failed to persist JWT secret: {err}");
+            tracing::warn!("{}", jwt_persist_failure_message(err));
         }
     }
 
@@ -348,9 +476,15 @@ async fn main() -> Result<()> {
         session_manager,
         channels: signaling::new_channel_registry(),
         jwt_secret,
-        login_limiter: web::LoginRateLimiter::new(5, 60), // 5 attempts per username per 60s
-        ip_limiter: web::LoginRateLimiter::new(20, 60),   // 20 attempts per IP per 60s
-        release_limiter: web::LoginRateLimiter::new(10, 60), // 10 release attempts per IP per 60s
+        login_limiter: web::LoginRateLimiter::new(
+            LOGIN_USERNAME_RATE_LIMIT,
+            RATE_LIMIT_WINDOW_SECS,
+        ),
+        ip_limiter: web::LoginRateLimiter::new(LOGIN_IP_RATE_LIMIT, RATE_LIMIT_WINDOW_SECS),
+        release_limiter: web::LoginRateLimiter::new(
+            SESSION_RELEASE_IP_RATE_LIMIT,
+            RATE_LIMIT_WINDOW_SECS,
+        ),
         started_at: std::time::Instant::now(),
         metrics_logins_attempted: std::sync::atomic::AtomicU64::new(0),
         metrics_logins_failed: std::sync::atomic::AtomicU64::new(0),
@@ -365,14 +499,11 @@ async fn main() -> Result<()> {
         web::spawn_agent_monitor(Arc::clone(&state), *session_id).await;
     }
     if !restored.is_empty() {
-        tracing::info!(
-            "Restored {} sessions from previous shutdown",
-            restored.len()
-        );
+        tracing::info!("{}", restore_sessions_message(restored.len()));
     }
 
     if state.config.server.admin_users.is_empty() {
-        tracing::info!("Admin panel disabled (no admin_users configured in beam.toml)");
+        tracing::info!("{}", admin_panel_disabled_message());
     }
 
     let app = web::build_router(Arc::clone(&state))
@@ -380,11 +511,11 @@ async fn main() -> Result<()> {
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {
-                    let request_id = request
+                    let header_value = request
                         .headers()
                         .get("x-request-id")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("-");
+                        .and_then(|v| v.to_str().ok());
+                    let request_id = request_id_or_dash(header_value);
                     tracing::info_span!(
                         "request",
                         method = %request.method(),
@@ -411,14 +542,15 @@ async fn main() -> Result<()> {
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
 
     // Clean up old agent logs on startup (keep last 20, remove >24h old)
-    cleanup_old_agent_logs(std::path::Path::new("/var/log/beam"), 24 * 3600, 20);
+    cleanup_old_agent_logs(
+        std::path::Path::new("/var/log/beam"),
+        AGENT_LOG_MAX_AGE_SECS,
+        AGENT_LOG_MAX_COUNT,
+    );
 
     // Print startup banner
     tracing::info!("===========================================");
-    tracing::info!(
-        "  Beam Remote Desktop Server v{}",
-        env!("CARGO_PKG_VERSION")
-    );
+    tracing::info!("{}", startup_banner_title(env!("CARGO_PKG_VERSION")));
     tracing::info!("  {}", startup_banner_line(&bind_addr));
     tracing::info!("===========================================");
 
@@ -427,21 +559,21 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("Failed to bind to {bind_addr}"))?;
 
-    tracing::info!("Server ready, accepting connections");
+    tracing::info!("{}", server_ready_message());
 
     // Background task: reap stale sessions (configurable idle timeout)
     let idle_timeout = state.config.session.idle_timeout;
-    if idle_timeout > 0 {
+    if reaper_should_run(idle_timeout) {
         let reaper_state = Arc::clone(&state);
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(REAPER_SLEEP_SECS)).await;
                 let stale = reaper_state
                     .session_manager
                     .stale_sessions(idle_timeout)
                     .await;
                 for session_id in stale {
-                    tracing::info!(%session_id, "Reaping stale session (idle > {idle_timeout}s)");
+                    tracing::info!("{}", reaper_log_line(session_id, idle_timeout));
                     if let Err(e) = reaper_state
                         .session_manager
                         .destroy_session(session_id)
@@ -455,7 +587,7 @@ async fn main() -> Result<()> {
             }
         });
     } else {
-        tracing::info!("Session idle timeout disabled (idle_timeout = 0)");
+        tracing::info!("{}", reaper_disabled_message());
     }
 
     // Set up graceful shutdown
@@ -478,9 +610,9 @@ async fn main() -> Result<()> {
                 let app = app.clone();
 
                 tokio::spawn(async move {
-                    // TLS handshake timeout (10 seconds)
+                    // TLS handshake timeout
                     let tls_stream = match tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
+                        std::time::Duration::from_secs(TLS_HANDSHAKE_TIMEOUT_SECS),
                         acceptor.accept(stream),
                     ).await {
                         Ok(Ok(s)) => s,
@@ -509,18 +641,18 @@ async fn main() -> Result<()> {
                 });
             }
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Received SIGINT, initiating graceful shutdown");
+                tracing::info!("{}", sigint_shutdown_message());
                 break;
             }
             _ = sigterm.recv() => {
-                tracing::info!("Received SIGTERM, initiating graceful shutdown");
+                tracing::info!("{}", sigterm_shutdown_message());
                 break;
             }
         }
     }
 
     // Graceful shutdown: persist sessions so agents survive the restart
-    tracing::info!("Persisting sessions for graceful restart...");
+    tracing::info!("{}", persisting_sessions_message());
     if let Err(e) = shutdown_state.session_manager.persist_sessions().await {
         tracing::error!("Failed to persist sessions, destroying instead: {e}");
         // Fallback: destroy all sessions if persistence fails
@@ -535,7 +667,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    tracing::info!("Beam server shut down cleanly (sessions persisted)");
+    tracing::info!("{}", shutdown_clean_message());
 
     Ok(())
 }
@@ -1412,5 +1544,275 @@ mod validation_tests {
         let issues = vec!["ERROR: only one".to_string()];
         let summary = config_validation_summary(&issues);
         assert!(summary.contains("1 issue"));
+    }
+}
+
+#[cfg(test)]
+mod startup_message_tests {
+    use super::{
+        admin_panel_disabled_message, jwt_loaded_message, jwt_persist_failure_message,
+        jwt_persisted_message, persisting_sessions_message, reaper_disabled_message,
+        reaper_log_line, reaper_should_run, restore_sessions_message, server_ready_message,
+        shutdown_clean_message, sigint_shutdown_message, sigterm_shutdown_message,
+        startup_banner_title,
+    };
+
+    #[test]
+    fn admin_panel_message_mentions_disabled_and_config_key() {
+        let m = admin_panel_disabled_message();
+        assert!(m.contains("disabled"));
+        assert!(m.contains("admin_users"));
+        assert!(m.contains("beam.toml"));
+    }
+
+    #[test]
+    fn restore_sessions_singular_format() {
+        let m = restore_sessions_message(1);
+        assert!(m.contains("1 sessions"));
+        assert!(m.contains("previous shutdown"));
+    }
+
+    #[test]
+    fn restore_sessions_zero_format() {
+        // Caller checks empty; the helper itself still formats cleanly.
+        let m = restore_sessions_message(0);
+        assert!(m.contains("0 sessions"));
+    }
+
+    #[test]
+    fn restore_sessions_large_count() {
+        let m = restore_sessions_message(42);
+        assert!(m.contains("42 sessions"));
+    }
+
+    #[test]
+    fn reaper_disabled_message_mentions_idle_timeout() {
+        let m = reaper_disabled_message();
+        assert!(m.contains("idle_timeout"));
+        assert!(m.contains("0"));
+    }
+
+    #[test]
+    fn reaper_should_run_for_positive_timeout() {
+        assert!(reaper_should_run(1));
+        assert!(reaper_should_run(60));
+        assert!(reaper_should_run(86_400));
+        assert!(reaper_should_run(u64::MAX));
+    }
+
+    #[test]
+    fn reaper_should_not_run_for_zero() {
+        assert!(!reaper_should_run(0));
+    }
+
+    #[test]
+    fn reaper_log_line_includes_session_id_and_timeout() {
+        let id = uuid::Uuid::new_v4();
+        let line = reaper_log_line(id, 1800);
+        assert!(line.contains(&id.to_string()));
+        assert!(line.contains("1800"));
+        assert!(line.contains("Reaping stale"));
+    }
+
+    #[test]
+    fn reaper_log_line_handles_zero_timeout() {
+        // The reaper task is gated; if log_line is called with zero, the
+        // formatting still has to be readable.
+        let id = uuid::Uuid::nil();
+        let line = reaper_log_line(id, 0);
+        assert!(line.contains("0s"));
+    }
+
+    #[test]
+    fn jwt_loaded_message_includes_path() {
+        let p = std::path::Path::new("/var/lib/beam/jwt_secret");
+        let m = jwt_loaded_message(p);
+        assert!(m.contains("/var/lib/beam/jwt_secret"));
+        assert!(m.contains("Loaded JWT secret"));
+    }
+
+    #[test]
+    fn jwt_persisted_message_includes_path() {
+        let p = std::path::Path::new("/var/lib/beam/jwt_secret");
+        let m = jwt_persisted_message(p);
+        assert!(m.contains("/var/lib/beam/jwt_secret"));
+        assert!(m.contains("Persisted JWT secret"));
+    }
+
+    #[test]
+    fn jwt_persist_failure_message_includes_error() {
+        let m = jwt_persist_failure_message("Permission denied (os error 13)");
+        assert!(m.contains("Permission denied"));
+        assert!(m.contains("Failed to persist JWT secret"));
+    }
+
+    #[test]
+    fn jwt_messages_handle_paths_with_spaces() {
+        let p = std::path::Path::new("/var/lib/beam dir/jwt");
+        let m = jwt_loaded_message(p);
+        assert!(m.contains("/var/lib/beam dir/jwt"));
+    }
+
+    #[test]
+    fn startup_banner_title_includes_version() {
+        let m = startup_banner_title("0.3.99");
+        assert!(m.contains("Beam Remote Desktop Server"));
+        assert!(m.contains("v0.3.99"));
+    }
+
+    #[test]
+    fn startup_banner_title_handles_dev_version() {
+        let m = startup_banner_title("0.0.0-dev");
+        assert!(m.contains("0.0.0-dev"));
+    }
+
+    #[test]
+    fn server_ready_message_mentions_accepting() {
+        let m = server_ready_message();
+        assert!(m.contains("ready"));
+        assert!(m.contains("accepting"));
+    }
+
+    #[test]
+    fn sigint_message_mentions_graceful() {
+        let m = sigint_shutdown_message();
+        assert!(m.contains("SIGINT"));
+        assert!(m.contains("graceful"));
+    }
+
+    #[test]
+    fn sigterm_message_mentions_graceful() {
+        let m = sigterm_shutdown_message();
+        assert!(m.contains("SIGTERM"));
+        assert!(m.contains("graceful"));
+    }
+
+    #[test]
+    fn persisting_sessions_message_mentions_restart() {
+        let m = persisting_sessions_message();
+        assert!(m.contains("Persisting") || m.contains("persist"));
+        assert!(m.contains("restart"));
+    }
+
+    #[test]
+    fn shutdown_clean_message_mentions_persisted() {
+        let m = shutdown_clean_message();
+        assert!(m.contains("shut down"));
+        assert!(m.contains("persisted"));
+    }
+
+    #[test]
+    fn sigint_and_sigterm_messages_distinct() {
+        // They MUST differ — operators rely on the signal name in logs to
+        // distinguish container-restart (SIGTERM) from interactive Ctrl-C
+        // (SIGINT) when triaging.
+        assert_ne!(sigint_shutdown_message(), sigterm_shutdown_message());
+    }
+}
+
+#[cfg(test)]
+mod constants_tests {
+    use super::{
+        AGENT_LOG_MAX_AGE_SECS, AGENT_LOG_MAX_COUNT, LOGIN_IP_RATE_LIMIT,
+        LOGIN_USERNAME_RATE_LIMIT, RATE_LIMIT_WINDOW_SECS, REAPER_SLEEP_SECS,
+        SESSION_RELEASE_IP_RATE_LIMIT, TLS_HANDSHAKE_TIMEOUT_SECS, request_id_or_dash,
+    };
+
+    // --- Rate-limiter constants ---
+
+    #[test]
+    fn login_username_limit_locked() {
+        // 5 per minute strikes the balance between fat-finger forgiveness and
+        // brute-force resistance. Lock so future tightening is reviewed.
+        assert_eq!(LOGIN_USERNAME_RATE_LIMIT, 5);
+    }
+
+    #[test]
+    fn login_ip_limit_higher_than_username_limit() {
+        // Corporate-NAT scenario: many real users may share an IP. The IP
+        // budget MUST be larger than the per-user budget or NAT'd offices
+        // get kicked off after one user's typo. Use a const block so
+        // clippy doesn't fire on the constant-only assertion.
+        const _: () = assert!(LOGIN_IP_RATE_LIMIT > LOGIN_USERNAME_RATE_LIMIT);
+    }
+
+    #[test]
+    fn login_ip_limit_locked() {
+        assert_eq!(LOGIN_IP_RATE_LIMIT, 20);
+    }
+
+    #[test]
+    fn session_release_ip_limit_locked() {
+        assert_eq!(SESSION_RELEASE_IP_RATE_LIMIT, 10);
+    }
+
+    #[test]
+    fn session_release_ip_limit_lower_than_login_ip_limit() {
+        // Release-rate budget intentionally tighter than login — bounds
+        // attacker probing of valid session IDs.
+        const _: () = assert!(SESSION_RELEASE_IP_RATE_LIMIT < LOGIN_IP_RATE_LIMIT);
+    }
+
+    #[test]
+    fn rate_limit_window_is_one_minute() {
+        // 60s window is the shared budget across all limiters. Pin so a
+        // refactor that switches one to a different window doesn't drift.
+        assert_eq!(RATE_LIMIT_WINDOW_SECS, 60);
+    }
+
+    // --- Agent log retention ---
+
+    #[test]
+    fn agent_log_max_age_locked_at_24h() {
+        assert_eq!(AGENT_LOG_MAX_AGE_SECS, 86_400);
+    }
+
+    #[test]
+    fn agent_log_max_count_locked_at_20() {
+        assert_eq!(AGENT_LOG_MAX_COUNT, 20);
+    }
+
+    // --- Reaper + TLS timeouts ---
+
+    #[test]
+    fn reaper_sleep_locked_at_1_minute() {
+        assert_eq!(REAPER_SLEEP_SECS, 60);
+    }
+
+    #[test]
+    fn tls_handshake_timeout_locked_at_10s() {
+        assert_eq!(TLS_HANDSHAKE_TIMEOUT_SECS, 10);
+    }
+
+    #[test]
+    fn tls_handshake_timeout_well_below_reaper_interval() {
+        // Sanity: TLS handshakes shouldn't outlive the reaper interval —
+        // otherwise a stuck handshake could block stale-session cleanup.
+        const _: () = assert!(TLS_HANDSHAKE_TIMEOUT_SECS < REAPER_SLEEP_SECS);
+    }
+
+    // --- request_id_or_dash ---
+
+    #[test]
+    fn request_id_returns_dash_for_missing() {
+        assert_eq!(request_id_or_dash(None), "-");
+    }
+
+    #[test]
+    fn request_id_returns_header_value_when_present() {
+        assert_eq!(request_id_or_dash(Some("abc-123")), "abc-123");
+    }
+
+    #[test]
+    fn request_id_returns_empty_string_when_header_empty() {
+        // Defensive — an empty header value is still "present" so we
+        // return it verbatim rather than the dash fallback.
+        assert_eq!(request_id_or_dash(Some("")), "");
+    }
+
+    #[test]
+    fn request_id_handles_uuid_format() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(request_id_or_dash(Some(uuid)), uuid);
     }
 }

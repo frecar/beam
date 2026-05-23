@@ -76,7 +76,7 @@ impl VirtualDisplay {
             if std::path::Path::new(&static_config).exists() {
                 (static_config, None)
             } else {
-                let tmp_config_path = format!("/tmp/beam-xorg-{display_num}.conf");
+                let tmp_config_path = tmp_xorg_config_path(display_num);
                 let _ = fs::remove_file(&tmp_config_path);
                 let config = generate_xorg_config(width, height);
                 fs::write(&tmp_config_path, &config)
@@ -109,7 +109,7 @@ impl VirtualDisplay {
         let xorg_bin = xorg_bin_owned.as_str();
 
         // Capture Xorg stderr to diagnose startup failures
-        let xorg_log_path = format!("/tmp/beam-xorg-stderr-{display_num}.log");
+        let xorg_log_path = xorg_stderr_log_path(display_num);
         let xorg_log = std::fs::File::create(&xorg_log_path).ok();
 
         let mut child = Command::new(xorg_bin)
@@ -249,7 +249,7 @@ impl VirtualDisplay {
             // GVFS, and PulseAudio can't find proper socket paths. Normally created
             // by logind for interactive sessions, but beam-agent is spawned by the
             // beam-server systemd service (not a PAM login session).
-            let runtime_dir = format!("/tmp/beam-run-{}", self.display_num);
+            let runtime_dir = xdg_runtime_dir(self.display_num);
             let _ = fs::remove_dir_all(&runtime_dir);
             fs::create_dir_all(&runtime_dir)
                 .with_context(|| format!("Failed to create runtime dir: {runtime_dir}"))?;
@@ -258,7 +258,7 @@ impl VirtualDisplay {
                 let _ = fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700));
             }
 
-            let pulse_server = format!("unix:/tmp/beam-pulse-{}/native", self.display_num);
+            let pulse_server = pulse_server_socket_url(self.display_num);
             let mut cmd = Command::new("/usr/bin/dbus-launch");
             cmd.arg("--exit-with-session")
                 .arg("xfce4-session")
@@ -334,18 +334,19 @@ impl VirtualDisplay {
                 // registers on THIS session's bus.
                 if let Some(ref addr) = dbus_addr {
                     let display_num = display_for_xfconf.trim_start_matches(':');
+                    let display_num_u32 = display_num.parse::<u32>().unwrap_or(0);
 
                     // Control socket: ephemeral per-session (Unix sockets can't
                     // live on NFS and must be unique per display).
-                    let keyring_control_dir = format!("/tmp/beam-keyring-{display_num}");
+                    let keyring_control_dir = keyring_control_dir(display_num_u32);
                     let _ = fs::remove_dir_all(&keyring_control_dir);
                     let _ = fs::create_dir_all(&keyring_control_dir);
 
                     // Data dir: persistent at ~/.local/share/beam/keyring/ so
                     // stored passwords survive across sessions.
                     let home = std::env::var("HOME").unwrap_or_default();
-                    let keyring_data_dir = format!("{home}/.local/share/beam/keyring");
-                    let keyrings_dir = format!("{keyring_data_dir}/keyrings");
+                    let keyring_data_dir = keyring_data_dir(&home);
+                    let keyrings_dir = keyrings_dir(&home);
                     let _ = fs::create_dir_all(&keyrings_dir);
 
                     // Set the default keyring name if not already set (first session).
@@ -469,10 +470,7 @@ impl VirtualDisplay {
         if which_exists("openbox") {
             let child = Command::new("openbox")
                 .env("DISPLAY", &display)
-                .env(
-                    "PULSE_SERVER",
-                    format!("unix:/tmp/beam-pulse-{}/native", self.display_num),
-                )
+                .env("PULSE_SERVER", pulse_server_socket_url(self.display_num))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -587,7 +585,7 @@ impl VirtualDisplay {
 
     /// Start a PulseAudio daemon for this display's user session.
     pub fn start_pulseaudio(&mut self) -> Result<()> {
-        let runtime_dir = format!("/tmp/beam-pulse-{}", self.display_num);
+        let runtime_dir = pulse_runtime_dir(self.display_num);
         // Remove stale directory from previous sessions (may be owned by different user)
         let _ = fs::remove_dir_all(&runtime_dir);
         fs::create_dir_all(&runtime_dir)
@@ -595,7 +593,7 @@ impl VirtualDisplay {
 
         // Write a minimal PulseAudio config for virtual sessions.
         // Explicit socket path avoids conflict with user's existing PulseAudio.
-        let pa_config_path = format!("/tmp/beam-pulse-{}.pa", self.display_num);
+        let pa_config_path = pulse_config_path(self.display_num);
         fs::write(&pa_config_path, pa_config(&runtime_dir))
             .with_context(|| format!("Failed to write PA config to {pa_config_path}"))?;
 
@@ -710,10 +708,10 @@ impl Drop for VirtualDisplay {
         // Clean up ephemeral per-session directories.
         // NOTE: XFCE config and keyring data are NOT cleaned up — they persist
         // at ~/.local/share/beam/ across sessions.
-        let _ = fs::remove_dir_all(format!("/tmp/beam-pulse-{}", self.display_num));
-        let _ = fs::remove_file(format!("/tmp/beam-pulse-{}.pa", self.display_num));
-        let _ = fs::remove_dir_all(format!("/tmp/beam-keyring-{}", self.display_num));
-        let _ = fs::remove_dir_all(format!("/tmp/beam-run-{}", self.display_num));
+        let _ = fs::remove_dir_all(pulse_runtime_dir(self.display_num));
+        let _ = fs::remove_file(pulse_config_path(self.display_num));
+        let _ = fs::remove_dir_all(keyring_control_dir(self.display_num));
+        let _ = fs::remove_dir_all(xdg_runtime_dir(self.display_num));
     }
 }
 
@@ -862,6 +860,168 @@ pub(crate) fn xorg_config_needs_cleanup(config_path: &str) -> bool {
 /// suppressed for that case but kept for real failures.
 pub(crate) fn is_benign_xrandr_stderr(stderr: &str) -> bool {
     stderr.contains("already exists")
+}
+
+/// Build the per-display PulseAudio runtime directory path. Pure helper
+/// so the path layout can be tested without spawning PulseAudio.
+pub(crate) fn pulse_runtime_dir(display_num: u32) -> String {
+    format!("/tmp/beam-pulse-{display_num}")
+}
+
+/// Build the per-display PulseAudio config file path.
+pub(crate) fn pulse_config_path(display_num: u32) -> String {
+    format!("/tmp/beam-pulse-{display_num}.pa")
+}
+
+/// Build the per-display XDG_RUNTIME_DIR path for the desktop session.
+pub(crate) fn xdg_runtime_dir(display_num: u32) -> String {
+    format!("/tmp/beam-run-{display_num}")
+}
+
+/// Build the per-display keyring control directory path.
+pub(crate) fn keyring_control_dir(display_num: u32) -> String {
+    format!("/tmp/beam-keyring-{display_num}")
+}
+
+/// Build the per-display Xorg stderr log path.
+pub(crate) fn xorg_stderr_log_path(display_num: u32) -> String {
+    format!("/tmp/beam-xorg-stderr-{display_num}.log")
+}
+
+/// Build the per-display tmp xorg config path used when no static
+/// `/etc/X11/beam-xorg.conf` is found.
+pub(crate) fn tmp_xorg_config_path(display_num: u32) -> String {
+    format!("/tmp/beam-xorg-{display_num}.conf")
+}
+
+/// Build the keyring data directory under `$HOME`. The data dir is
+/// persistent across sessions so stored credentials survive.
+pub(crate) fn keyring_data_dir(home: &str) -> String {
+    format!("{home}/.local/share/beam/keyring")
+}
+
+/// Build the keyrings subdirectory under the data directory.
+pub(crate) fn keyrings_dir(home: &str) -> String {
+    format!("{}/keyrings", keyring_data_dir(home))
+}
+
+/// Build the per-display PulseAudio socket URL used by start_pulseaudio +
+/// child apps via `PULSE_SERVER`. Pure helper kept consistent with
+/// `pulse_runtime_dir`.
+pub(crate) fn pulse_server_socket_url(display_num: u32) -> String {
+    format!("unix:{}/native", pulse_runtime_dir(display_num))
+}
+
+/// Pick the panel-1 plugin id based on whether whiskermenu is installed.
+/// Pure helper so the choice can be tested without filesystem state.
+pub(crate) fn pick_panel_plugin(has_whiskermenu: bool) -> &'static str {
+    if has_whiskermenu {
+        "whiskermenu"
+    } else {
+        "applicationsmenu"
+    }
+}
+
+/// Map a browser binary name to the XFCE helper-id used by exo-open.
+/// Pure helper.
+pub(crate) fn browser_to_helper_id(browser: &str) -> &str {
+    match browser {
+        "firefox-esr" => "firefox-esr",
+        "firefox" => "firefox",
+        "google-chrome-stable" | "google-chrome" => "google-chrome",
+        "chromium-browser" | "chromium" => "chromium",
+        "epiphany-browser" => "epiphany",
+        other => other,
+    }
+}
+
+/// Map a browser binary name to the .desktop file name in
+/// `/usr/share/applications/`. Pure helper. Returns `""` for browsers
+/// that don't have a known desktop file.
+pub(crate) fn browser_to_desktop_file(browser: &str) -> &'static str {
+    match browser {
+        "firefox-esr" => "firefox-esr.desktop",
+        "firefox" => "firefox.desktop",
+        "google-chrome-stable" | "google-chrome" => "google-chrome.desktop",
+        "chromium-browser" | "chromium" => "chromium-browser.desktop",
+        "epiphany-browser" => "org.gnome.Epiphany.desktop",
+        _ => "",
+    }
+}
+
+/// Build the helpers.rc content from optional detected browser + terminal.
+/// Pure helper extracted from `seed_default_config` so the format is
+/// directly testable.
+pub(crate) fn build_helpers_rc(
+    detected_terminal: Option<&str>,
+    detected_browser: Option<&str>,
+) -> String {
+    let mut helpers_rc = String::from("[Default]\n");
+    if let Some(term) = detected_terminal {
+        helpers_rc.push_str(&format!("TerminalEmulator={term}\n"));
+    }
+    if let Some(browser) = detected_browser {
+        let helper_id = browser_to_helper_id(browser);
+        helpers_rc.push_str(&format!("WebBrowser={helper_id}\n"));
+    }
+    helpers_rc
+}
+
+/// Build the mimeapps.list content for a default browser. Returns
+/// `None` when the browser doesn't map to a known desktop file (the
+/// caller skips writing the file in that case).
+pub(crate) fn build_mimeapps_list(browser: &str) -> Option<String> {
+    let desktop_file = browser_to_desktop_file(browser);
+    if desktop_file.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Default Applications]\n\
+         x-scheme-handler/http={d}\n\
+         x-scheme-handler/https={d}\n\
+         text/html={d}\n\
+         application/xhtml+xml={d}\n",
+        d = desktop_file,
+    ))
+}
+
+/// Parse a null-separated `/proc/<pid>/environ` buffer for a given
+/// display string. Returns `(has_display, dbus_addr)` — the X11 display
+/// matched its DISPLAY=… line, and the captured `DBUS_SESSION_BUS_ADDRESS`
+/// if present. Pure helper extracted from `find_dbus_address_for_display`.
+pub(crate) fn parse_environ_for_dbus(environ: &[u8], x_display: &str) -> (bool, Option<String>) {
+    let mut has_display = false;
+    let mut dbus_addr = None;
+    for var in environ.split(|&b| b == 0) {
+        let var_str = String::from_utf8_lossy(var);
+        if var_str == format!("DISPLAY={x_display}") {
+            has_display = true;
+        }
+        if let Some(addr) = var_str.strip_prefix("DBUS_SESSION_BUS_ADDRESS=") {
+            dbus_addr = Some(addr.to_string());
+        }
+    }
+    (has_display, dbus_addr)
+}
+
+/// Decide whether an /proc/<pid>/environ entry matches a target display
+/// and exposes a usable DBUS address. Returns the dbus address only when
+/// both conditions hold. Pure helper extracted from the same callsite.
+pub(crate) fn dbus_address_for_display(environ: &[u8], x_display: &str) -> Option<String> {
+    let (has_display, dbus_addr) = parse_environ_for_dbus(environ, x_display);
+    if has_display { dbus_addr } else { None }
+}
+
+/// Build the systemd-user DBus socket path for a given uid. Pure
+/// helper around the format. Used by `find_dbus_address_for_display`.
+pub(crate) fn systemd_user_bus_path(uid: u32) -> String {
+    format!("/run/user/{uid}/bus")
+}
+
+/// Build the systemd-user DBus address (the `unix:path=...` form) for
+/// a given uid. The path the agent passes to subprocess `DBUS_SESSION_BUS_ADDRESS`.
+pub(crate) fn systemd_user_bus_address(uid: u32) -> String {
+    format!("unix:path={}", systemd_user_bus_path(uid))
 }
 
 /// Parse `xrandr --query` stdout and return the first connected output
@@ -1099,9 +1259,9 @@ fn find_non_snap_app(candidates: &[&'static str]) -> Option<&'static str> {
 fn find_dbus_address_for_display(x_display: &str) -> Option<String> {
     // Strategy 1: systemd user bus (created by pam_systemd)
     let uid = nix::unistd::getuid().as_raw();
-    let bus_path = format!("/run/user/{uid}/bus");
+    let bus_path = systemd_user_bus_path(uid);
     if std::path::Path::new(&bus_path).exists() {
-        let addr = format!("unix:path={bus_path}");
+        let addr = systemd_user_bus_address(uid);
         debug!(x_display, addr, "Using systemd user bus for DBUS");
         return Some(addr);
     }
@@ -1121,25 +1281,12 @@ fn find_dbus_address_for_display(x_display: &str) -> Option<String> {
         let Ok(environ) = fs::read(format!("/proc/{pid}/environ")) else {
             continue; // Permission denied for other users' processes — skip
         };
-        let mut has_display = false;
-        let mut dbus_addr = None;
-        for var in environ.split(|&b| b == 0) {
-            let var_str = String::from_utf8_lossy(var);
-            if var_str == format!("DISPLAY={x_display}") {
-                has_display = true;
-            }
-            if let Some(addr) = var_str.strip_prefix("DBUS_SESSION_BUS_ADDRESS=") {
-                dbus_addr = Some(addr.to_string());
-            }
-        }
-        if has_display {
-            if let Some(ref addr) = dbus_addr {
-                debug!(
-                    x_display,
-                    addr, "Found DBUS session address from panel process"
-                );
-            }
-            return dbus_addr;
+        if let Some(addr) = dbus_address_for_display(&environ, x_display) {
+            debug!(
+                x_display,
+                addr, "Found DBUS session address from panel process"
+            );
+            return Some(addr);
         }
     }
     warn!(
@@ -1262,11 +1409,7 @@ fn seed_default_config(config_dir: &str) {
     );
 
     // Pre-seed panel config: use Whisker Menu (plugin-1) if available
-    let panel_plugin_1 = if which_exists("xfce4-popup-whiskermenu") {
-        "whiskermenu"
-    } else {
-        "applicationsmenu"
-    };
+    let panel_plugin_1 = pick_panel_plugin(which_exists("xfce4-popup-whiskermenu"));
     let _ = fs::write(
         format!("{xfconf_dir}/xfce4-panel.xml"),
         format!(
@@ -1402,43 +1545,13 @@ fn seed_default_config(config_dir: &str) {
     ]);
     let detected_terminal = find_non_snap_app(&["xfce4-terminal", "gnome-terminal", "xterm"]);
 
-    let mut helpers_rc = String::from("[Default]\n");
-    if let Some(term) = detected_terminal {
-        helpers_rc.push_str(&format!("TerminalEmulator={term}\n"));
-    }
-    if let Some(browser) = detected_browser {
-        let helper_id = match browser {
-            "firefox-esr" => "firefox-esr",
-            "firefox" => "firefox",
-            "google-chrome-stable" | "google-chrome" => "google-chrome",
-            "chromium-browser" | "chromium" => "chromium",
-            "epiphany-browser" => "epiphany",
-            _ => browser,
-        };
-        helpers_rc.push_str(&format!("WebBrowser={helper_id}\n"));
-    }
+    let helpers_rc = build_helpers_rc(detected_terminal, detected_browser);
     let _ = fs::write(format!("{helpers_dir}/helpers.rc"), &helpers_rc);
 
-    if let Some(browser) = detected_browser {
-        let desktop_file = match browser {
-            "firefox-esr" => "firefox-esr.desktop",
-            "firefox" => "firefox.desktop",
-            "google-chrome-stable" | "google-chrome" => "google-chrome.desktop",
-            "chromium-browser" | "chromium" => "chromium-browser.desktop",
-            "epiphany-browser" => "org.gnome.Epiphany.desktop",
-            _ => "",
-        };
-        if !desktop_file.is_empty() {
-            let content = format!(
-                "[Default Applications]\n\
-                 x-scheme-handler/http={d}\n\
-                 x-scheme-handler/https={d}\n\
-                 text/html={d}\n\
-                 application/xhtml+xml={d}\n",
-                d = desktop_file,
-            );
-            let _ = fs::write(format!("{config_dir}/mimeapps.list"), content);
-        }
+    if let Some(browser) = detected_browser
+        && let Some(content) = build_mimeapps_list(browser)
+    {
+        let _ = fs::write(format!("{config_dir}/mimeapps.list"), content);
     }
 }
 
@@ -2923,5 +3036,360 @@ DP-2 disconnected (normal)
             assert!(content.contains("Hidden=true"));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- pulse_runtime_dir / pulse_config_path / pulse_server_socket_url ---
+
+    #[test]
+    fn pulse_runtime_dir_format_locks_to_tmp() {
+        assert_eq!(pulse_runtime_dir(10), "/tmp/beam-pulse-10");
+        assert_eq!(pulse_runtime_dir(99), "/tmp/beam-pulse-99");
+        assert_eq!(pulse_runtime_dir(0), "/tmp/beam-pulse-0");
+    }
+
+    #[test]
+    fn pulse_runtime_dir_handles_max_display() {
+        let result = pulse_runtime_dir(u32::MAX);
+        assert!(result.starts_with("/tmp/beam-pulse-"));
+        assert!(result.contains(&u32::MAX.to_string()));
+    }
+
+    #[test]
+    fn pulse_config_path_ends_with_pa() {
+        assert_eq!(pulse_config_path(10), "/tmp/beam-pulse-10.pa");
+        assert_eq!(pulse_config_path(42), "/tmp/beam-pulse-42.pa");
+    }
+
+    #[test]
+    fn pulse_server_socket_url_locks_to_unix_scheme() {
+        assert_eq!(
+            pulse_server_socket_url(10),
+            "unix:/tmp/beam-pulse-10/native"
+        );
+    }
+
+    #[test]
+    fn pulse_server_socket_url_is_unix_subpath_of_runtime_dir() {
+        // The socket lives at <runtime_dir>/native — verify the helpers
+        // stay consistent.
+        let runtime = pulse_runtime_dir(7);
+        let url = pulse_server_socket_url(7);
+        assert!(url.contains(&runtime));
+        assert!(url.ends_with("/native"));
+    }
+
+    // --- xdg_runtime_dir / keyring_control_dir / xorg paths ---
+
+    #[test]
+    fn xdg_runtime_dir_is_tmp_keyed_by_display() {
+        assert_eq!(xdg_runtime_dir(10), "/tmp/beam-run-10");
+    }
+
+    #[test]
+    fn keyring_control_dir_format() {
+        assert_eq!(keyring_control_dir(10), "/tmp/beam-keyring-10");
+    }
+
+    #[test]
+    fn xorg_stderr_log_path_includes_display() {
+        assert_eq!(xorg_stderr_log_path(99), "/tmp/beam-xorg-stderr-99.log");
+    }
+
+    #[test]
+    fn tmp_xorg_config_path_format() {
+        assert_eq!(tmp_xorg_config_path(10), "/tmp/beam-xorg-10.conf");
+    }
+
+    #[test]
+    fn cleanup_paths_are_unique_per_display() {
+        // Spot-check that two different display numbers produce different
+        // cleanup paths so concurrent agents don't clobber each other.
+        assert_ne!(pulse_runtime_dir(10), pulse_runtime_dir(11));
+        assert_ne!(xdg_runtime_dir(10), xdg_runtime_dir(11));
+        assert_ne!(keyring_control_dir(10), keyring_control_dir(11));
+    }
+
+    // --- keyring_data_dir / keyrings_dir (home-relative) ---
+
+    #[test]
+    fn keyring_data_dir_under_local_share() {
+        let p = keyring_data_dir("/home/alice");
+        assert_eq!(p, "/home/alice/.local/share/beam/keyring");
+    }
+
+    #[test]
+    fn keyrings_dir_is_subdir_of_keyring_data_dir() {
+        let p = keyrings_dir("/home/alice");
+        assert!(p.starts_with(&keyring_data_dir("/home/alice")));
+        assert!(p.ends_with("/keyrings"));
+    }
+
+    #[test]
+    fn keyring_paths_handle_empty_home() {
+        // If HOME is unset, env::var falls back to "" and we still build
+        // a (relative) path. Verify it doesn't panic.
+        let p = keyring_data_dir("");
+        assert!(p.contains(".local/share/beam"));
+    }
+
+    // --- pick_panel_plugin ---
+
+    #[test]
+    fn panel_plugin_whiskermenu_when_installed() {
+        assert_eq!(pick_panel_plugin(true), "whiskermenu");
+    }
+
+    #[test]
+    fn panel_plugin_applicationsmenu_when_not_installed() {
+        assert_eq!(pick_panel_plugin(false), "applicationsmenu");
+    }
+
+    // --- browser_to_helper_id ---
+
+    #[test]
+    fn helper_id_known_browsers() {
+        assert_eq!(browser_to_helper_id("firefox-esr"), "firefox-esr");
+        assert_eq!(browser_to_helper_id("firefox"), "firefox");
+        assert_eq!(
+            browser_to_helper_id("google-chrome-stable"),
+            "google-chrome"
+        );
+        assert_eq!(browser_to_helper_id("google-chrome"), "google-chrome");
+        assert_eq!(browser_to_helper_id("chromium-browser"), "chromium");
+        assert_eq!(browser_to_helper_id("chromium"), "chromium");
+        assert_eq!(browser_to_helper_id("epiphany-browser"), "epiphany");
+    }
+
+    #[test]
+    fn helper_id_unknown_passes_through() {
+        // Unknown browsers fall back to the raw name (defensive — operator
+        // may have a non-standard browser configured).
+        assert_eq!(browser_to_helper_id("nyxt"), "nyxt");
+        assert_eq!(browser_to_helper_id("opera"), "opera");
+        assert_eq!(browser_to_helper_id(""), "");
+    }
+
+    // --- browser_to_desktop_file ---
+
+    #[test]
+    fn desktop_file_known_browsers() {
+        assert_eq!(
+            browser_to_desktop_file("firefox-esr"),
+            "firefox-esr.desktop"
+        );
+        assert_eq!(browser_to_desktop_file("firefox"), "firefox.desktop");
+        assert_eq!(
+            browser_to_desktop_file("google-chrome-stable"),
+            "google-chrome.desktop"
+        );
+        assert_eq!(
+            browser_to_desktop_file("google-chrome"),
+            "google-chrome.desktop"
+        );
+        assert_eq!(
+            browser_to_desktop_file("chromium-browser"),
+            "chromium-browser.desktop"
+        );
+        assert_eq!(
+            browser_to_desktop_file("chromium"),
+            "chromium-browser.desktop"
+        );
+        assert_eq!(
+            browser_to_desktop_file("epiphany-browser"),
+            "org.gnome.Epiphany.desktop"
+        );
+    }
+
+    #[test]
+    fn desktop_file_unknown_returns_empty() {
+        // Unknown browsers return empty string — caller skips writing the
+        // mimeapps.list file in that case (no MIME associations to wire up).
+        assert_eq!(browser_to_desktop_file("nyxt"), "");
+        assert_eq!(browser_to_desktop_file(""), "");
+    }
+
+    // --- build_helpers_rc ---
+
+    #[test]
+    fn helpers_rc_default_only_when_nothing_detected() {
+        let s = build_helpers_rc(None, None);
+        assert_eq!(s, "[Default]\n");
+    }
+
+    #[test]
+    fn helpers_rc_includes_terminal_when_detected() {
+        let s = build_helpers_rc(Some("xfce4-terminal"), None);
+        assert!(s.contains("TerminalEmulator=xfce4-terminal"));
+        assert!(!s.contains("WebBrowser="));
+    }
+
+    #[test]
+    fn helpers_rc_includes_browser_when_detected() {
+        let s = build_helpers_rc(None, Some("firefox-esr"));
+        assert!(s.contains("WebBrowser=firefox-esr"));
+        assert!(!s.contains("TerminalEmulator="));
+    }
+
+    #[test]
+    fn helpers_rc_includes_both_when_detected() {
+        let s = build_helpers_rc(Some("xterm"), Some("chromium"));
+        assert!(s.starts_with("[Default]\n"));
+        assert!(s.contains("TerminalEmulator=xterm"));
+        assert!(s.contains("WebBrowser=chromium"));
+    }
+
+    #[test]
+    fn helpers_rc_uses_mapped_helper_id() {
+        // chromium-browser → chromium (the chromium helper alias).
+        let s = build_helpers_rc(None, Some("chromium-browser"));
+        assert!(s.contains("WebBrowser=chromium"));
+        assert!(!s.contains("WebBrowser=chromium-browser"));
+    }
+
+    // --- build_mimeapps_list ---
+
+    #[test]
+    fn mimeapps_list_known_browser_returns_some() {
+        let r = build_mimeapps_list("firefox-esr").unwrap();
+        assert!(r.starts_with("[Default Applications]\n"));
+        assert!(r.contains("x-scheme-handler/http=firefox-esr.desktop"));
+        assert!(r.contains("x-scheme-handler/https=firefox-esr.desktop"));
+        assert!(r.contains("text/html=firefox-esr.desktop"));
+        assert!(r.contains("application/xhtml+xml=firefox-esr.desktop"));
+    }
+
+    #[test]
+    fn mimeapps_list_unknown_browser_returns_none() {
+        assert!(build_mimeapps_list("nyxt").is_none());
+        assert!(build_mimeapps_list("").is_none());
+    }
+
+    #[test]
+    fn mimeapps_list_chromium_browser_mapped_correctly() {
+        let r = build_mimeapps_list("chromium-browser").unwrap();
+        assert!(r.contains("chromium-browser.desktop"));
+    }
+
+    #[test]
+    fn mimeapps_list_handles_all_known_browsers() {
+        for b in [
+            "firefox-esr",
+            "firefox",
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+            "epiphany-browser",
+        ] {
+            let r = build_mimeapps_list(b);
+            assert!(r.is_some(), "Browser {b} should have a mimeapps entry");
+        }
+    }
+
+    // --- parse_environ_for_dbus ---
+
+    #[test]
+    fn environ_parser_finds_display_and_dbus() {
+        let env = b"DISPLAY=:10\0DBUS_SESSION_BUS_ADDRESS=unix:/tmp/dbus\0HOME=/home/x\0";
+        let (has_display, dbus) = parse_environ_for_dbus(env, ":10");
+        assert!(has_display);
+        assert_eq!(dbus.as_deref(), Some("unix:/tmp/dbus"));
+    }
+
+    #[test]
+    fn environ_parser_no_display_match() {
+        let env = b"DISPLAY=:99\0DBUS_SESSION_BUS_ADDRESS=unix:/tmp/x\0";
+        let (has_display, dbus) = parse_environ_for_dbus(env, ":10");
+        assert!(!has_display);
+        // dbus addr is still extracted (the helper extracts both fields).
+        assert_eq!(dbus.as_deref(), Some("unix:/tmp/x"));
+    }
+
+    #[test]
+    fn environ_parser_no_dbus_field() {
+        let env = b"DISPLAY=:10\0HOME=/home/x\0";
+        let (has_display, dbus) = parse_environ_for_dbus(env, ":10");
+        assert!(has_display);
+        assert!(dbus.is_none());
+    }
+
+    #[test]
+    fn environ_parser_empty_input() {
+        let (has_display, dbus) = parse_environ_for_dbus(b"", ":10");
+        assert!(!has_display);
+        assert!(dbus.is_none());
+    }
+
+    #[test]
+    fn environ_parser_handles_trailing_null() {
+        // Real /proc/<pid>/environ ends with a trailing null; verify
+        // the split doesn't fail on the empty tail.
+        let env = b"DISPLAY=:10\0DBUS_SESSION_BUS_ADDRESS=unix:/tmp/y\0";
+        let (has_display, dbus) = parse_environ_for_dbus(env, ":10");
+        assert!(has_display);
+        assert!(dbus.is_some());
+    }
+
+    #[test]
+    fn environ_parser_invalid_utf8_does_not_panic() {
+        // Some env vars on weird shells contain non-UTF8 bytes. The lossy
+        // decode must not panic.
+        let env = b"PATH=\xff\xfe/bin\0DISPLAY=:10\0";
+        let (has_display, _) = parse_environ_for_dbus(env, ":10");
+        assert!(has_display);
+    }
+
+    #[test]
+    fn environ_parser_matches_only_full_display_token() {
+        // DISPLAY=:10 should not match :100 (the display arg).
+        let env = b"DISPLAY=:10\0";
+        let (has_display, _) = parse_environ_for_dbus(env, ":100");
+        assert!(!has_display);
+    }
+
+    // --- dbus_address_for_display ---
+
+    #[test]
+    fn dbus_addr_for_display_returns_some_on_match() {
+        let env = b"DISPLAY=:10\0DBUS_SESSION_BUS_ADDRESS=unix:/tmp/z\0";
+        assert_eq!(
+            dbus_address_for_display(env, ":10").as_deref(),
+            Some("unix:/tmp/z")
+        );
+    }
+
+    #[test]
+    fn dbus_addr_for_display_none_when_display_mismatches() {
+        let env = b"DISPLAY=:99\0DBUS_SESSION_BUS_ADDRESS=unix:/tmp/z\0";
+        assert!(dbus_address_for_display(env, ":10").is_none());
+    }
+
+    #[test]
+    fn dbus_addr_for_display_none_when_no_dbus_var() {
+        let env = b"DISPLAY=:10\0PATH=/usr/bin\0";
+        assert!(dbus_address_for_display(env, ":10").is_none());
+    }
+
+    // --- systemd_user_bus_path / systemd_user_bus_address ---
+
+    #[test]
+    fn systemd_user_bus_path_includes_uid() {
+        assert_eq!(systemd_user_bus_path(1000), "/run/user/1000/bus");
+        assert_eq!(systemd_user_bus_path(0), "/run/user/0/bus");
+    }
+
+    #[test]
+    fn systemd_user_bus_address_unix_path_form() {
+        assert_eq!(
+            systemd_user_bus_address(1000),
+            "unix:path=/run/user/1000/bus"
+        );
+    }
+
+    #[test]
+    fn systemd_user_bus_address_is_subpath_of_bus_path() {
+        let path = systemd_user_bus_path(1234);
+        let addr = systemd_user_bus_address(1234);
+        assert!(addr.contains(&path));
     }
 }

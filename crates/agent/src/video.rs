@@ -236,12 +236,11 @@ mod tests {
         // Collect sent frames
         let mut results = Vec::new();
         while let Some(msg) = ws_rx.recv().await {
-            if let Message::Binary(data) = msg {
-                if let Ok(header) = beam_protocol::VideoFrameHeader::deserialize(&data) {
-                    if !header.is_audio() {
-                        results.push((header.payload_length as usize, header.is_keyframe()));
-                    }
-                }
+            if let Message::Binary(data) = msg
+                && let Ok(header) = beam_protocol::VideoFrameHeader::deserialize(&data)
+                && !header.is_audio()
+            {
+                results.push((header.payload_length as usize, header.is_keyframe()));
             }
         }
         handle.await.unwrap();

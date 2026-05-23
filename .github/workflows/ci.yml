@@ -160,30 +160,36 @@ jobs:
           # Ratchet protocol: --fail-under-lines locks current
           # coverage as a floor. Baseline measured was 55.40%.
           # Several PRs lifted coverage in steady increments. This
-          # PR (#45 big-lift-4) refactors:
-          # - agent/main.rs: extracts an InputAction enum + a pure
-          #   classify_input_event so the input-dispatch decisions can
-          #   be tested without X11; adds handle_visibility_change
-          #   (channel + AtomicBool side effects), audio retry backoff
-          #   math, capture-error logging predicates, encoder reset
-          #   cooldown, idle-state + framerate selectors, resize-noop
-          #   check, home_dir + output_name resolvers, and cursor
-          #   message builder.
-          # - agent/display.rs: extracts parse_xrandr_connected_output,
-          #   is_benign_xrandr_stderr, resolve_xorg_invocation,
-          #   xorg_config_needs_cleanup; adds tests for pa_config,
-          #   generate_nvidia_xorg_config, try_persistent_config_in,
-          #   seed_default_config, is_snap_binary, which_exists,
-          #   is_display_running, find_non_snap_app.
-          # - server/main.rs: extracts resolve_jwt_secret with a
-          #   JwtSecretSource enum + count_validation_severities,
-          #   pam_missing_warning, web_root_is_usable,
-          #   web_root_missing_warning, startup_banner_line.
-          # Measured coverage rose to 85.57% regions / 84.79% lines.
-          # Lines is the lower axis; floor(84.79 - 1) = 83.
+          # PR (#45 big-lift-5) further refactors:
+          # - agent/main.rs: extracts more pure helpers from
+          #   build_input_callback (now_unix_millis, layout dedup,
+          #   setxkbmap-result classifier, sched-fifo log message,
+          #   capture-state transitions, frame_duration_ns_from_framerate,
+          #   xrandr-resize log helpers, encoder-cooldown helpers,
+          #   appsrc_queue_max_bytes, dispatch_resize/file_download,
+          #   dispatch_capture_wake/update_last_input).
+          # - agent/input.rs: scroll-button helpers (vertical/horizontal
+          #   compute, deadzone check, evdev→x11 keycode).
+          # - agent/display.rs: more pure path helpers (pulse_runtime_dir,
+          #   xdg_runtime_dir, keyring paths, pulse_server_socket_url,
+          #   browser→helper/desktop mappings, build_helpers_rc,
+          #   build_mimeapps_list, parse_environ_for_dbus,
+          #   systemd_user_bus_address).
+          # - agent/signaling.rs: log-message helpers for the reconnect
+          #   loop (connecting/closed/error/reconnecting/no_server_url).
+          # - agent/cli.rs: extracts help_text + version_line.
+          # - server/main.rs: extracts JWT/restore/admin/reaper log
+          #   helpers, startup banner title, sigint/sigterm/shutdown
+          #   messages, rate-limiter constants, agent-log retention
+          #   constants, TLS handshake timeout constant, request_id_or_dash.
+          # - server/signaling.rs: should_log_initial_video_frame,
+          #   pong_timeout_elapsed, browser_replaced_message,
+          #   invalid_browser_message_format.
+          # Measured coverage rose to 86.53% regions / 85.99% lines.
+          # Lines is the lower axis; floor(85.99 - 1) = 84.
           # --ignore-filename-regex 'tests?/' excludes the test harness
           # modules from the floor so it tracks real source coverage
           # only.
           cargo llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 83
+            --fail-under-lines 84
