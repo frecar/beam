@@ -290,7 +290,7 @@ pub(crate) fn audio_retry_delay_ms(attempt: u32) -> u64 {
 /// log the first 20 attempts (each one), then every 10th attempt to
 /// keep the trail audible but quiet.
 pub(crate) fn should_log_audio_retry(attempt: u32) -> bool {
-    attempt < 20 || attempt % 10 == 0
+    attempt < 20 || attempt.is_multiple_of(10)
 }
 
 /// Decide whether the audio-capture thread should give up. After 60
