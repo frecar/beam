@@ -7,6 +7,7 @@ import type { ConnectionState } from './ui-state';
 import {
   bandwidthIndicator,
   btnTheme,
+  fabTheme,
   idleWarning,
   lsDecode,
   lsFps,
@@ -46,6 +47,12 @@ export function updateThemeButton(): void {
   const icon = light ? ICON_MOON : ICON_SUN;
   btnTheme.innerHTML = `${icon}<span class="btn-label">${label}</span>`;
   btnTheme.setAttribute('aria-label', light ? 'Switch to dark theme' : 'Switch to light theme');
+  // G2 (#95 P5) — mirror state into the FAB partner. The label flips
+  // to whichever mode would be entered on next tap.
+  if (fabTheme) {
+    fabTheme.innerHTML = `${icon}<span>${label}</span>`;
+    fabTheme.setAttribute('aria-label', light ? 'Switch to dark theme' : 'Switch to light theme');
+  }
 }
 
 /** Toggle between light and dark mode, persisting the choice */

@@ -43,3 +43,30 @@ export const ICON_DISCONNECT = s(
 export const ICON_POWER = s(
   '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>'
 );
+
+// Keyboard icon — used on the FAB toggle to "Show keyboard" action.
+// 24-key layout matches the on-screen keyboard convention.
+export const ICON_KEYBOARD = s(
+  '<rect x="2" y="6" width="20" height="12" rx="2" ry="2"/><line x1="6" y1="10" x2="6.01" y2="10"/><line x1="10" y1="10" x2="10.01" y2="10"/><line x1="14" y1="10" x2="14.01" y2="10"/><line x1="18" y1="10" x2="18.01" y2="10"/><line x1="7" y1="14" x2="17" y2="14"/>'
+);
+
+// Keyboard-off icon — used on the "Hide keyboard" FAB action introduced
+// for G2 P7. Same as ICON_KEYBOARD with a diagonal slash overlay.
+export const ICON_KEYBOARD_OFF = s(
+  '<rect x="2" y="6" width="20" height="12" rx="2" ry="2"/><line x1="7" y1="14" x2="17" y2="14"/><line x1="2" y1="2" x2="22" y2="22"/>'
+);
+
+// Image-capture / screenshot icon.
+export const ICON_SCREENSHOT = s(
+  '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>'
+);
+
+// Globe / language icon for the FAB keyboard-layout select row.
+export const ICON_LAYOUT = s(
+  '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>'
+);
+
+// Vertical-scroll icon for the FAB scroll-speed select row.
+export const ICON_SCROLL = s(
+  '<polyline points="6 9 12 3 18 9"/><polyline points="6 15 12 21 18 15"/>'
+);

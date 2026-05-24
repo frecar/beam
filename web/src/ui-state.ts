@@ -82,9 +82,18 @@ export const mobileFab = document.getElementById('mobile-fab') as HTMLDivElement
 export const mobileFabToggle = document.getElementById('mobile-fab-toggle') as HTMLButtonElement;
 export const mobileFabMenu = document.getElementById('mobile-fab-menu') as HTMLDivElement;
 export const fabKeyboard = document.getElementById('fab-keyboard') as HTMLButtonElement;
+// G2 (#95 P7) — "Hide keyboard" action for blur()-ing the virtual input.
+export const fabKeyboardHide = document.getElementById('fab-keyboard-hide') as HTMLButtonElement;
 export const fabFullscreen = document.getElementById('fab-fullscreen') as HTMLButtonElement;
 export const fabScreenshot = document.getElementById('fab-screenshot') as HTMLButtonElement;
 export const fabDisconnect = document.getElementById('fab-disconnect') as HTMLButtonElement;
+// G2 (#95 P5) — select-row labels host icon spans hydrated at boot.
+export const fabLayoutSelectLabel = document.getElementById(
+  'fab-layout-select-label'
+) as HTMLSpanElement;
+export const fabScrollSpeedSelectLabel = document.getElementById(
+  'fab-scroll-speed-select-label'
+) as HTMLSpanElement;
 // Enriched FAB actions (#94 G1): mirror every status-bar control so phone
 // users (status bar hidden at <=480px) can still reach the full surface.
 export const fabUpload = document.getElementById('fab-upload') as HTMLButtonElement;

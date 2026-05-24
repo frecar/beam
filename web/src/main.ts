@@ -2,7 +2,22 @@ import { ClipboardBridge, type ClipboardHistoryEntry } from './clipboard';
 import { BeamConnection, type InputEvent } from './connection';
 import type { DownloadMessage } from './filetransfer';
 import { FileDownloader, FileUploader } from './filetransfer';
-import { ICON_CAPTURE, ICON_MUTE, ICON_UNMUTE } from './icons';
+import {
+  ICON_CAPTURE,
+  ICON_DISCONNECT,
+  ICON_DOWNLOAD,
+  ICON_FULLSCREEN,
+  ICON_KEYBOARD,
+  ICON_KEYBOARD_OFF,
+  ICON_LAYOUT,
+  ICON_MOON,
+  ICON_MUTE,
+  ICON_POWER,
+  ICON_SCREENSHOT,
+  ICON_SCROLL,
+  ICON_UNMUTE,
+  ICON_UPLOAD,
+} from './icons';
 import { InputHandler } from './input';
 import { clearRateLimitTimer, performLogin } from './login';
 import { initMonitoring } from './monitoring';
@@ -50,10 +65,13 @@ import {
   fabForwardKeys,
   fabFullscreen,
   fabKeyboard,
+  fabKeyboardHide,
   fabLayoutSelect,
+  fabLayoutSelectLabel,
   fabMute,
   fabScreenshot,
   fabScrollSpeedSelect,
+  fabScrollSpeedSelectLabel,
   fabTheme,
   fabUpload,
   fileDropOverlay,
@@ -790,6 +808,11 @@ function updateForwardKeysButton(enabled: boolean): void {
   btnForwardKeys.classList.toggle('active', enabled);
   btnForwardKeys.setAttribute('aria-pressed', String(enabled));
   btnForwardKeys.title = tooltip;
+  // G2 (#95 P5) — mirror state into the FAB partner so the mobile
+  // label reflects whether keys are currently forwarded.
+  fabForwardKeys.innerHTML = `${ICON_CAPTURE}<span>${label}</span>`;
+  fabForwardKeys.classList.toggle('active', enabled);
+  fabForwardKeys.setAttribute('aria-pressed', String(enabled));
 }
 
 /** Toggle forwarding of browser shortcuts to the remote desktop */
@@ -808,6 +831,10 @@ function updateMuteButton(muted: boolean): void {
   btnMute.innerHTML = `${icon}<span class="btn-label">${label}</span>`;
   btnMute.setAttribute('aria-label', `${label} audio`);
   localStorage.setItem(AUDIO_MUTED_KEY, muted ? 'true' : 'false');
+  // G2 (#95 P5) — mirror state into the FAB partner so the mobile
+  // label flips Unmute<->Mute as audio toggles.
+  fabMute.innerHTML = `${icon}<span>${label}</span>`;
+  fabMute.setAttribute('aria-label', `${label} audio`);
 }
 
 /** Toggle audio mute via the renderer */
@@ -1346,6 +1373,127 @@ function closeFab(): void {
   mobileFabToggle.classList.remove('open');
   mobileFabMenu.classList.remove('visible');
   mobileFabToggle.setAttribute('aria-expanded', 'false');
+  // Closing the menu also resets any pending 2-tap confirm state so
+  // the next open starts fresh (G2 #95 P5b).
+  resetAllConfirms();
+}
+
+/*
+ * G2 (#95 P5) — hydrate inline SVG icons into the FAB buttons +
+ * select rows from the central web/src/icons.ts module. Icons are a
+ * progressive enhancement: the static HTML labels remain readable
+ * if JS fails to run.
+ *
+ * Why hydrate at boot rather than write the SVGs into index.html?
+ * Three reasons:
+ *  - one source-of-truth for icon paths (icons.ts already exists for
+ *    the status bar's dynamic buttons mute/forward-keys/theme)
+ *  - keeps the HTML free of 14 inline SVG blobs that mostly belong
+ *    behind a feature flag (the FAB only renders on touch viewports)
+ *  - the Theme + Mute icons need to swap with state changes; doing
+ *    every hydration in TS keeps the swap logic colocated
+ *
+ * Called once on DOMContentLoaded. Subsequent state-driven swaps
+ * (theme toggle, mute toggle) flow through their existing
+ * `update*Button()` paths, which we extend below.
+ */
+function initFabIcons(): void {
+  const prepend = (el: HTMLElement, icon: string): void => {
+    // Set innerHTML directly: each icon string is a static, trusted
+    // SVG from icons.ts. The label text was rendered as the only
+    // child by the HTML parser; we re-render `icon + label-text`.
+    const label = el.textContent ?? '';
+    el.innerHTML = `${icon}<span>${label}</span>`;
+  };
+  prepend(fabKeyboard, ICON_KEYBOARD);
+  prepend(fabKeyboardHide, ICON_KEYBOARD_OFF);
+  prepend(fabUpload, ICON_UPLOAD);
+  prepend(fabDownload, ICON_DOWNLOAD);
+  prepend(fabFullscreen, ICON_FULLSCREEN);
+  prepend(fabScreenshot, ICON_SCREENSHOT);
+  // Theme + mute use state-dependent icons; defer to their existing
+  // update() functions for the initial render so we don't show a
+  // mismatched icon before the first state event.
+  prepend(fabTheme, ICON_MOON);
+  prepend(fabMute, ICON_MUTE);
+  prepend(fabForwardKeys, ICON_CAPTURE);
+  prepend(fabEndSession, ICON_POWER);
+  prepend(fabDisconnect, ICON_DISCONNECT);
+  // Select-row labels: prepend the icon before the existing text node.
+  fabLayoutSelectLabel.innerHTML = `${ICON_LAYOUT}<span>${fabLayoutSelectLabel.textContent ?? 'Layout'}</span>`;
+  fabScrollSpeedSelectLabel.innerHTML = `${ICON_SCROLL}<span>${fabScrollSpeedSelectLabel.textContent ?? 'Scroll'}</span>`;
+}
+// Hydrate immediately — the elements are already in the static HTML.
+initFabIcons();
+
+/*
+ * G2 (#95 P5b) — two-tap inline confirm for destructive FAB
+ * actions. First tap flips the button into a "confirming" state for
+ * 3 seconds: the label changes to "Tap again to <verb>" and the
+ * row gets a red outline. Second tap within the window fires the
+ * action; outside-tap, FAB close, or the 3-second timeout all
+ * reset the state.
+ *
+ * This is a thumb-slip guard, not a modal workflow. Disconnect is
+ * recoverable in seconds (just reconnect); End session releases the
+ * server-side session, slightly more destructive but still not
+ * mission-critical. A full modal would be ceremony out of
+ * proportion to the risk.
+ */
+const CONFIRM_TIMEOUT_MS = 3000;
+
+interface PendingConfirm {
+  btn: HTMLButtonElement;
+  originalLabel: string;
+  icon: string;
+  timer: ReturnType<typeof setTimeout>;
+  action: () => void;
+}
+
+const pendingConfirms = new Map<string, PendingConfirm>();
+
+function resetConfirm(btn: HTMLButtonElement): void {
+  const pending = pendingConfirms.get(btn.id);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  // Re-render the icon + original label.
+  btn.innerHTML = `${pending.icon}<span>${pending.originalLabel}</span>`;
+  btn.classList.remove('confirming');
+  pendingConfirms.delete(btn.id);
+}
+
+function resetAllConfirms(): void {
+  for (const id of Array.from(pendingConfirms.keys())) {
+    const btn = document.getElementById(id) as HTMLButtonElement | null;
+    if (btn) resetConfirm(btn);
+  }
+}
+
+function confirmAction(
+  btn: HTMLButtonElement,
+  icon: string,
+  originalLabel: string,
+  confirmLabel: string,
+  action: () => void
+): void {
+  const existing = pendingConfirms.get(btn.id);
+  if (existing) {
+    // Second tap within the window — fire the action.
+    resetConfirm(btn);
+    action();
+    return;
+  }
+  // First tap — arm the confirm.
+  btn.innerHTML = `${icon}<span>${confirmLabel}</span>`;
+  btn.classList.add('confirming');
+  const timer = setTimeout(() => resetConfirm(btn), CONFIRM_TIMEOUT_MS);
+  pendingConfirms.set(btn.id, {
+    btn,
+    originalLabel,
+    icon,
+    timer,
+    action,
+  });
 }
 
 mobileFabToggle.addEventListener('click', (e) => {
@@ -1358,6 +1506,15 @@ fabKeyboard.addEventListener('click', () => {
   mobileKeyboardInput.focus();
 });
 
+// G2 (#95 P7) — "Hide keyboard" gives users a clear escape path from
+// the soft keyboard without relying on Escape (mobile keyboards
+// often hide that key) or the OS-level dismiss gesture (varies
+// across iOS / Android / per-keyboard).
+fabKeyboardHide.addEventListener('click', () => {
+  closeFab();
+  mobileKeyboardInput.blur();
+});
+
 fabFullscreen.addEventListener('click', () => {
   closeFab();
   toggleFullscreen();
@@ -1368,9 +1525,16 @@ fabScreenshot.addEventListener('click', () => {
   captureScreenshot();
 });
 
+// G2 (#95 P5b) — fab-disconnect is the most likely thumb-slip target
+// (large red label at the bottom of a scrollable menu). Wrap it in
+// the 2-tap inline confirm to prevent accidental session teardown.
+// Note: closeFab is deferred to AFTER the action fires; if we close
+// on the first tap the user can't see the "tap again" feedback.
 fabDisconnect.addEventListener('click', () => {
-  closeFab();
-  handleDisconnect();
+  confirmAction(fabDisconnect, ICON_DISCONNECT, 'Disconnect', 'Tap again to disconnect', () => {
+    closeFab();
+    handleDisconnect();
+  });
 });
 
 // G1 (#94): enriched FAB actions mirror every status-bar control so
@@ -1408,9 +1572,14 @@ fabForwardKeys.addEventListener('click', () => {
   toggleForwardKeys();
 });
 
+// G2 (#95 P5b) — End session is more destructive than Disconnect (it
+// releases the server-side session, breaking reconnect). Same 2-tap
+// confirm so the user has a chance to back out.
 fabEndSession.addEventListener('click', () => {
-  closeFab();
-  handleEndSession();
+  confirmAction(fabEndSession, ICON_POWER, 'End session', 'Tap again to end session', () => {
+    closeFab();
+    handleEndSession();
+  });
 });
 
 // Close FAB menu when tapping outside

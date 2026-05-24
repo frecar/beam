@@ -2,7 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <!--
+      viewport-fit=cover (G2 #95 P4) lets the page extend under the
+      iPhone notch / home indicator AND enables env(safe-area-inset-*)
+      values inside the stylesheet. Without it, those env() values
+      always return 0 and the FAB visually overlaps the home indicator
+      by ~6-8px on iPhone 14/15/16 portrait.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <title>Beam Remote Desktop</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23888'/%3E%3C/svg%3E" />
     <style>
@@ -1333,8 +1340,12 @@
       #mobile-fab {
         display: none;
         position: fixed;
-        bottom: 20px;
-        right: 20px;
+        /* G2 (#95 P4) — env(safe-area-inset-bottom) keeps the FAB
+           above the iPhone home indicator. Falls back to 0 on
+           devices/browsers without a safe area, preserving the
+           original 20px gap on non-notched layouts. */
+        bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+        right: calc(20px + env(safe-area-inset-right, 0px));
         z-index: 800;
       }
 
@@ -1416,8 +1427,38 @@
         background: var(--bg-btn-hover);
       }
 
+      /*
+       * G2 (#95 P5) — inline SVG icons hydrated from web/src/icons.ts
+       * sit at the left side of each FAB action row. The icon is
+       * 18px to match the row's 14px label without overpowering it,
+       * and `flex: 0 0 auto` keeps long labels from squeezing it.
+       */
+      .fab-action svg {
+        flex: 0 0 auto;
+        width: 18px;
+        height: 18px;
+        opacity: 0.9;
+      }
+
       .fab-action-disconnect {
         color: #ff6b6b;
+      }
+
+      /*
+       * G2 (#95 P5b) — two-tap inline confirm for destructive FAB
+       * actions (Disconnect, End session). First tap flips
+       * `.confirming` and updates the label text; second tap within
+       * the 3-second timeout window triggers the action. Outside-tap,
+       * FAB close, and the timeout all reset the state.
+       *
+       * Styling reuses the existing `.fab-action-disconnect` red so
+       * the action stays visually destructive throughout — no jarring
+       * color change between idle and confirming.
+       */
+      .fab-action.confirming {
+        background: var(--bg-btn-hover);
+        outline: 2px solid #ff6b6b;
+        outline-offset: -2px;
       }
 
       /*
@@ -1449,6 +1490,18 @@
       .fab-action-select-label {
         color: var(--text-secondary);
         font-size: 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      /* G2 (#95 P5) — match the FAB-button icon styling on select-row
+         icons so they line up consistently. */
+      .fab-action-select-label svg {
+        flex: 0 0 auto;
+        width: 18px;
+        height: 18px;
+        opacity: 0.9;
       }
 
       .fab-action-select select {
@@ -1474,15 +1527,32 @@
         border-radius: 4px;
       }
 
-      /* Hidden input for virtual keyboard on mobile */
+      /*
+       * Hidden input for virtual keyboard on mobile.
+       *
+       * G2 (#95 P6) — `left: -9999px` caused iOS Safari to scroll
+       * horizontally trying to bring the off-screen element into view
+       * when JS calls .focus(). The visible page would jiggle 20-50px
+       * to the left on every Keyboard FAB tap. Anchoring the input at
+       * bottom-left at 1x1 with opacity:0 + pointer-events:none keeps
+       * the input invisible AND in-viewport so Safari's scroll-into-
+       * view is a no-op. font-size: 16px stays — that's the iOS anti-
+       * autozoom heuristic and is unrelated to positioning.
+       */
       #mobile-keyboard-input {
         position: fixed;
-        left: -9999px;
-        top: 0;
+        left: 0;
+        bottom: 0;
         width: 1px;
         height: 1px;
         opacity: 0;
-        font-size: 16px; /* prevent iOS zoom on focus */
+        pointer-events: none;
+        font-size: 16px;
+        /* Don't let the invisible input render any chrome that might
+           briefly flicker on focus across older WebKit builds. */
+        border: 0;
+        padding: 0;
+        background: transparent;
       }
 
       /* ── Admin Sessions Panel (F7) ────────────────────── */
@@ -1724,9 +1794,12 @@
           display: block;
         }
 
-        /* Toast container: above FAB on mobile */
+        /* Toast container: above FAB on mobile. The FAB itself uses
+           safe-area-inset (G2 #95 P4), so toasts add the inset on top
+           of the FAB height + gap to stay clear of both the FAB and
+           the home indicator. */
         #toast-container {
-          bottom: 88px;
+          bottom: calc(88px + env(safe-area-inset-bottom, 0px));
           right: 12px;
           left: 12px;
         }
@@ -2107,13 +2180,28 @@
     -->
     <div id="mobile-fab" aria-label="Mobile toolbar">
       <div id="mobile-fab-menu" role="menu">
-        <button class="fab-action" id="fab-keyboard" aria-label="Toggle on-screen keyboard">Keyboard</button>
+        <!--
+          Each `.fab-action` label is a plain text node here; an
+          `initFabIcons()` call in main.ts prepends the matching SVG
+          from web/src/icons.ts on DOMContentLoaded so we keep one
+          source-of-truth for icon paths instead of duplicating SVG
+          strings across the inline HTML. Initial render still works
+          without JS (text-only label) — icons are progressive
+          enhancement.
+
+          G2 (#95):
+          - P5: inline SVG icons hydrated from icons.ts
+          - P5b: destructive actions get 2-tap inline confirm
+          - P7: new "Hide keyboard" action (fab-keyboard-hide)
+        -->
+        <button class="fab-action" id="fab-keyboard" aria-label="Show on-screen keyboard">Keyboard</button>
+        <button class="fab-action" id="fab-keyboard-hide" aria-label="Hide on-screen keyboard">Hide keyboard</button>
         <div class="fab-action-select" role="menuitem">
-          <span class="fab-action-select-label">Layout</span>
+          <span class="fab-action-select-label" id="fab-layout-select-label">Layout</span>
           <select id="fab-layout-select" aria-label="Keyboard layout"></select>
         </div>
         <div class="fab-action-select" role="menuitem">
-          <span class="fab-action-select-label">Scroll</span>
+          <span class="fab-action-select-label" id="fab-scroll-speed-select-label">Scroll</span>
           <select id="fab-scroll-speed-select" aria-label="Scroll speed">
             <option value="0.5">0.5x</option>
             <option value="1" selected>1x</option>
