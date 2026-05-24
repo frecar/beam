@@ -338,13 +338,14 @@ function renderAdminSessions(sessions: AdminSession[]): void {
       const idle = formatRelativeTime(s.last_activity);
       const isSelf = s.id === currentSessionId;
       const escapedId = s.id.replace(/"/g, '&quot;');
+      const escapedUsername = s.username.replace(/"/g, '&quot;');
       return `<tr>
       <td title="${escapedId}">${shortId}${isSelf ? ' *' : ''}</td>
       <td>${s.username}</td>
       <td>:${s.display}</td>
       <td>${created}</td>
       <td>${idle}</td>
-      <td><button class="admin-terminate-btn" data-session-id="${escapedId}"${isSelf ? ' title="This is your session"' : ''}>Terminate</button></td>
+      <td><button class="admin-terminate-btn" data-session-id="${escapedId}" data-session-username="${escapedUsername}"${isSelf ? ' title="This is your session"' : ''}>Terminate</button></td>
     </tr>`;
     })
     .join('');
@@ -352,19 +353,26 @@ function renderAdminSessions(sessions: AdminSession[]): void {
   // Wire terminate buttons
   adminSessionsTbody.querySelectorAll('.admin-terminate-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const sessionId = (btn as HTMLElement).dataset.sessionId;
+      const el = btn as HTMLElement;
+      const sessionId = el.dataset.sessionId;
+      const username = el.dataset.sessionUsername ?? '';
       if (sessionId) {
-        terminateAdminSession(sessionId, btn as HTMLButtonElement);
+        terminateAdminSession(sessionId, username, btn as HTMLButtonElement);
       }
     });
   });
 }
 
-async function terminateAdminSession(sessionId: string, btn: HTMLButtonElement): Promise<void> {
+async function terminateAdminSession(
+  sessionId: string,
+  username: string,
+  btn: HTMLButtonElement
+): Promise<void> {
   const isSelf = sessionId === currentSessionId;
+  const userLabel = username ? `"${username}"` : 'this session';
   const msg = isSelf
-    ? 'This is YOUR active session. Terminate it?'
-    : 'Terminate this session? The user will be disconnected.';
+    ? `This is YOUR active session (${userLabel}). Terminate it?`
+    : `Terminate session for ${userLabel}? The user will be disconnected.`;
   if (!confirm(msg)) return;
 
   btn.disabled = true;

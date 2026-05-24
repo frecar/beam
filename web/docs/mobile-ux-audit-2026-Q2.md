@@ -565,17 +565,17 @@ Both buttons get `min-height: 48px` and `font-size: 16px` on mobile. Touch targe
 
 ## Suggested sub-issue groupings (for follow-up PRs, not in this branch)
 
-| Group | Findings | Rough effort |
-|---|---|---|
-| G1: Restore mobile controls without hiding status bar | B1, B2, P19 | M |
-| G2: FAB enrichment (icons, missing actions, safe-area, dismiss) | P4, P5, P6, P7, P14 | M |
-| G3: Touch-target hygiene pass (44px audit) | P2, P9, P10, P12, P18 | S |
-| G4: Login form polish (form-select zoom, enterkeyhint, autocapitalize) | P1, P3, M2, M3 | S |
-| G5: Panels: SIP, CHP, Admin mobile layouts | P8, P10, P11 (admin) | M |
-| G6: Touch-mode for canvas (pinch / two-finger scroll) | P17 | L |
-| G7: Idle warning dismiss + touch wording | P15 | S |
-| G8: Replace `window.prompt()` download with picker | B3 | M |
-| G9: Help overlay surfaced through FAB | P13, P16 | S |
+| Group | Findings | Rough effort | Status |
+|---|---|---|---|
+| G1: Restore mobile controls without hiding status bar | B1, B2, P19 | M | B2 shipped (PR #91); B1+P19 open |
+| G2: FAB enrichment (icons, missing actions, safe-area, dismiss) | P4, P5, P6, P7, P14 | M | open |
+| G3: Touch-target hygiene pass (44px audit) | P2, P9, P10, P12, P18 | S | shipped — `--touch-target-min: 44px` CSS variable + per-control mobile overrides |
+| G4: Login form polish (form-select zoom, enterkeyhint, autocapitalize) | P1, P3, M2, M3 | S | open |
+| G5: Panels: SIP, CHP, Admin mobile layouts | P8, P10, P11 (admin) | M | open |
+| G6: Touch-mode for canvas (pinch / two-finger scroll) | P17 | L | open |
+| G7: Idle warning dismiss + touch wording | P15 | S | open |
+| G8: Replace `window.prompt()` download with picker | B3 | M | open |
+| G9: Help overlay surfaced through FAB | P13, P16 | S | open |
 
 Each group should be its own GitHub sub-issue with `## Relationships → Parent: #87` via the native sub-issue API, severity calibrated to the highest finding in the group (G1 + G6 + G8 = blocker -> severity:high; rest medium/low).
 
