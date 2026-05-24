@@ -1368,7 +1368,19 @@
         right: 0;
         flex-direction: column;
         gap: 8px;
-        align-items: flex-end;
+        align-items: stretch;
+        /* The enriched G1 menu now hosts up to ~13 controls; cap the
+           visible height and scroll the overflow so the menu never
+           exceeds the viewport. `dvh` accounts for the iOS Safari
+           URL-bar collapse so the threshold stays stable as the bar
+           hides/reappears. */
+        max-height: min(70vh, calc(100dvh - 100px));
+        overflow-y: auto;
+        overflow-x: hidden;
+        /* Add padding so the box-shadow on row 1 has room to render
+           without being clipped by overflow:auto. */
+        padding: 4px;
+        margin: -4px;
       }
 
       #mobile-fab-menu.visible {
@@ -1389,10 +1401,14 @@
         cursor: pointer;
         white-space: nowrap;
         box-shadow: 0 2px 8px var(--shadow-card);
-        min-height: 44px;
+        min-height: var(--touch-target-min);
         -webkit-tap-highlight-color: transparent;
         touch-action: manipulation;
         transition: background 0.15s;
+        /* Right-align the row contents so labels read naturally above
+           the FAB. The menu is `align-items: stretch` so rows can host
+           selects without collapsing on narrow phones. */
+        justify-content: flex-end;
       }
 
       .fab-action:hover,
@@ -1402,6 +1418,60 @@
 
       .fab-action-disconnect {
         color: #ff6b6b;
+      }
+
+      /*
+       * Selects-inside-FAB rows: the FAB menu hosts native <select>
+       * elements (keyboard layout + scroll speed) so the OS picker
+       * remains the interaction surface — fastest path, already
+       * accessible. The wrapping `.fab-action-select` row carries
+       * the touch target + label; the inner <select> is sized to
+       * cover the row so the native picker opens reliably.
+       */
+      .fab-action-select {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 16px;
+        background: var(--bg-card-solid);
+        border: 1px solid var(--border-color);
+        border-radius: 24px;
+        color: var(--text-primary);
+        font-size: 14px;
+        font-family: inherit;
+        white-space: nowrap;
+        box-shadow: 0 2px 8px var(--shadow-card);
+        min-height: var(--touch-target-min);
+      }
+
+      .fab-action-select-label {
+        color: var(--text-secondary);
+        font-size: 12px;
+      }
+
+      .fab-action-select select {
+        appearance: none;
+        -webkit-appearance: none;
+        background: transparent;
+        border: none;
+        color: var(--text-primary);
+        font: inherit;
+        font-size: 14px;
+        padding: 0;
+        margin: 0;
+        cursor: pointer;
+        text-align: right;
+        /* Don't fight the native dropdown caret; just supply our own
+           right-side padding via the wrapper. */
+        max-width: 60%;
+      }
+
+      .fab-action-select select:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+        border-radius: 4px;
       }
 
       /* Hidden input for virtual keyboard on mobile */
@@ -1548,14 +1618,19 @@
       }
 
       /*
-       * ── Responsive: Narrow desktop / tablet landscape (769-1100px) ──
+       * ── Responsive: Narrow desktop / tablet (481-1100px) ────────
        *
        * The status bar packs 11 controls + 2 selects + a 4-stat group into
        * `.status-right`. At full desktop widths there is room for icon
        * + label per button; below ~1100px the labels push "End Session" off
-       * the right edge with no flex-wrap, clipping controls. Mobile hides
-       * the bar entirely at <=768px (a separate problem, B1), so this
-       * range covers the gap.
+       * the right edge with no flex-wrap, clipping controls.
+       *
+       * Originally this rule fired only at 769-1100px (B2 fix). For G1
+       * (#94) it now extends down to 481px so tablet portrait (iPad =
+       * 768px, Pixel-tablet portrait, small tablets) gets the same
+       * icon-only treatment instead of having the entire status bar
+       * hidden. Phones (<=480px) still hide the bar entirely and
+       * surface controls through the enriched mobile FAB.
        *
        * Fix: hide `.btn-label` spans so buttons become icon-only. Every
        * `.status-btn` already carries a descriptive `aria-label`, so
@@ -1563,7 +1638,7 @@
        * `title` tooltip on hover. Selects keep their text — they have no
        * icon and the labels ("US", "Scroll 1x") are themselves compact.
        */
-      @media (min-width: 769px) and (max-width: 1100px) {
+      @media (min-width: 481px) and (max-width: 1100px) {
         #status-bar .btn-label {
           display: none;
         }
@@ -1576,6 +1651,12 @@
            — the aria-label already describes it. */
         #status-bar #scroll-speed-select {
           font-size: 10px;
+        }
+        /* Hide the version readout on tablet/narrow desktop — it eats
+           horizontal space and is power-user trivia (still reachable via
+           SIP). Keeping it for >1100px desktop where space is fine. */
+        #status-bar .status-version {
+          display: none;
         }
       }
 
@@ -1635,17 +1716,10 @@
           justify-content: center;
         }
 
-        /* Desktop view: full height on mobile (no status bar) */
-        #desktop-view {
-          height: 100vh;
-        }
-
-        /* Hide the desktop status bar on mobile — FAB replaces it */
-        #status-bar.visible {
-          display: none;
-        }
-
-        /* Show mobile FAB when connected */
+        /* Show mobile FAB when connected. The FAB stays visible on
+           tablet + phone — on tablet (481-768px) it co-exists with the
+           icon-only status bar; on phone (<=480px) it replaces the bar
+           entirely (see narrower media-query below). */
         #mobile-fab.visible {
           display: block;
         }
@@ -1755,9 +1829,43 @@
         }
       }
 
+      /*
+       * ── Responsive: Phone (<=480px) ────────────────────────────
+       *
+       * G1 (#94) split: tablet (481-768px) keeps the icon-only status
+       * bar; phone (<=480px) hides it entirely and surfaces every
+       * status-bar control through the enriched mobile FAB menu. The
+       * old `max-width: 768px` block previously did this for both
+       * form factors, but a 13-control icon-only bar fits on an iPad
+       * portrait while a 360px phone cannot host even a stripped row
+       * without cramping.
+       *
+       * P19 cascade: SIP + CHP `bottom: 28px` reserves space for the
+       * status bar. With the bar hidden at this breakpoint, reset
+       * both to `bottom: 0` so the panels reach the viewport bottom.
+       */
       @media (max-width: 480px) {
         .login-card {
           padding: 24px 20px;
+        }
+
+        /* Phone: hide the desktop status bar — enriched FAB replaces
+           every reachable control (see #mobile-fab-menu HTML). */
+        #status-bar.visible {
+          display: none;
+        }
+
+        /* Desktop view: full height on phone (no status bar visible) */
+        #desktop-view {
+          height: 100vh;
+        }
+
+        /* P19 cascade — the SIP and CHP panels reserve 28px at the
+           bottom for the (now hidden) status bar. Drop to 0 so the
+           panels extend all the way to the viewport edge. */
+        #session-info-panel,
+        #clipboard-history-panel {
+          bottom: 0;
         }
       }
     </style>
@@ -1981,12 +2089,46 @@
     <!-- Hidden input for mobile virtual keyboard -->
     <input type="text" id="mobile-keyboard-input" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Virtual keyboard input" />
 
-    <!-- Mobile Floating Action Button -->
+    <!--
+      Mobile Floating Action Button.
+
+      Audit G1 (#94) expanded the menu from 4 to 12 actions so phone
+      users (status bar hidden at <=480px) can still reach every
+      desktop control. Order: discovery + soft-state (keyboard,
+      layout, scroll), file transfer (upload, download), display
+      (fullscreen, screenshot, theme, mute), capture, session
+      teardown (end-session, disconnect) — destructive actions kept
+      at the bottom so the thumb doesn't graze them while scrolling
+      the menu.
+
+      `.fab-action-select` rows host native <select> elements
+      (keyboard layout, scroll speed) — the OS-native picker is
+      faster + already accessible.
+    -->
     <div id="mobile-fab" aria-label="Mobile toolbar">
-      <div id="mobile-fab-menu">
-        <button class="fab-action" id="fab-keyboard" aria-label="Toggle keyboard">Keyboard</button>
+      <div id="mobile-fab-menu" role="menu">
+        <button class="fab-action" id="fab-keyboard" aria-label="Toggle on-screen keyboard">Keyboard</button>
+        <div class="fab-action-select" role="menuitem">
+          <span class="fab-action-select-label">Layout</span>
+          <select id="fab-layout-select" aria-label="Keyboard layout"></select>
+        </div>
+        <div class="fab-action-select" role="menuitem">
+          <span class="fab-action-select-label">Scroll</span>
+          <select id="fab-scroll-speed-select" aria-label="Scroll speed">
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="2">2x</option>
+            <option value="3">3x</option>
+          </select>
+        </div>
+        <button class="fab-action" id="fab-upload" aria-label="Upload file to remote desktop">Upload</button>
+        <button class="fab-action" id="fab-download" aria-label="Download file from remote desktop">Download</button>
         <button class="fab-action" id="fab-fullscreen" aria-label="Toggle fullscreen">Fullscreen</button>
         <button class="fab-action" id="fab-screenshot" aria-label="Take screenshot">Screenshot</button>
+        <button class="fab-action" id="fab-theme" aria-label="Toggle color theme">Theme</button>
+        <button class="fab-action" id="fab-mute" aria-label="Toggle audio mute">Mute</button>
+        <button class="fab-action" id="fab-forward-keys" aria-label="Toggle browser shortcut capture">Capture keys</button>
+        <button class="fab-action fab-action-disconnect" id="fab-end-session" aria-label="End remote session">End session</button>
         <button class="fab-action fab-action-disconnect" id="fab-disconnect" aria-label="Disconnect">Disconnect</button>
       </div>
       <button id="mobile-fab-toggle" aria-label="Open toolbar" aria-expanded="false">+</button>
