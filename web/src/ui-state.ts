@@ -52,6 +52,9 @@ export const reconnectDisconnectBtn = document.getElementById(
 ) as HTMLButtonElement;
 export const reconnectDesc = document.getElementById('reconnect-desc') as HTMLParagraphElement;
 export const idleWarning = document.getElementById('idle-warning') as HTMLDivElement;
+export const idleWarningDismiss = document.getElementById(
+  'idle-warning-dismiss'
+) as HTMLButtonElement;
 // Clipboard history panel
 export const clipboardHistoryPanel = document.getElementById(
   'clipboard-history-panel'

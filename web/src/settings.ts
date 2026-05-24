@@ -174,13 +174,38 @@ export function formatCountdown(secs: number): string {
   return `${s}s`;
 }
 
+/**
+ * Detect whether the primary pointing device is "coarse" (touch / stylus).
+ * Used to swap idle-warning copy from "move mouse or press a key" to "tap
+ * anywhere". Wrapped in a function so jsdom-based tests can pass a stub.
+ */
+export function isCoarsePointer(): boolean {
+  if (typeof window === 'undefined' || !window.matchMedia) return false;
+  return window.matchMedia('(pointer: coarse)').matches;
+}
+
+export function buildIdleWarningMessage(
+  remainingSecs: number | undefined,
+  coarse: boolean
+): string {
+  const cta = coarse
+    ? 'Tap anywhere to stay connected.'
+    : 'Move mouse or press a key to stay connected.';
+  if (remainingSecs !== undefined && remainingSecs > 0) {
+    return `Session expires in ${formatCountdown(remainingSecs)}. ${cta}`;
+  }
+  return `Session will expire due to inactivity. ${cta}`;
+}
+
 export function showIdleWarning(idleWarningVisible: boolean, remainingSecs?: number): boolean {
   idleWarning.classList.add('visible');
-  if (remainingSecs !== undefined && remainingSecs > 0) {
-    idleWarning.textContent = `Session expires in ${formatCountdown(remainingSecs)}. Move mouse or press a key to stay connected.`;
+  const textNode = idleWarning.querySelector<HTMLElement>('.idle-warning-text');
+  const message = buildIdleWarningMessage(remainingSecs, isCoarsePointer());
+  if (textNode) {
+    textNode.textContent = message;
   } else {
-    idleWarning.textContent =
-      'Session will expire due to inactivity. Move mouse or press a key to stay connected.';
+    // Backwards-compat: older DOM without the structured text node.
+    idleWarning.textContent = message;
   }
   if (!idleWarningVisible) {
     console.warn('Idle timeout warning: session will expire soon due to inactivity');
@@ -192,6 +217,20 @@ export function hideIdleWarning(idleWarningVisible: boolean): boolean {
   if (!idleWarningVisible) return idleWarningVisible;
   idleWarning.classList.remove('visible');
   return false;
+}
+
+/**
+ * Hide the warning banner WITHOUT counting as user activity.
+ *
+ * Distinct from `hideIdleWarning` only in intent: this is wired to the
+ * dismiss button so the user can acknowledge the message without
+ * accidentally resetting their idle timer. Callers must NOT update
+ * `lastActivity` after invoking this.
+ *
+ * Returns the new `idleWarningVisible` state (always `false`).
+ */
+export function dismissIdleWarning(idleWarningVisible: boolean): boolean {
+  return hideIdleWarning(idleWarningVisible);
 }
 
 /** Reset the latency stats display to defaults */
