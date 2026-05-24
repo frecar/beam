@@ -346,3 +346,70 @@ describe('index.html — idle-warning dismiss button (#87 G7)', () => {
     expect(ruleMatch).not.toBeNull();
   });
 });
+
+describe('index.html — help overlay through FAB (#87 G9)', () => {
+  /*
+   * G9 (#101) surfaces the help overlay (was F1-only) and perf
+   * overlay (was F9-only) through the mobile FAB so touch users —
+   * who have neither F-keys nor an unblocked Esc — can access both.
+   */
+
+  it('renders the new FAB Help + Stats actions', () => {
+    expect(indexHtml).toMatch(/id="fab-help"/);
+    expect(indexHtml).toMatch(/id="fab-stats"/);
+    expect(indexHtml).toMatch(/<button[^>]*id="fab-help"[^>]*aria-label="Show help overlay"/);
+    expect(indexHtml).toMatch(
+      /<button[^>]*id="fab-stats"[^>]*aria-label="Toggle performance overlay"/
+    );
+  });
+
+  it('keeps Help + Stats above the destructive End-session / Disconnect block', () => {
+    // The diagnostic actions are informational; destructive actions
+    // live at the bottom (per the existing G1 layout convention).
+    const helpIdx = indexHtml.indexOf('id="fab-help"');
+    const statsIdx = indexHtml.indexOf('id="fab-stats"');
+    const endSessionIdx = indexHtml.indexOf('id="fab-end-session"');
+    const disconnectIdx = indexHtml.indexOf('id="fab-disconnect"');
+    expect(helpIdx).toBeGreaterThan(0);
+    expect(statsIdx).toBeGreaterThan(helpIdx);
+    expect(endSessionIdx).toBeGreaterThan(statsIdx);
+    expect(disconnectIdx).toBeGreaterThan(endSessionIdx);
+  });
+
+  it('renders the explicit Close button on the help card', () => {
+    // Mobile users cannot press Esc (the input layer captures it for
+    // the remote session) so the modal MUST carry a visible close
+    // affordance. The button is aria-labelled and sized to the WCAG
+    // touch-target floor (44x44).
+    expect(indexHtml).toMatch(/id="help-close"/);
+    expect(indexHtml).toMatch(/<button[^>]*id="help-close"[^>]*aria-label="Close help"/);
+    expect(indexHtml).toMatch(
+      /#help-overlay\s+\.help-card\s+\.help-close\s*\{[\s\S]*?min-width:\s*var\(--touch-target-min\)/
+    );
+    expect(indexHtml).toMatch(
+      /#help-overlay\s+\.help-card\s+\.help-close\s*\{[\s\S]*?min-height:\s*var\(--touch-target-min\)/
+    );
+  });
+
+  it('splits the help-card body into keyboard + touch content blocks', () => {
+    // The kbd-shortcut list lives in .help-keyboard (default); the
+    // tap-action list lives in .help-touch (shown at pointer: coarse).
+    expect(indexHtml).toMatch(/<div\s+class="help-keyboard">/);
+    expect(indexHtml).toMatch(/<div\s+class="help-touch">/);
+  });
+
+  it('swaps help-card content blocks based on pointer: coarse', () => {
+    // The default rule hides .help-touch; the coarse-pointer block
+    // flips visibility to show .help-touch and hide .help-keyboard.
+    expect(indexHtml).toMatch(/#help-overlay\s+\.help-card\s+\.help-touch\s*\{\s*display:\s*none/);
+    expect(indexHtml).toMatch(
+      /@media\s*\(pointer:\s*coarse\)\s*\{[\s\S]*?\.help-keyboard\s*\{\s*display:\s*none[\s\S]*?\.help-touch\s*\{\s*display:\s*block/
+    );
+  });
+
+  it('preserves the role=dialog + aria-modal contract on the overlay', () => {
+    // Modal semantics must survive the body rewrite — screen readers
+    // rely on these to trap focus + announce the dialog.
+    expect(indexHtml).toMatch(/<div\s+id="help-overlay"[^>]*role="dialog"[^>]*aria-modal="true"/);
+  });
+});

@@ -70,3 +70,23 @@ export const ICON_LAYOUT = s(
 export const ICON_SCROLL = s(
   '<polyline points="6 9 12 3 18 9"/><polyline points="6 15 12 21 18 15"/>'
 );
+
+// Help icon (circle + question mark) — used on the FAB "Help" action
+// introduced for G9 (#101) so touch users can reach the help overlay
+// without an F-key.
+export const ICON_HELP = s(
+  '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>'
+);
+
+// Stats / activity icon — used on the FAB "Stats" action introduced
+// for G9 (#101) so touch users can toggle the performance overlay
+// without F9.
+export const ICON_STATS = s('<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>');
+
+// Close (X) icon — used on the help-overlay explicit close button
+// introduced for G9 (#101). Mobile users cannot press Esc (the input
+// layer captures Esc for the remote session), so the modal needs a
+// visible close affordance.
+export const ICON_CLOSE = s(
+  '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'
+);

@@ -103,6 +103,15 @@ export const fabTheme = document.getElementById('fab-theme') as HTMLButtonElemen
 export const fabMute = document.getElementById('fab-mute') as HTMLButtonElement;
 export const fabForwardKeys = document.getElementById('fab-forward-keys') as HTMLButtonElement;
 export const fabEndSession = document.getElementById('fab-end-session') as HTMLButtonElement;
+// G9 (#101) — surface help + perf overlays on touch viewports where
+// F-keys do not exist. fabHelp toggles helpOverlay; fabStats toggles
+// perfOverlay.
+export const fabHelp = document.getElementById('fab-help') as HTMLButtonElement;
+export const fabStats = document.getElementById('fab-stats') as HTMLButtonElement;
+// Explicit close button on the help-card. Esc is captured by the
+// mobile-keyboard-input for the remote session, so the overlay needs
+// a visible close affordance.
+export const helpClose = document.getElementById('help-close') as HTMLButtonElement;
 export const fabLayoutSelect = document.getElementById('fab-layout-select') as HTMLSelectElement;
 export const fabScrollSpeedSelect = document.getElementById(
   'fab-scroll-speed-select'
