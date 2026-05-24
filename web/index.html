@@ -1603,6 +1603,14 @@
           font-size: 16px; /* prevent iOS zoom */
         }
 
+        /* The same iOS auto-zoom rule applies to <select> elements —
+           any form control below 16px focuses-with-zoom on iOS and
+           doesn't zoom back out. Keep the select consistent with the
+           input override. (#87 P1) */
+        .form-select {
+          font-size: 16px;
+        }
+
         button#connect-btn {
           padding: 14px;
           font-size: 16px;
@@ -1773,6 +1781,10 @@
                 name="username"
                 placeholder=""
                 autocomplete="username"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+                enterkeyhint="next"
                 required
                 autofocus
               />
@@ -1786,6 +1798,7 @@
                   name="password"
                   placeholder=""
                   autocomplete="current-password"
+                  enterkeyhint="go"
                   required
                 />
                 <button type="button" class="password-toggle" id="password-toggle" aria-label="Show password">Show</button>
@@ -1795,10 +1808,10 @@
               <label for="session-timeout">Session timeout</label>
               <select id="session-timeout" class="form-select">
                 <option value="">Default</option>
-                <option value="3600">1 hour</option>
-                <option value="14400">4 hours</option>
-                <option value="28800">8 hours</option>
-                <option value="86400">24 hours</option>
+                <option value="3600">1 Hour</option>
+                <option value="14400">4 Hours</option>
+                <option value="28800">8 Hours</option>
+                <option value="86400">24 Hours</option>
               </select>
             </div>
             <button type="submit" id="connect-btn">Sign in</button>
