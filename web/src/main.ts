@@ -236,7 +236,9 @@ function renderClipboardHistory(): void {
     return;
   }
 
-  // Render newest-first
+  // Render newest-first. Both the row and the visible Copy button
+  // carry `data-chp-idx`, so a delegated handler can copy from
+  // either click target without re-resolving the entry.
   const html = history
     .slice()
     .reverse()
@@ -250,7 +252,7 @@ function renderClipboardHistory(): void {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
-      return `<div class="chp-entry">
+      return `<div class="chp-entry" data-chp-idx="${idx}" role="button" tabindex="0" aria-label="Copy clipboard entry to clipboard">
       <div class="chp-entry-header">
         <div class="chp-entry-meta">
           <span class="chp-direction ${dirClass}">${arrow}</span>
@@ -266,17 +268,38 @@ function renderClipboardHistory(): void {
 
   chpList.innerHTML = html;
 
-  // Wire copy buttons
+  // G5 (#97 P10) \u2014 single shared copy handler used by the visible
+  // Copy button AND the row-level click. Thumb-misses on a 56-pixel
+  // button no longer lose the copy interaction on touch viewports.
+  const reversedHistory = history.slice().reverse();
+  const copyByIndex = (idxStr: string | undefined): void => {
+    const idx = parseInt(idxStr ?? '0', 10);
+    const entry = reversedHistory[idx];
+    if (!entry) return;
+    navigator.clipboard.writeText(entry.text).then(
+      () => ui?.showNotification('Copied to clipboard', 'success', 1500),
+      () => ui?.showNotification('Failed to copy', 'error')
+    );
+  };
   chpList.querySelectorAll('.chp-copy').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const idx = parseInt((btn as HTMLElement).dataset.chpIdx || '0', 10);
-      const reversedHistory = history.slice().reverse();
-      const entry = reversedHistory[idx];
-      if (entry) {
-        navigator.clipboard.writeText(entry.text).then(
-          () => ui?.showNotification('Copied to clipboard', 'success', 1500),
-          () => ui?.showNotification('Failed to copy', 'error')
-        );
+    btn.addEventListener('click', (e) => {
+      // Prevent the click from bubbling up to the row-level handler;
+      // otherwise tapping the button would fire copy twice (button
+      // handler + row handler).
+      e.stopPropagation();
+      copyByIndex((btn as HTMLElement).dataset.chpIdx);
+    });
+  });
+  chpList.querySelectorAll('.chp-entry').forEach((entry) => {
+    entry.addEventListener('click', () => {
+      copyByIndex((entry as HTMLElement).dataset.chpIdx);
+    });
+    // Keyboard accessibility: Enter/Space activate the row-as-button.
+    entry.addEventListener('keydown', (e) => {
+      const ke = e as KeyboardEvent;
+      if (ke.key === 'Enter' || ke.key === ' ') {
+        ke.preventDefault();
+        copyByIndex((entry as HTMLElement).dataset.chpIdx);
       }
     });
   });
@@ -359,6 +382,10 @@ function renderAdminSessions(sessions: AdminSession[]): void {
     return;
   }
 
+  // G5 (#97 P11) — `data-label` on each <td> drives the CSS-only
+  // table-to-card reflow on mobile (`td::before { content: attr(
+  // data-label); }`). The same markup renders as a desktop table at
+  // widths >768px so we don't need a separate render path.
   adminSessionsTbody.innerHTML = sessions
     .map((s) => {
       const shortId = s.id.substring(0, 8);
@@ -368,12 +395,12 @@ function renderAdminSessions(sessions: AdminSession[]): void {
       const escapedId = s.id.replace(/"/g, '&quot;');
       const escapedUsername = s.username.replace(/"/g, '&quot;');
       return `<tr>
-      <td title="${escapedId}">${shortId}${isSelf ? ' *' : ''}</td>
-      <td>${s.username}</td>
-      <td>:${s.display}</td>
-      <td>${created}</td>
-      <td>${idle}</td>
-      <td><button class="admin-terminate-btn" data-session-id="${escapedId}" data-session-username="${escapedUsername}"${isSelf ? ' title="This is your session"' : ''}>Terminate</button></td>
+      <td data-label="Session" title="${escapedId}">${shortId}${isSelf ? ' *' : ''}</td>
+      <td data-label="User">${s.username}</td>
+      <td data-label="Display">:${s.display}</td>
+      <td data-label="Created">${created}</td>
+      <td data-label="Idle">${idle}</td>
+      <td data-label="Action"><button class="admin-terminate-btn" data-session-id="${escapedId}" data-session-username="${escapedUsername}"${isSelf ? ' title="This is your session"' : ''}>Terminate</button></td>
     </tr>`;
     })
     .join('');
