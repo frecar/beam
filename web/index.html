@@ -8,6 +8,10 @@
     <style>
       /* ── Theme Variables ─────────────────────────────────── */
       :root {
+        /* WCAG 2.5.5 target-size minimum for mobile (44x44 CSS px); applied
+           via @media (max-width: 768px) overrides to avoid distorting the
+           dense desktop layout. */
+        --touch-target-min: 44px;
         --bg-primary: #1a1a2e;
         --bg-card: rgba(255, 255, 255, 0.03);
         --bg-card-solid: rgba(26, 26, 46, 0.95);
@@ -1647,6 +1651,65 @@
           min-width: auto;
           width: calc(100% - 32px);
           max-width: 340px;
+        }
+
+        /*
+         * ── Touch-target hygiene (WCAG 2.5.5, 44x44 minimum) ────
+         *
+         * The desktop layout deliberately packs these controls into
+         * tight chrome. On touch viewports we expand each one to the
+         * 44x44 floor using `inline-flex` centering so the visible
+         * glyph stays in place while the hit-test area grows.
+         *
+         * Scope here: panel close/clear/copy buttons, the password
+         * "Show" toggle, the admin terminate button, and the toast
+         * close button.
+         */
+        .password-toggle,
+        .sip-close,
+        .chp-close,
+        .chp-clear,
+        .chp-copy,
+        .admin-terminate-btn,
+        .toast-close {
+          min-width: var(--touch-target-min);
+          min-height: var(--touch-target-min);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        /* The password toggle is absolute-positioned inside an
+           input wrapper; widening the hit area means the input must
+           reserve more right-padding so typed text never sits under
+           the button glyph. */
+        .password-wrapper input {
+          padding-right: calc(var(--touch-target-min) + 8px);
+        }
+        .password-toggle {
+          right: 4px;
+          /* Keep the text glyph compact while the hit area expands. */
+          padding: 0 8px;
+        }
+
+        /* The copy button is one of several controls inside a
+           clipboard-history row; default `inline-flex` would keep
+           it on the row but the row's flex parent benefits from a
+           shrink: 0 so the text preview doesn't squeeze the button. */
+        .chp-copy {
+          flex-shrink: 0;
+          /* Bump the legibility font-size on mobile so the copy
+             label reads cleanly inside the 44px box. */
+          font-size: 12px;
+          padding: 0 12px;
+        }
+
+        /* The admin terminate button is rendered inside a table cell;
+           grow horizontally rather than forcing the row taller than
+           necessary by giving the button a fixed visual width. */
+        .admin-terminate-btn {
+          padding: 6px 14px;
+          font-size: 13px;
         }
       }
 
