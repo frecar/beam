@@ -1510,6 +1510,38 @@
         .admin-table { font-size: 11px; }
       }
 
+      /*
+       * ── Responsive: Narrow desktop / tablet landscape (769-1100px) ──
+       *
+       * The status bar packs 11 controls + 2 selects + a 4-stat group into
+       * `.status-right`. At full desktop widths there is room for icon
+       * + label per button; below ~1100px the labels push "End Session" off
+       * the right edge with no flex-wrap, clipping controls. Mobile hides
+       * the bar entirely at <=768px (a separate problem, B1), so this
+       * range covers the gap.
+       *
+       * Fix: hide `.btn-label` spans so buttons become icon-only. Every
+       * `.status-btn` already carries a descriptive `aria-label`, so
+       * screen readers remain unaffected; sighted users keep the SVG +
+       * `title` tooltip on hover. Selects keep their text — they have no
+       * icon and the labels ("US", "Scroll 1x") are themselves compact.
+       */
+      @media (min-width: 769px) and (max-width: 1100px) {
+        #status-bar .btn-label {
+          display: none;
+        }
+        /* Tighten button padding once labels are gone so the icon-only
+           buttons don't waste horizontal space. */
+        #status-bar .status-btn {
+          padding: 2px 6px;
+        }
+        /* Drop the explicit "Scroll" prefix from the scroll-speed select
+           — the aria-label already describes it. */
+        #status-bar #scroll-speed-select {
+          font-size: 10px;
+        }
+      }
+
       /* ── Responsive: Mobile / Tablet ───────────────────── */
       @media (max-width: 768px) {
         /* Login card: full width on small screens */
