@@ -804,7 +804,9 @@
         color: #facc15;
         font-size: 13px;
         text-align: center;
-        padding: 6px 16px;
+        /* `padding-right` reserves room for the dismiss button so the
+           centered text never sits under it. */
+        padding: 6px 56px 6px 16px;
         z-index: 400;
         backdrop-filter: blur(8px);
         user-select: none;
@@ -814,9 +816,40 @@
       }
 
       #idle-warning.visible {
-        display: block;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         opacity: 1;
         transform: translateY(0);
+      }
+
+      .idle-warning-text {
+        flex: 1;
+        text-align: center;
+      }
+
+      .idle-warning-dismiss {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: none;
+        border: none;
+        color: #facc15;
+        font-size: 20px;
+        line-height: 1;
+        padding: 0 8px;
+        cursor: pointer;
+        transition: color 0.15s;
+      }
+
+      .idle-warning-dismiss:hover {
+        color: #fde047;
+      }
+
+      .idle-warning-dismiss:focus-visible {
+        outline: 2px solid #facc15;
+        outline-offset: 2px;
       }
 
       /* Fullscreen: auto-hide bar, show on bottom-edge hover (JS-driven) */
@@ -1671,7 +1704,8 @@
         .chp-clear,
         .chp-copy,
         .admin-terminate-btn,
-        .toast-close {
+        .toast-close,
+        .idle-warning-dismiss {
           min-width: var(--touch-target-min);
           min-height: var(--touch-target-min);
           display: inline-flex;
@@ -1826,7 +1860,10 @@
     </div>
 
     <!-- Idle Timeout Warning Banner -->
-    <div id="idle-warning" role="alert">Session will expire due to inactivity. Move mouse or press a key to stay connected.</div>
+    <div id="idle-warning" role="alert">
+      <span class="idle-warning-text">Session will expire due to inactivity. Move mouse or press a key to stay connected.</span>
+      <button type="button" class="idle-warning-dismiss" id="idle-warning-dismiss" aria-label="Dismiss warning">&times;</button>
+    </div>
 
     <!-- Performance Overlay (F9 toggle) -->
     <div id="perf-overlay" aria-hidden="true"></div>

@@ -61,3 +61,30 @@ describe('index.html — narrow-desktop status bar (#87 B2)', () => {
     );
   });
 });
+
+describe('index.html — idle-warning dismiss button (#87 G7)', () => {
+  it('renders the warning banner with a text span and a dismiss button', () => {
+    // The text node is separated from the dismiss button so showIdleWarning
+    // can update wording without clobbering the button.
+    expect(indexHtml).toMatch(/<span\s+class="idle-warning-text">/);
+    expect(indexHtml).toMatch(
+      /<button[^>]*class="idle-warning-dismiss"[^>]*id="idle-warning-dismiss"[^>]*aria-label="Dismiss warning"/
+    );
+  });
+
+  it('declares an `.idle-warning-dismiss` style block', () => {
+    expect(indexHtml).toMatch(/\.idle-warning-dismiss\s*\{/);
+  });
+
+  it('joins the touch-target-min selector list on mobile', () => {
+    // Smoke that the dismiss button picks up the same 44x44 min-target
+    // floor as the other panel close/clear buttons. The selector list
+    // is comma-separated; locate the rule by anchoring on the var()
+    // declaration and checking `.idle-warning-dismiss` appears in the
+    // preceding selector list.
+    const ruleMatch = indexHtml.match(
+      /([^{}]*?\.idle-warning-dismiss[^{}]*?)\{[^{}]*?min-(?:width|height):\s*var\(--touch-target-min\)/
+    );
+    expect(ruleMatch).not.toBeNull();
+  });
+});

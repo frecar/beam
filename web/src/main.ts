@@ -9,6 +9,7 @@ import { initMonitoring } from './monitoring';
 import { clearSession, loadSession, sendReleaseBeacon, TokenManager } from './session';
 import {
   AUDIO_MUTED_KEY,
+  dismissIdleWarning,
   FORWARD_KEYS_KEY,
   hideIdleWarning,
   IDLE_CHECK_INTERVAL_MS,
@@ -52,6 +53,7 @@ import {
   helpOverlay,
   hideLoading,
   hideReconnectOverlay,
+  idleWarningDismiss,
   loadingCancel,
   loginForm,
   mobileFab,
@@ -1185,6 +1187,16 @@ desktopView.addEventListener('mousemove', recordActivity);
 desktopView.addEventListener('mousedown', recordActivity);
 desktopView.addEventListener('wheel', recordActivity, { passive: true });
 document.addEventListener('keydown', recordActivity);
+
+// Idle-warning dismiss button: hide the banner WITHOUT counting as
+// activity. The user is acknowledging the message, not staying connected;
+// the idle timer keeps running so the session will still expire on time.
+idleWarningDismiss.addEventListener('click', (e) => {
+  // stopPropagation so the click doesn't bubble up to desktopView and
+  // trigger recordActivity (which would defeat the dismiss semantics).
+  e.stopPropagation();
+  idleWarningVisible = dismissIdleWarning(idleWarningVisible);
+});
 
 // Graceful session release on tab/window close
 window.addEventListener('beforeunload', () => {
