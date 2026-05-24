@@ -1165,6 +1165,60 @@
         margin-right: 8px;
       }
 
+      /*
+       * G9 (#101): make the help overlay accessible on touch viewports.
+       *
+       * The card has TWO content blocks: a kbd-shortcut list for
+       * pointers that have F-keys, and a tap-action list for touch.
+       * The right one is shown via @media (pointer: coarse) below.
+       *
+       * Mobile users cannot press Esc to dismiss (Esc is captured by
+       * the mobile-keyboard input for the remote session), so the
+       * card carries an explicit X close button. The button doubles
+       * as the focus target on open, and aria-label keeps it
+       * screen-reader-discoverable.
+       */
+      #help-overlay .help-card {
+        position: relative;
+      }
+      #help-overlay .help-card .help-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        min-width: var(--touch-target-min);
+        min-height: var(--touch-target-min);
+        background: transparent;
+        border: 0;
+        color: var(--text-stat);
+        cursor: pointer;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+      }
+      #help-overlay .help-card .help-close:hover,
+      #help-overlay .help-card .help-close:focus-visible {
+        color: var(--text-primary);
+        background: var(--bg-btn-hover);
+        outline: none;
+      }
+      /* The "touch" content block is hidden by default — only the
+         (pointer: coarse) media query below shows it. */
+      #help-overlay .help-card .help-touch {
+        display: none;
+      }
+
+      /* G9 (#101): swap help-card body for touch viewports. */
+      @media (pointer: coarse) {
+        #help-overlay .help-card .help-keyboard {
+          display: none;
+        }
+        #help-overlay .help-card .help-touch {
+          display: block;
+        }
+      }
+
       /* Reconnect Overlay — shown on top of frozen desktop */
       #reconnect-overlay {
         display: none;
@@ -2274,18 +2328,49 @@
     </div>
 
     <!-- Help Overlay (F1 toggle) -->
-    <div id="help-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
+    <!--
+      Help overlay (#help-overlay).
+
+      G9 (#101): on touch viewports the F-key list is dead — phones
+      have no F-keys, and Esc is captured by the mobile-keyboard input
+      for the remote session. So the card carries:
+
+      - An explicit close button (X) — focusable, labelled, sized to
+        the WCAG touch target floor.
+      - Two content blocks: `.help-keyboard` (default) lists F-key
+        shortcuts; `.help-touch` (shown at pointer: coarse) lists the
+        FAB-mapped tap actions.
+
+      Tap on the backdrop (the overlay itself, NOT the card) also
+      closes — wired in main.ts so the click handler target-checks
+      `e.target === helpOverlay`.
+    -->
+    <div id="help-overlay" role="dialog" aria-label="Help" aria-modal="true">
       <div class="help-card">
-        <h2>Keyboard Shortcuts</h2>
-        <div><kbd>F1</kbd> Toggle this help</div>
-        <div><kbd>F7</kbd> Manage sessions</div>
-        <div><kbd>F8</kbd> Toggle audio mute</div>
-        <div><kbd>F9</kbd> Performance overlay</div>
-        <div><kbd>F10</kbd> Session info panel</div>
-        <div><kbd>F11</kbd> Toggle fullscreen</div>
-        <div><kbd>F12</kbd> Screenshot</div>
-        <div><kbd>Ctrl+Shift+V</kbd> Clipboard history</div>
-        <div><kbd>Esc</kbd> Exit fullscreen</div>
+        <button type="button" id="help-close" class="help-close" aria-label="Close help"></button>
+        <h2>Help</h2>
+        <div class="help-keyboard">
+          <div><kbd>F1</kbd> Toggle this help</div>
+          <div><kbd>F7</kbd> Manage sessions</div>
+          <div><kbd>F8</kbd> Toggle audio mute</div>
+          <div><kbd>F9</kbd> Performance overlay</div>
+          <div><kbd>F10</kbd> Session info panel</div>
+          <div><kbd>F11</kbd> Toggle fullscreen</div>
+          <div><kbd>F12</kbd> Screenshot</div>
+          <div><kbd>Ctrl+Shift+V</kbd> Clipboard history</div>
+          <div><kbd>Esc</kbd> Exit fullscreen</div>
+        </div>
+        <div class="help-touch">
+          <div>Tap the <strong>+</strong> button to open the toolbar.</div>
+          <div>From the toolbar you can:</div>
+          <div>&nbsp;&nbsp;Show / hide the on-screen keyboard</div>
+          <div>&nbsp;&nbsp;Pick a keyboard layout or scroll speed</div>
+          <div>&nbsp;&nbsp;Upload or download a file</div>
+          <div>&nbsp;&nbsp;Toggle fullscreen or take a screenshot</div>
+          <div>&nbsp;&nbsp;Toggle theme or audio mute</div>
+          <div>&nbsp;&nbsp;Open this help or the performance overlay</div>
+          <div>&nbsp;&nbsp;End or disconnect the session</div>
+        </div>
       </div>
     </div>
 
@@ -2352,6 +2437,14 @@
         <button class="fab-action" id="fab-theme" aria-label="Toggle color theme">Theme</button>
         <button class="fab-action" id="fab-mute" aria-label="Toggle audio mute">Mute</button>
         <button class="fab-action" id="fab-forward-keys" aria-label="Toggle browser shortcut capture">Capture keys</button>
+        <!--
+          G9 (#101): Help + Stats sit together as the diagnostic /
+          view-state group. They're informational (not destructive),
+          so they live above the disconnect block. Help maps to F1
+          (the desktop shortcut), Stats maps to F9 (perf overlay).
+        -->
+        <button class="fab-action" id="fab-help" aria-label="Show help overlay">Help</button>
+        <button class="fab-action" id="fab-stats" aria-label="Toggle performance overlay">Stats</button>
         <button class="fab-action fab-action-disconnect" id="fab-end-session" aria-label="End remote session">End session</button>
         <button class="fab-action fab-action-disconnect" id="fab-disconnect" aria-label="Disconnect">Disconnect</button>
       </div>

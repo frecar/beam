@@ -4,9 +4,11 @@ import type { DownloadMessage } from './filetransfer';
 import { FileDownloader, FileUploader } from './filetransfer';
 import {
   ICON_CAPTURE,
+  ICON_CLOSE,
   ICON_DISCONNECT,
   ICON_DOWNLOAD,
   ICON_FULLSCREEN,
+  ICON_HELP,
   ICON_KEYBOARD,
   ICON_KEYBOARD_OFF,
   ICON_LAYOUT,
@@ -15,6 +17,7 @@ import {
   ICON_POWER,
   ICON_SCREENSHOT,
   ICON_SCROLL,
+  ICON_STATS,
   ICON_UNMUTE,
   ICON_UPLOAD,
 } from './icons';
@@ -64,6 +67,7 @@ import {
   fabEndSession,
   fabForwardKeys,
   fabFullscreen,
+  fabHelp,
   fabKeyboard,
   fabKeyboardHide,
   fabLayoutSelect,
@@ -72,10 +76,12 @@ import {
   fabScreenshot,
   fabScrollSpeedSelect,
   fabScrollSpeedSelectLabel,
+  fabStats,
   fabTheme,
   fabUpload,
   fileDropOverlay,
   fileUploadInput,
+  helpClose,
   helpOverlay,
   hideLoading,
   hideReconnectOverlay,
@@ -1151,7 +1157,15 @@ async function startConnection(
 document.addEventListener('keydown', (e: KeyboardEvent) => {
   if (e.key === 'F1') {
     e.preventDefault();
-    helpOverlay.classList.toggle('visible');
+    // G9 (#101) — route F1 through the same open/close helpers as the
+    // FAB Help action so focus management is consistent. The opener
+    // is whatever currently has focus (kept by document.activeElement
+    // on desktop) so closing returns focus there.
+    if (helpOverlay.classList.contains('visible')) {
+      closeHelpOverlay();
+    } else {
+      openHelpOverlay(document.activeElement as HTMLElement | null);
+    }
   }
   if (e.key === 'F7') {
     e.preventDefault();
@@ -1446,6 +1460,13 @@ function initFabIcons(): void {
   prepend(fabForwardKeys, ICON_CAPTURE);
   prepend(fabEndSession, ICON_POWER);
   prepend(fabDisconnect, ICON_DISCONNECT);
+  // G9 (#101) — diagnostic / view-state FAB actions.
+  prepend(fabHelp, ICON_HELP);
+  prepend(fabStats, ICON_STATS);
+  // Help-overlay explicit close button (X). The icon is the only
+  // content — no text label, the aria-label on the button carries
+  // accessible text.
+  helpClose.innerHTML = ICON_CLOSE;
   // Select-row labels: prepend the icon before the existing text node.
   fabLayoutSelectLabel.innerHTML = `${ICON_LAYOUT}<span>${fabLayoutSelectLabel.textContent ?? 'Layout'}</span>`;
   fabScrollSpeedSelectLabel.innerHTML = `${ICON_SCROLL}<span>${fabScrollSpeedSelectLabel.textContent ?? 'Scroll'}</span>`;
@@ -1597,6 +1618,61 @@ fabMute.addEventListener('click', () => {
 fabForwardKeys.addEventListener('click', () => {
   closeFab();
   toggleForwardKeys();
+});
+
+// G9 (#101) — Help + Stats actions for touch users.
+//
+// helpReturnFocus remembers what was focused when the overlay opened
+// so we can restore focus on close (a11y: keyboard users shouldn't
+// land back at <body>). null = nothing was focused / not applicable.
+let helpReturnFocus: HTMLElement | null = null;
+
+function openHelpOverlay(opener: HTMLElement | null): void {
+  helpReturnFocus = opener;
+  helpOverlay.classList.add('visible');
+  // Move focus into the modal so screen readers + keyboard users
+  // land inside. The close button is the safest target — minimal,
+  // labelled, always present.
+  helpClose.focus();
+}
+
+function closeHelpOverlay(): void {
+  helpOverlay.classList.remove('visible');
+  // Restore focus to whatever opened the overlay (the FAB Help
+  // button on touch, or wherever F1 fired from on desktop). Fall
+  // back to body if the original element vanished.
+  if (helpReturnFocus && document.body.contains(helpReturnFocus)) {
+    helpReturnFocus.focus();
+  }
+  helpReturnFocus = null;
+}
+
+fabHelp.addEventListener('click', () => {
+  closeFab();
+  // Use the FAB toggle as the focus-return target rather than the
+  // FAB Help action itself — by the time the user closes the help
+  // overlay, the menu has collapsed and the inner action is no
+  // longer visible / focusable.
+  openHelpOverlay(mobileFabToggle);
+});
+
+fabStats.addEventListener('click', () => {
+  closeFab();
+  perfOverlay.classList.toggle('visible');
+});
+
+// Explicit close button on the help-card.
+helpClose.addEventListener('click', () => {
+  closeHelpOverlay();
+});
+
+// Backdrop-click to close: only when the target is the overlay
+// itself (the backdrop), not the card. Without target-checking, taps
+// inside the card would also dismiss the overlay (codex review).
+helpOverlay.addEventListener('click', (e) => {
+  if (e.target === helpOverlay) {
+    closeHelpOverlay();
+  }
 });
 
 // G2 (#95 P5b) — End session is more destructive than Disconnect (it
