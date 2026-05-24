@@ -45,9 +45,17 @@ import {
   type ConnectionState,
   desktopView,
   fabDisconnect,
+  fabDownload,
+  fabEndSession,
+  fabForwardKeys,
   fabFullscreen,
   fabKeyboard,
+  fabLayoutSelect,
+  fabMute,
   fabScreenshot,
+  fabScrollSpeedSelect,
+  fabTheme,
+  fabUpload,
   fileDropOverlay,
   fileUploadInput,
   helpOverlay,
@@ -930,17 +938,34 @@ async function startConnection(
       updateForwardKeysButton(savedForwardKeys);
       inputHandler.enable();
 
-      // Wire up manual layout selector
+      // Wire up manual layout selector. The mobile FAB also hosts a
+      // layout selector (#94 G1); clone the same option set into it
+      // and keep both selects in sync so the choice persists across
+      // form factors.
       const layoutSelect = document.getElementById('layout-select') as HTMLSelectElement | null;
       if (layoutSelect) {
-        layoutSelect.onchange = () => {
-          const layout = layoutSelect.value;
-          localStorage.setItem('beam_keyboard_layout', layout);
-          inputHandler?.sendSpecificLayout(layout);
+        // Populate the FAB-side select from the status-bar options so
+        // we don't duplicate the 15-language list across two HTML
+        // surfaces. Cleared on re-init to keep the function idempotent.
+        if (fabLayoutSelect.options.length === 0) {
+          for (const opt of Array.from(layoutSelect.options)) {
+            fabLayoutSelect.add(opt.cloneNode(true) as HTMLOptionElement);
+          }
+          fabLayoutSelect.value = layoutSelect.value;
+        }
+        const onLayoutChange = (value: string): void => {
+          localStorage.setItem('beam_keyboard_layout', value);
+          inputHandler?.sendSpecificLayout(value);
+          // Keep the partner select in sync so reopening the FAB
+          // reflects the current value.
+          if (layoutSelect.value !== value) layoutSelect.value = value;
+          if (fabLayoutSelect.value !== value) fabLayoutSelect.value = value;
         };
+        layoutSelect.onchange = () => onLayoutChange(layoutSelect.value);
+        fabLayoutSelect.onchange = () => onLayoutChange(fabLayoutSelect.value);
       }
 
-      // Wire up scroll speed selector
+      // Wire up scroll speed selector (status bar + FAB partner).
       const scrollSpeedSelect = document.getElementById(
         'scroll-speed-select'
       ) as HTMLSelectElement | null;
@@ -948,13 +973,17 @@ async function startConnection(
         const savedScrollSpeed = localStorage.getItem(SCROLL_SPEED_KEY);
         if (savedScrollSpeed) {
           scrollSpeedSelect.value = savedScrollSpeed;
+          fabScrollSpeedSelect.value = savedScrollSpeed;
           inputHandler?.setScrollMultiplier(parseFloat(savedScrollSpeed));
         }
-        scrollSpeedSelect.onchange = () => {
-          const speed = scrollSpeedSelect.value;
-          localStorage.setItem(SCROLL_SPEED_KEY, speed);
-          inputHandler?.setScrollMultiplier(parseFloat(speed));
+        const onScrollChange = (value: string): void => {
+          localStorage.setItem(SCROLL_SPEED_KEY, value);
+          inputHandler?.setScrollMultiplier(parseFloat(value));
+          if (scrollSpeedSelect.value !== value) scrollSpeedSelect.value = value;
+          if (fabScrollSpeedSelect.value !== value) fabScrollSpeedSelect.value = value;
         };
+        scrollSpeedSelect.onchange = () => onScrollChange(scrollSpeedSelect.value);
+        fabScrollSpeedSelect.onchange = () => onScrollChange(fabScrollSpeedSelect.value);
       }
     }
 
@@ -1342,6 +1371,46 @@ fabScreenshot.addEventListener('click', () => {
 fabDisconnect.addEventListener('click', () => {
   closeFab();
   handleDisconnect();
+});
+
+// G1 (#94): enriched FAB actions mirror every status-bar control so
+// phone users (status bar hidden at <=480px) can still reach the
+// full operator surface. Each handler routes through the same code
+// path as its status-bar twin so behavior stays consistent across
+// form factors.
+
+fabUpload.addEventListener('click', () => {
+  closeFab();
+  // Trigger the same <input type="file"> click that btn-upload uses.
+  fileUploadInput.click();
+});
+
+fabDownload.addEventListener('click', () => {
+  closeFab();
+  // Reuse the same handler as btn-download (window.prompt for path).
+  // P20 audit calls out the prompt() UX gap; that's a separate
+  // sub-issue (#100) — out of scope for G1.
+  btnDownload.click();
+});
+
+fabTheme.addEventListener('click', () => {
+  closeFab();
+  toggleTheme();
+});
+
+fabMute.addEventListener('click', () => {
+  closeFab();
+  toggleMute();
+});
+
+fabForwardKeys.addEventListener('click', () => {
+  closeFab();
+  toggleForwardKeys();
+});
+
+fabEndSession.addEventListener('click', () => {
+  closeFab();
+  handleEndSession();
 });
 
 // Close FAB menu when tapping outside

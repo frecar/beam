@@ -85,6 +85,19 @@ export const fabKeyboard = document.getElementById('fab-keyboard') as HTMLButton
 export const fabFullscreen = document.getElementById('fab-fullscreen') as HTMLButtonElement;
 export const fabScreenshot = document.getElementById('fab-screenshot') as HTMLButtonElement;
 export const fabDisconnect = document.getElementById('fab-disconnect') as HTMLButtonElement;
+// Enriched FAB actions (#94 G1): mirror every status-bar control so phone
+// users (status bar hidden at <=480px) can still reach the full surface.
+export const fabUpload = document.getElementById('fab-upload') as HTMLButtonElement;
+export const fabDownload = document.getElementById('fab-download') as HTMLButtonElement;
+export const fabFullscreenBtn = fabFullscreen; // alias for clarity in main.ts
+export const fabTheme = document.getElementById('fab-theme') as HTMLButtonElement;
+export const fabMute = document.getElementById('fab-mute') as HTMLButtonElement;
+export const fabForwardKeys = document.getElementById('fab-forward-keys') as HTMLButtonElement;
+export const fabEndSession = document.getElementById('fab-end-session') as HTMLButtonElement;
+export const fabLayoutSelect = document.getElementById('fab-layout-select') as HTMLSelectElement;
+export const fabScrollSpeedSelect = document.getElementById(
+  'fab-scroll-speed-select'
+) as HTMLSelectElement;
 export const mobileKeyboardInput = document.getElementById(
   'mobile-keyboard-input'
 ) as HTMLInputElement;

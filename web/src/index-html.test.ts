@@ -22,16 +22,19 @@ import indexHtml from '../index.html?raw';
  * regression would re-introduce the overflow blocker.
  */
 
-describe('index.html — narrow-desktop status bar (#87 B2)', () => {
-  it('declares the 769-1100px media query block', () => {
-    expect(indexHtml).toMatch(/@media\s*\(min-width:\s*769px\)\s*and\s*\(max-width:\s*1100px\)/);
+describe('index.html — narrow-desktop / tablet status bar (#87 B2 + G1)', () => {
+  it('declares the 481-1100px icon-only status-bar media query block', () => {
+    // G1 (#94) extended the original 769-1100px B2 fix down to 481px so
+    // tablet portrait (iPad ~768px, Pixel-tablet ~800px) gets the same
+    // icon-only treatment instead of the entire bar being hidden.
+    expect(indexHtml).toMatch(/@media\s*\(min-width:\s*481px\)\s*and\s*\(max-width:\s*1100px\)/);
   });
 
   it('hides .btn-label inside #status-bar within that block', () => {
     // Anchor on the media query opener so we don't false-positive on
     // unrelated `.btn-label { display: none }` rules elsewhere.
     const block = indexHtml.match(
-      /@media\s*\(min-width:\s*769px\)\s*and\s*\(max-width:\s*1100px\)\s*\{([\s\S]*?)\n\s{6}\}/
+      /@media\s*\(min-width:\s*481px\)\s*and\s*\(max-width:\s*1100px\)\s*\{([\s\S]*?)\n\s{6}\}/
     );
     expect(block).not.toBeNull();
     if (block !== null) {
@@ -52,13 +55,25 @@ describe('index.html — narrow-desktop status bar (#87 B2)', () => {
     }
   });
 
-  it('still hides the entire status bar below 768px (B1 cascade unchanged)', () => {
-    // Sanity: this PR fixes B2 only. B1's `#status-bar.visible { display: none }`
-    // inside `@media (max-width: 768px)` must remain — the mobile-FAB path
-    // depends on it. A future PR will address B1 separately.
+  it('only hides the entire status bar below 480px (G1: phone-only)', () => {
+    // G1 (#94) split: tablet (481-768px) keeps the icon-only status
+    // bar; phone (<=480px) hides it entirely and the enriched FAB
+    // covers every control. The hide rule must live in the 480px
+    // block — NOT the 768px block — or tablet regresses.
     expect(indexHtml).toMatch(
-      /@media\s*\(max-width:\s*768px\)[\s\S]*?#status-bar\.visible\s*\{\s*display:\s*none/
+      /@media\s*\(max-width:\s*480px\)[\s\S]*?#status-bar\.visible\s*\{\s*display:\s*none/
     );
+    // And the 768px block must NOT contain the hide rule any more —
+    // a regression here would re-hide on tablet. We allow the rule
+    // to appear ONLY inside the 480px block. Strip out the 480px
+    // block first, then assert the 768px block contains no
+    // `#status-bar.visible { display: none }`.
+    const stripped = indexHtml.replace(/@media\s*\(max-width:\s*480px\)\s*\{[\s\S]*?\n\s{6}\}/, '');
+    const block768 = stripped.match(/@media\s*\(max-width:\s*768px\)\s*\{([\s\S]*?)\n\s{6}\}/);
+    expect(block768).not.toBeNull();
+    if (block768 !== null) {
+      expect(block768[1]).not.toMatch(/#status-bar\.visible\s*\{\s*display:\s*none/);
+    }
   });
 });
 
@@ -106,6 +121,84 @@ describe('index.html — login form mobile polish (#87 G4)', () => {
       expect(selectMatch[0]).toMatch(/>8 Hours</);
       expect(selectMatch[0]).toMatch(/>24 Hours</);
     }
+  });
+});
+
+describe('index.html — mobile FAB enrichment (#87 G1)', () => {
+  /*
+   * G1 (#94) expanded the phone FAB menu from 4 to 12 actions so the
+   * status-bar controls hidden on <=480px viewports remain reachable.
+   * These assertions guard the enriched surface against silent
+   * regressions during future style/markup sweeps.
+   */
+
+  it('renders every enriched FAB action', () => {
+    // The audit identifies 9 status-bar controls invisible on phone
+    // before this change. The enriched menu MUST host each one (or
+    // a select for the layout/scroll-speed pickers).
+    const requiredIds = [
+      'fab-keyboard',
+      'fab-layout-select',
+      'fab-scroll-speed-select',
+      'fab-upload',
+      'fab-download',
+      'fab-fullscreen',
+      'fab-screenshot',
+      'fab-theme',
+      'fab-mute',
+      'fab-forward-keys',
+      'fab-end-session',
+      'fab-disconnect',
+    ];
+    for (const id of requiredIds) {
+      expect(indexHtml).toMatch(new RegExp(`id="${id}"`));
+    }
+  });
+
+  it('every FAB action declares a descriptive aria-label', () => {
+    // Match `.fab-action` buttons AND `.fab-action-select` divs.
+    const elRegex =
+      /<(button|div)[^>]*class="[^"]*\bfab-action(?:-select)?\b[^"]*"[^>]*>[\s\S]*?<\/\1>/g;
+    const els = indexHtml.match(elRegex) ?? [];
+    expect(els.length).toBeGreaterThanOrEqual(12);
+    for (const el of els) {
+      // Either the element itself, or its inner <select>, must carry
+      // an aria-label.
+      expect(el).toMatch(/aria-label="[^"]+"/);
+    }
+  });
+
+  it('FAB menu container caps height + scrolls when overflowed', () => {
+    // The enriched menu may grow beyond a phone's viewport when all
+    // 12 rows are visible. The container must scroll its overflow
+    // and use dvh so iOS Safari URL-bar collapse doesn't shift the
+    // threshold mid-interaction.
+    expect(indexHtml).toMatch(
+      /#mobile-fab-menu\s*\{[\s\S]*?max-height:\s*min\([\s\S]*?dvh[\s\S]*?\)/
+    );
+    expect(indexHtml).toMatch(/#mobile-fab-menu\s*\{[\s\S]*?overflow-y:\s*auto/);
+  });
+
+  it('phone (<=480px) extends SIP + CHP panels to bottom: 0 (P19 cascade)', () => {
+    // Without this, 28px of dead space sits at the bottom of the
+    // panels because they reserve room for a now-hidden status bar.
+    const phoneBlock = indexHtml.match(/@media\s*\(max-width:\s*480px\)\s*\{([\s\S]*?)\n\s{6}\}/);
+    expect(phoneBlock).not.toBeNull();
+    if (phoneBlock !== null) {
+      // Match either combined or separate rule blocks for the panels.
+      expect(phoneBlock[1]).toMatch(
+        /#session-info-panel[\s\S]*?#clipboard-history-panel[\s\S]*?bottom:\s*0/
+      );
+    }
+  });
+
+  it('FAB actions meet the WCAG 2.5.5 touch-target floor', () => {
+    // PR #93 introduced --touch-target-min: 44px; the enriched FAB
+    // rows must honor it so thumb taps land reliably.
+    expect(indexHtml).toMatch(/\.fab-action\s*\{[\s\S]*?min-height:\s*var\(--touch-target-min\)/);
+    expect(indexHtml).toMatch(
+      /\.fab-action-select\s*\{[\s\S]*?min-height:\s*var\(--touch-target-min\)/
+    );
   });
 });
 
