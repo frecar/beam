@@ -62,6 +62,53 @@ describe('index.html — narrow-desktop status bar (#87 B2)', () => {
   });
 });
 
+describe('index.html — login form mobile polish (#87 G4)', () => {
+  it('username input declares autocapitalize=none + enterkeyhint=next', () => {
+    // iOS auto-capitalizes form inputs by default. Linux usernames are
+    // lowercase; auto-cap forces the user to manually shift-lower the
+    // first character. enterkeyhint=next cues the "Next" return key
+    // instead of generic "Go".
+    const usernameMatch = indexHtml.match(/<input[^>]*id="username"[^>]*>/);
+    expect(usernameMatch).not.toBeNull();
+    if (usernameMatch !== null) {
+      expect(usernameMatch[0]).toMatch(/autocapitalize="none"/);
+      expect(usernameMatch[0]).toMatch(/enterkeyhint="next"/);
+    }
+  });
+
+  it('password input declares enterkeyhint=go', () => {
+    const passwordMatch = indexHtml.match(/<input[^>]*id="password"[^>]*>/);
+    expect(passwordMatch).not.toBeNull();
+    if (passwordMatch !== null) {
+      expect(passwordMatch[0]).toMatch(/enterkeyhint="go"/);
+    }
+  });
+
+  it('mobile media query bumps .form-select to 16px to prevent iOS auto-zoom', () => {
+    // iOS Safari zooms in on any form control with font-size <16px and
+    // doesn't zoom back out after dismissal. The mobile-input rule
+    // already covers <input>; this assertion ensures <select> gets the
+    // same treatment.
+    const mediaBlock = indexHtml.match(
+      /@media\s*\(max-width:\s*768px\)\s*\{[\s\S]*?\.form-select\s*\{[\s\S]*?font-size:\s*16px/
+    );
+    expect(mediaBlock).not.toBeNull();
+  });
+
+  it('session-timeout options use consistent Title Case', () => {
+    const selectMatch = indexHtml.match(/<select[^>]*id="session-timeout"[\s\S]*?<\/select>/);
+    expect(selectMatch).not.toBeNull();
+    if (selectMatch !== null) {
+      // Default is the only "special" label; the hour-N options should
+      // all read "N Hour(s)" with Title Case to match.
+      expect(selectMatch[0]).toMatch(/>1 Hour</);
+      expect(selectMatch[0]).toMatch(/>4 Hours</);
+      expect(selectMatch[0]).toMatch(/>8 Hours</);
+      expect(selectMatch[0]).toMatch(/>24 Hours</);
+    }
+  });
+});
+
 describe('index.html — idle-warning dismiss button (#87 G7)', () => {
   it('renders the warning banner with a text span and a dismiss button', () => {
     // The text node is separated from the dismiss button so showIdleWarning
