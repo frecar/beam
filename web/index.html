@@ -1684,7 +1684,9 @@
           width: calc(100% - 32px);
           max-height: 90vh;
         }
-        .admin-table { font-size: 11px; }
+        /* G5 (#97 P11) — font-size shrink alone wasn't enough; the
+           main mobile block reflows the table into a card stack via
+           CSS-only `data-label` pseudo-elements. */
       }
 
       /*
@@ -1818,6 +1820,140 @@
         #clipboard-history-panel {
           width: 100%;
           bottom: 0;
+        }
+
+        /*
+         * G5 (#97 P8) — Session-Info-Panel row layout on mobile.
+         *
+         * Desktop renders each row as `label | value` with the value
+         * right-aligned. UUIDs and long base64-ish session IDs would
+         * `word-break: break-all` and wrap across 2-3 lines, pushing
+         * the label off the row visually.
+         *
+         * Mobile flips the row into a stacked layout: label sits on
+         * its own line above the value. The value gets `text-align:
+         * left` and `overflow-wrap: anywhere` so a long UUID wraps
+         * cleanly across multiple lines without consuming label
+         * real-estate. Density goes up (each row is 2 lines now) but
+         * inspectability matters more on a phone than line count.
+         */
+        .sip-row {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 2px;
+        }
+        .sip-value {
+          text-align: left;
+          max-width: 100%;
+          overflow-wrap: anywhere;
+        }
+
+        /*
+         * G5 (#97 P10) — Clipboard-History entries on mobile.
+         *
+         * On touch viewports the whole row becomes tappable (see the
+         * JS `.chp-entry` click handler in main.ts). The visible Copy
+         * button stays as the discovery affordance — sighted users
+         * can still tap it directly — but thumb-misses on a 56-pixel-
+         * wide button no longer lose the copy interaction.
+         *
+         * The cursor/hover affordance hints that the row reacts.
+         */
+        .chp-entry {
+          cursor: pointer;
+          -webkit-tap-highlight-color: var(--bg-btn);
+        }
+        .chp-entry:active {
+          background: var(--bg-btn);
+        }
+
+        /*
+         * G5 (#97 P11) — Admin Sessions table -> card stack on
+         * mobile. The 6-column table (Session, User, Display,
+         * Created, Idle, Terminate) doesn't fit 360px viewports
+         * even at 11px font-size. CSS-only reflow:
+         *
+         *  - hide the thead (column labels move into pseudo-elements)
+         *  - flatten tbody/tr/td to block
+         *  - each <tr> becomes a card (border, padding, spacing)
+         *  - each <td> renders its column label via `data-label`
+         *    attribute set in renderAdminSessions()
+         *
+         * .admin-empty special-cased: empty/loading state should
+         * read as a centered message, not a label-prefixed card.
+         */
+        .admin-table {
+          /* Prevent the table from forcing a min-width via column
+             contents (long UUIDs). `display: block` plus the row
+             reflow below handles the actual layout. */
+          font-size: 13px;
+        }
+        .admin-table thead {
+          display: none;
+        }
+        .admin-table,
+        .admin-table tbody,
+        .admin-table tr,
+        .admin-table td {
+          display: block;
+          width: 100%;
+        }
+        .admin-table tr {
+          padding: 10px 0;
+          margin-bottom: 8px;
+          border: 1px solid var(--border-subtle);
+          border-radius: 6px;
+          background: var(--bg-btn);
+        }
+        .admin-table tr:last-child {
+          margin-bottom: 0;
+        }
+        .admin-table td {
+          border-bottom: none;
+          padding: 4px 12px;
+          /* Each td renders its column label inline before the
+             value via the pseudo-element below. */
+          display: flex;
+          gap: 12px;
+          align-items: baseline;
+          font-family: inherit;
+        }
+        .admin-table td::before {
+          content: attr(data-label);
+          color: var(--text-secondary);
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          flex: 0 0 70px;
+          font-family: inherit;
+        }
+        .admin-table td:has(.admin-terminate-btn) {
+          padding-top: 8px;
+        }
+        .admin-table td:has(.admin-terminate-btn)::before {
+          /* Hide the "Terminate" label — the button text is itself
+             the label, and the row already shows the username so
+             context is clear. */
+          display: none;
+        }
+        .admin-table .admin-terminate-btn {
+          width: 100%;
+          /* Keep the button readable + tappable inside the card. */
+        }
+        /* Empty / not-authenticated / error rows must NOT inherit
+           the card layout — they should center as a single message. */
+        .admin-table tr:has(.admin-empty) {
+          background: transparent;
+          border: none;
+          padding: 0;
+          margin: 0;
+        }
+        .admin-table td.admin-empty {
+          padding: 24px 8px;
+          text-align: center;
+        }
+        .admin-table td.admin-empty::before {
+          display: none;
         }
 
         /* Reconnect overlay card: more compact on mobile */

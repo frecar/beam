@@ -270,6 +270,56 @@ describe('index.html — FAB polish (#87 G2)', () => {
   });
 });
 
+describe('index.html — panel mobile layouts (#87 G5)', () => {
+  /*
+   * G5 (#97) reflows SIP rows, CHP entries, and the admin table for
+   * mobile viewports. These assertions guard the reflow rules from
+   * silent regressions during future style sweeps.
+   *
+   * Note: there are multiple `@media (max-width: 768px)` blocks in
+   * index.html — the rules added in G5 may land in any of them.
+   * The assertions therefore search the FULL stylesheet between
+   * the first `@media (max-width: 768px)` and the `@media
+   * (max-width: 480px)` block (which is where the rules cannot be).
+   */
+
+  it('SIP rows stack label-over-value on mobile (P8)', () => {
+    // The default desktop layout is `flex; justify-content:
+    // space-between` so the value sits to the right of the label.
+    // On mobile that pushes the label off when the value is a long
+    // UUID. Mobile rule flips to `flex-direction: column` + left-
+    // aligned value.
+    expect(indexHtml).toMatch(
+      /@media\s*\(max-width:\s*768px\)[\s\S]*?\.sip-row\s*\{[^}]*flex-direction:\s*column/
+    );
+    expect(indexHtml).toMatch(
+      /@media\s*\(max-width:\s*768px\)[\s\S]*?\.sip-value\s*\{[^}]*text-align:\s*left/
+    );
+    expect(indexHtml).toMatch(
+      /@media\s*\(max-width:\s*768px\)[\s\S]*?\.sip-value\s*\{[^}]*overflow-wrap:\s*anywhere/
+    );
+  });
+
+  it('CHP entries are tappable on mobile (P10)', () => {
+    // The visible Copy button stays for desktop affordance, but the
+    // whole `.chp-entry` row becomes a tap target on touch.
+    expect(indexHtml).toMatch(
+      /@media\s*\(max-width:\s*768px\)[\s\S]*?\.chp-entry\s*\{[^}]*cursor:\s*pointer/
+    );
+  });
+
+  it('admin table reflows to card stack on mobile (P11)', () => {
+    // CSS-only reflow: hide thead, flatten tbody/tr/td to block,
+    // each <tr> becomes a card via padding+border+radius.
+    expect(indexHtml).toMatch(
+      /@media\s*\(max-width:\s*768px\)[\s\S]*?\.admin-table\s+thead\s*\{[^}]*display:\s*none/
+    );
+    expect(indexHtml).toMatch(
+      /@media\s*\(max-width:\s*768px\)[\s\S]*?\.admin-table\s+td::before\s*\{[^}]*content:\s*attr\(data-label\)/
+    );
+  });
+});
+
 describe('index.html — idle-warning dismiss button (#87 G7)', () => {
   it('renders the warning banner with a text span and a dismiss button', () => {
     // The text node is separated from the dismiss button so showIdleWarning
