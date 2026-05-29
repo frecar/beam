@@ -12,7 +12,7 @@ env:
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
       - uses: actions/checkout@v6
 
@@ -27,14 +27,23 @@ jobs:
         # spawn path (with a bogus display so the binary returns an error
         # — never connecting to a real X server).
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
+          sudo flock /tmp/apt-ci.lock bash <<'APT'
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq \
             pkg-config \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
             libpulse-dev libopus-dev \
             libpam0g-dev libclang-dev \
             xclip
+          APT
+
+      - name: Isolate Rust homes
+        run: |
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUNNER_TEMP}/rustup" >> "$GITHUB_ENV"
+          echo "${RUNNER_TEMP}/cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -45,8 +54,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ${{ runner.temp }}/cargo/registry
+            ${{ runner.temp }}/cargo/git
             target
           key: cargo-check-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-check-
@@ -62,7 +71,7 @@ jobs:
 
   version-check:
     name: Version consistency
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
       - uses: actions/checkout@v6
 
@@ -76,12 +85,17 @@ jobs:
 
   web:
     name: Web
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@v6
+
+      - name: Isolate npm cache
+        run: |
+          echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "$GITHUB_ENV"
+          mkdir -p "${RUNNER_TEMP}/npm-cache"
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -119,7 +133,7 @@ jobs:
 
   coverage:
     name: Coverage
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
       - uses: actions/checkout@v6
 
@@ -128,14 +142,23 @@ jobs:
         # spawn path (with a bogus display so the binary returns an error
         # — never connecting to a real X server).
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
+          sudo flock /tmp/apt-ci.lock bash <<'APT'
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq \
             pkg-config \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
             libpulse-dev libopus-dev \
             libpam0g-dev libclang-dev \
             xclip
+          APT
+
+      - name: Isolate Rust homes
+        run: |
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUNNER_TEMP}/rustup" >> "$GITHUB_ENV"
+          echo "${RUNNER_TEMP}/cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -152,8 +175,8 @@ jobs:
           # instrument-coverage invalidates incremental builds, so
           # sharing the cache would cause full rebuilds on both sides.
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ${{ runner.temp }}/cargo/registry
+            ${{ runner.temp }}/cargo/git
             target
           key: cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-coverage-
