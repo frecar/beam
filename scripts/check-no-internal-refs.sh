@@ -11,6 +11,12 @@ is_allowlisted_match() {
     local line="$2"
     local remaining="$line"
 
+    # WHY: all repository workflows run on the private cluster runner pool, but
+    # workflow runner labels are not deployment endpoints or runtime config.
+    if [[ "$file" == .github/workflows/* && "$line" == *"runs-on: [self-hosted, Linux, X64, cluster-ci]"* ]]; then
+        return 0
+    fi
+
     if [[ "$file" == "crates/agent/src/display.rs" ]]; then
         # WHY: conventional marker-file variable/test wording, not an external service.
         case "$line" in
