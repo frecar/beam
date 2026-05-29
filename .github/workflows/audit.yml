@@ -28,9 +28,18 @@ permissions:
 jobs:
   security_audit:
     name: cargo audit
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
       - uses: actions/checkout@v6
+
+      - name: Isolate Rust homes
+        run: |
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUNNER_TEMP}/rustup" >> "$GITHUB_ENV"
+          echo "${RUNNER_TEMP}/cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - uses: rustsec/audit-check@v2.0.0
         with:

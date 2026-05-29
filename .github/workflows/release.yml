@@ -18,7 +18,7 @@ env:
 jobs:
   version-check:
     name: Verify version consistency
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
       - uses: actions/checkout@v6
 
@@ -54,7 +54,7 @@ jobs:
   build-web:
     name: Build web client
     needs: [version-check]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
       - uses: actions/checkout@v6
 
@@ -127,7 +127,7 @@ jobs:
   package-deb:
     name: Package .deb (${{ matrix.arch }})
     needs: [build-web, build-binary]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     strategy:
       matrix:
         include:
@@ -210,7 +210,7 @@ jobs:
   publish-apt:
     name: Publish APT repository
     needs: [test-package]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     if: success()
     steps:
       - uses: actions/checkout@v6
@@ -289,7 +289,7 @@ jobs:
   package:
     name: Create release
     needs: [build-web, build-binary, test-package]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
       - uses: actions/checkout@v6
 
