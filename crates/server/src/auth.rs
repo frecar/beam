@@ -21,15 +21,21 @@ const TOKEN_EXPIRY_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// Returns `Ok(())` if credentials are valid, or an error describing the failure.
 /// NOTE: This is a blocking call. Wrap in `tokio::task::spawn_blocking`.
 pub fn authenticate_pam(username: &str, password: &str) -> Result<()> {
-    let mut client =
-        pam::Client::with_password("beam").map_err(|e| anyhow::anyhow!("PAM init failed: {e}"))?;
+    use pam_client2::conv_mock::Conversation;
+    use pam_client2::{Context, Flag};
 
-    client
-        .conversation_mut()
-        .set_credentials(username, password);
+    // Non-interactive conversation handler that supplies the username and
+    // password to the PAM stack when prompted (replaces the old
+    // `set_credentials` call on `pam 0.8`'s built-in conversation).
+    let mut context = Context::new(
+        "beam",
+        Some(username),
+        Conversation::with_credentials(username, password),
+    )
+    .map_err(|e| anyhow::anyhow!("PAM init failed: {e}"))?;
 
-    client
-        .authenticate()
+    context
+        .authenticate(Flag::NONE)
         .map_err(|e| anyhow::anyhow!("Authentication failed: {e}"))?;
 
     Ok(())

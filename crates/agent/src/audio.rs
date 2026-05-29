@@ -1,7 +1,6 @@
-use audiopus::coder::Encoder as OpusEncoder;
-use audiopus::{Application, Bitrate, Channels, SampleRate};
 use libpulse_binding as pulse;
 use libpulse_simple_binding::Simple;
+use opus2::{Application, Bitrate, Channels, Encoder as OpusEncoder};
 use tracing::info;
 
 /// Map a channel count to an Opus [`Channels`] enum. Split out so the
@@ -15,16 +14,13 @@ pub(crate) fn opus_channels_for(channels: u16) -> anyhow::Result<Channels> {
     }
 }
 
-/// Map a sample-rate value (Hz) to an Opus [`SampleRate`] enum. Opus only
-/// supports a fixed set of sample rates (48/24/16/12/8 kHz). Anything else
-/// triggers an error from [`OpusEncoder::new`].
-pub(crate) fn opus_sample_rate_for(sample_rate: u32) -> anyhow::Result<SampleRate> {
+/// Validate a sample-rate value (Hz) against the set Opus supports
+/// (48/24/16/12/8 kHz) and return it unchanged. The `opus` crate's
+/// [`OpusEncoder::new`] takes the rate as a raw `u32`, so this guard rejects
+/// unsupported rates up-front rather than relying on the encoder to error.
+pub(crate) fn opus_sample_rate_for(sample_rate: u32) -> anyhow::Result<u32> {
     match sample_rate {
-        48000 => Ok(SampleRate::Hz48000),
-        24000 => Ok(SampleRate::Hz24000),
-        16000 => Ok(SampleRate::Hz16000),
-        12000 => Ok(SampleRate::Hz12000),
-        8000 => Ok(SampleRate::Hz8000),
+        48000 | 24000 | 16000 | 12000 | 8000 => Ok(sample_rate),
         _ => anyhow::bail!("Unsupported sample rate for Opus: {sample_rate}"),
     }
 }
@@ -84,7 +80,7 @@ impl AudioCapture {
                 .map_err(|e| anyhow::anyhow!("Failed to create Opus encoder: {e:?}"))?;
 
         opus_encoder
-            .set_bitrate(Bitrate::BitsPerSecond(256_000))
+            .set_bitrate(Bitrate::Bits(256_000))
             .map_err(|e| anyhow::anyhow!("Failed to set Opus bitrate: {e:?}"))?;
 
         info!(
@@ -390,42 +386,29 @@ mod tests {
 
     #[test]
     fn opus_sample_rate_48khz() {
-        assert!(matches!(
-            opus_sample_rate_for(48000).unwrap(),
-            SampleRate::Hz48000
-        ));
+        // The `opus` crate takes the sample rate as a raw u32; the validator
+        // returns the rate unchanged when it's one Opus supports.
+        assert_eq!(opus_sample_rate_for(48000).unwrap(), 48000);
     }
 
     #[test]
     fn opus_sample_rate_24khz() {
-        assert!(matches!(
-            opus_sample_rate_for(24000).unwrap(),
-            SampleRate::Hz24000
-        ));
+        assert_eq!(opus_sample_rate_for(24000).unwrap(), 24000);
     }
 
     #[test]
     fn opus_sample_rate_16khz() {
-        assert!(matches!(
-            opus_sample_rate_for(16000).unwrap(),
-            SampleRate::Hz16000
-        ));
+        assert_eq!(opus_sample_rate_for(16000).unwrap(), 16000);
     }
 
     #[test]
     fn opus_sample_rate_12khz() {
-        assert!(matches!(
-            opus_sample_rate_for(12000).unwrap(),
-            SampleRate::Hz12000
-        ));
+        assert_eq!(opus_sample_rate_for(12000).unwrap(), 12000);
     }
 
     #[test]
     fn opus_sample_rate_8khz() {
-        assert!(matches!(
-            opus_sample_rate_for(8000).unwrap(),
-            SampleRate::Hz8000
-        ));
+        assert_eq!(opus_sample_rate_for(8000).unwrap(), 8000);
     }
 
     #[test]

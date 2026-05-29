@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rcgen::{CertificateParams, KeyPair, SanType};
 use rustls::ServerConfig;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 /// Result of TLS configuration build, including the cert DER for agent pinning.
@@ -197,13 +198,12 @@ fn load_certs_from_files(
     let key_pem =
         std::fs::read(key_path).with_context(|| format!("Failed to read TLS key: {key_path}"))?;
 
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("Failed to parse TLS certificate PEM")?;
 
-    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
-        .context("Failed to parse TLS private key PEM")?
-        .context("No private key found in PEM file")?;
+    let key =
+        PrivateKeyDer::from_pem_slice(&key_pem).context("No private key found in PEM file")?;
 
     tracing::info!("Loaded TLS cert from {cert_path}");
     Ok((certs, key))
