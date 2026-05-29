@@ -913,4 +913,334 @@ mod tests {
         // The loop check `leading_zeros > 31` triggers a None.
         assert_eq!(r.read_ue(), None);
     }
+
+    // --- Precise SPS bitstream construction ---
+    //
+    // The earlier high-profile tests only assert "does not panic" because they
+    // hand-pack bytes by eye. To drive the *deep* parse_sps branches (the VUI
+    // colour-description path, pic_order_cnt_type==1, frame cropping,
+    // frame_mbs_only==0, the scaling-matrix loop, and separate_colour_plane),
+    // we need bitstreams we can build field-by-field and then assert the parsed
+    // result against. `SpsBuilder` is the exact mirror of `BitReader`: it writes
+    // unsigned Exp-Golomb, signed Exp-Golomb, and fixed-length bit fields MSB
+    // first, so a stream it emits is guaranteed to round-trip through the parser.
+
+    struct SpsBuilder {
+        bits: Vec<u8>,
+    }
+
+    impl SpsBuilder {
+        fn new() -> Self {
+            Self { bits: Vec::new() }
+        }
+
+        /// Append `n` low bits of `value`, MSB first.
+        fn put_bits(&mut self, value: u32, n: u8) {
+            for i in (0..n).rev() {
+                self.bits.push(((value >> i) & 1) as u8);
+            }
+        }
+
+        /// Append a single flag bit.
+        fn put_flag(&mut self, set: bool) {
+            self.bits.push(if set { 1 } else { 0 });
+        }
+
+        /// Append an unsigned Exp-Golomb coded value (inverse of `read_ue`).
+        fn put_ue(&mut self, value: u32) {
+            // code_num = value; encode as (leading_zeros zeros)(1)(suffix).
+            let v = value + 1;
+            let leading = 31 - v.leading_zeros(); // floor(log2(v))
+            for _ in 0..leading {
+                self.bits.push(0);
+            }
+            self.put_bits(v, (leading + 1) as u8);
+        }
+
+        /// Append a signed Exp-Golomb coded value (inverse of `read_se`).
+        fn put_se(&mut self, value: i32) {
+            // Mapping used by read_se: ue=0 -> 0, odd ue -> +(ue/2+1),
+            // even non-zero ue -> -(ue/2). Inverse:
+            let ue = if value == 0 {
+                0u32
+            } else if value > 0 {
+                (value as u32) * 2 - 1
+            } else {
+                (-value as u32) * 2
+            };
+            self.put_ue(ue);
+        }
+
+        /// Pack the accumulated bits MSB-first into bytes, zero-padding the tail.
+        fn into_bytes(
+            self,
+            nal_header: u8,
+            profile_idc: u8,
+            constraints: u8,
+            level: u8,
+        ) -> Vec<u8> {
+            let mut out = vec![nal_header, profile_idc, constraints, level];
+            let mut byte = 0u8;
+            let mut count = 0u8;
+            for bit in self.bits {
+                byte = (byte << 1) | bit;
+                count += 1;
+                if count == 8 {
+                    out.push(byte);
+                    byte = 0;
+                    count = 0;
+                }
+            }
+            if count > 0 {
+                out.push(byte << (8 - count));
+            }
+            out
+        }
+    }
+
+    /// Build a Main-profile (non-high) SPS body up to (but not including) the
+    /// vui_parameters_present_flag, with all the simple fields set to defaults.
+    /// `crop`, `frame_mbs_only`, and `poc_type` let individual tests steer the
+    /// branches they want to exercise.
+    fn main_sps_body(builder: &mut SpsBuilder, poc_type: u32, frame_mbs_only: bool, crop: bool) {
+        builder.put_ue(0); // seq_parameter_set_id
+        builder.put_ue(0); // log2_max_frame_num_minus4
+        builder.put_ue(poc_type); // pic_order_cnt_type
+        match poc_type {
+            0 => {
+                builder.put_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+            }
+            1 => {
+                builder.put_flag(false); // delta_pic_order_always_zero_flag
+                builder.put_se(-1); // offset_for_non_ref_pic
+                builder.put_se(2); // offset_for_top_to_bottom_field
+                builder.put_ue(2); // num_ref_frames_in_pic_order_cnt_cycle
+                builder.put_se(1); // offset_for_ref_frame[0]
+                builder.put_se(-2); // offset_for_ref_frame[1]
+            }
+            _ => {}
+        }
+        builder.put_ue(1); // max_num_ref_frames
+        builder.put_flag(false); // gaps_in_frame_num_value_allowed_flag
+        builder.put_ue(119); // pic_width_in_mbs_minus1 (1920px)
+        builder.put_ue(67); // pic_height_in_map_units_minus1
+        builder.put_flag(frame_mbs_only); // frame_mbs_only_flag
+        if !frame_mbs_only {
+            builder.put_flag(false); // mb_adaptive_frame_field_flag
+        }
+        builder.put_flag(true); // direct_8x8_inference_flag
+        builder.put_flag(crop); // frame_cropping_flag
+        if crop {
+            builder.put_ue(0); // frame_crop_left_offset
+            builder.put_ue(0); // frame_crop_right_offset
+            builder.put_ue(0); // frame_crop_top_offset
+            builder.put_ue(2); // frame_crop_bottom_offset
+        }
+    }
+
+    #[test]
+    fn parse_sps_vui_colour_description_present_is_detected() {
+        // Drive the full VUI path to colour_description_present_flag = 1,
+        // which is what `colorimetry=bt709` sets on the encoder. This exercises
+        // the aspect-ratio, overscan, and video-signal-type sub-branches.
+        let mut b = SpsBuilder::new();
+        main_sps_body(&mut b, 0, true, false);
+        b.put_flag(true); // vui_parameters_present_flag
+        b.put_flag(true); // aspect_ratio_info_present_flag
+        b.put_bits(255, 8); // aspect_ratio_idc = Extended_SAR
+        b.put_bits(16, 16); // sar_width
+        b.put_bits(9, 16); // sar_height
+        b.put_flag(true); // overscan_info_present_flag
+        b.put_flag(false); // overscan_appropriate_flag
+        b.put_flag(true); // video_signal_type_present_flag
+        b.put_bits(5, 3); // video_format
+        b.put_flag(false); // video_full_range_flag
+        b.put_flag(true); // colour_description_present_flag
+
+        let nal = b.into_bytes(0x67, 77, 0x00, 0x28);
+        let sps = parse_sps(&nal).expect("well-formed Main SPS must parse");
+        assert_eq!(sps.profile_idc, 77);
+        assert!(sps.vui_parameters_present);
+        assert!(
+            sps.colour_description_present,
+            "colour_description_present_flag must be detected"
+        );
+    }
+
+    #[test]
+    fn parse_sps_vui_present_without_colour_description() {
+        // VUI present but with aspect_ratio absent, overscan absent, and
+        // video_signal_type absent — colour_description must come back false.
+        let mut b = SpsBuilder::new();
+        main_sps_body(&mut b, 0, true, false);
+        b.put_flag(true); // vui_parameters_present_flag
+        b.put_flag(false); // aspect_ratio_info_present_flag
+        b.put_flag(false); // overscan_info_present_flag
+        b.put_flag(false); // video_signal_type_present_flag
+
+        let nal = b.into_bytes(0x67, 77, 0x00, 0x28);
+        let sps = parse_sps(&nal).expect("well-formed Main SPS must parse");
+        assert!(sps.vui_parameters_present);
+        assert!(!sps.colour_description_present);
+    }
+
+    #[test]
+    fn parse_sps_vui_aspect_ratio_non_extended() {
+        // aspect_ratio_idc != 255 means the 32 Extended_SAR bits are skipped.
+        let mut b = SpsBuilder::new();
+        main_sps_body(&mut b, 0, true, false);
+        b.put_flag(true); // vui_parameters_present_flag
+        b.put_flag(true); // aspect_ratio_info_present_flag
+        b.put_bits(1, 8); // aspect_ratio_idc = 1 (square) -> no Extended_SAR
+        b.put_flag(false); // overscan_info_present_flag
+        b.put_flag(true); // video_signal_type_present_flag
+        b.put_bits(5, 3); // video_format
+        b.put_flag(true); // video_full_range_flag
+        b.put_flag(false); // colour_description_present_flag
+
+        let nal = b.into_bytes(0x67, 77, 0x00, 0x28);
+        let sps = parse_sps(&nal).expect("well-formed Main SPS must parse");
+        assert!(sps.vui_parameters_present);
+        assert!(!sps.colour_description_present);
+    }
+
+    #[test]
+    fn parse_sps_pic_order_cnt_type_one_branch() {
+        // pic_order_cnt_type == 1 reads the delta-flag, two se() offsets, a ue
+        // count, and a per-cycle se() loop — a branch the type-0 streams never
+        // touch.
+        let mut b = SpsBuilder::new();
+        main_sps_body(&mut b, 1, true, false);
+        b.put_flag(false); // vui_parameters_present_flag
+
+        let nal = b.into_bytes(0x67, 77, 0x00, 0x28);
+        let sps = parse_sps(&nal).expect("poc_type==1 SPS must parse");
+        assert_eq!(sps.profile_idc, 77);
+        assert!(!sps.vui_parameters_present);
+    }
+
+    #[test]
+    fn parse_sps_frame_cropping_branch() {
+        // frame_cropping_flag == 1 reads four crop-offset ue() values.
+        let mut b = SpsBuilder::new();
+        main_sps_body(&mut b, 0, true, true);
+        b.put_flag(false); // vui_parameters_present_flag
+
+        let nal = b.into_bytes(0x67, 77, 0x00, 0x28);
+        let sps = parse_sps(&nal).expect("cropped SPS must parse");
+        assert_eq!(sps.profile_idc, 77);
+    }
+
+    #[test]
+    fn parse_sps_interlaced_reads_mb_adaptive_flag() {
+        // frame_mbs_only_flag == 0 forces reading mb_adaptive_frame_field_flag.
+        let mut b = SpsBuilder::new();
+        main_sps_body(&mut b, 0, false, false);
+        b.put_flag(false); // vui_parameters_present_flag
+
+        let nal = b.into_bytes(0x67, 77, 0x00, 0x28);
+        let sps = parse_sps(&nal).expect("interlaced SPS must parse");
+        assert_eq!(sps.profile_idc, 77);
+    }
+
+    #[test]
+    fn parse_sps_high_profile_with_scaling_matrix() {
+        // High profile (100) with seq_scaling_matrix_present_flag == 1 drives
+        // the 8-list scaling-matrix loop, including one present list whose
+        // delta_scale se() values walk the next_scale update.
+        let mut b = SpsBuilder::new();
+        b.put_ue(0); // seq_parameter_set_id
+        b.put_ue(1); // chroma_format_idc (4:2:0, != 3 so no separate plane)
+        b.put_ue(0); // bit_depth_luma_minus8
+        b.put_ue(0); // bit_depth_chroma_minus8
+        b.put_flag(false); // qpprime_y_zero_transform_bypass_flag
+        b.put_flag(true); // seq_scaling_matrix_present_flag
+        // chroma_format_idc != 3 -> 8 scaling lists.
+        for i in 0..8 {
+            if i == 0 {
+                // scaling_list_present_flag = 1 -> the parser walks a 16-entry
+                // delta loop. The first delta of -8 drives next_scale to
+                // (8 + (-8) + 256) % 256 = 0, so iterations 1..16 see
+                // next_scale == 0 and skip their read_se() entirely. This keeps
+                // the synthesized stream short while still exercising the
+                // present-list branch (lines that read delta_scale + update
+                // last_scale/next_scale).
+                b.put_flag(true); // scaling_list_present_flag
+                b.put_se(-8); // first (and only) delta -> next_scale becomes 0
+            } else {
+                b.put_flag(false); // scaling_list_present_flag = 0
+            }
+        }
+        b.put_ue(0); // log2_max_frame_num_minus4
+        b.put_ue(0); // pic_order_cnt_type
+        b.put_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        b.put_ue(1); // max_num_ref_frames
+        b.put_flag(false); // gaps_in_frame_num_value_allowed_flag
+        b.put_ue(119); // pic_width_in_mbs_minus1
+        b.put_ue(67); // pic_height_in_map_units_minus1
+        b.put_flag(true); // frame_mbs_only_flag
+        b.put_flag(true); // direct_8x8_inference_flag
+        b.put_flag(false); // frame_cropping_flag
+        b.put_flag(false); // vui_parameters_present_flag
+
+        let nal = b.into_bytes(0x67, 100, 0x00, 0x28);
+        let sps = parse_sps(&nal).expect("High SPS with scaling matrix must parse");
+        assert_eq!(sps.profile_idc, 100);
+        assert!(!sps.vui_parameters_present);
+    }
+
+    #[test]
+    fn parse_sps_high_profile_chroma_444_reads_separate_colour_plane() {
+        // chroma_format_idc == 3 (4:4:4) forces reading separate_colour_plane_flag
+        // and uses 12 scaling lists when the matrix is present. Here the matrix
+        // is absent so we just verify the separate-plane bit is consumed.
+        let mut b = SpsBuilder::new();
+        b.put_ue(0); // seq_parameter_set_id
+        b.put_ue(3); // chroma_format_idc = 3 (4:4:4)
+        b.put_flag(false); // separate_colour_plane_flag
+        b.put_ue(0); // bit_depth_luma_minus8
+        b.put_ue(0); // bit_depth_chroma_minus8
+        b.put_flag(false); // qpprime_y_zero_transform_bypass_flag
+        b.put_flag(false); // seq_scaling_matrix_present_flag
+        b.put_ue(0); // log2_max_frame_num_minus4
+        b.put_ue(0); // pic_order_cnt_type
+        b.put_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        b.put_ue(1); // max_num_ref_frames
+        b.put_flag(false); // gaps_in_frame_num_value_allowed_flag
+        b.put_ue(119); // pic_width_in_mbs_minus1
+        b.put_ue(67); // pic_height_in_map_units_minus1
+        b.put_flag(true); // frame_mbs_only_flag
+        b.put_flag(true); // direct_8x8_inference_flag
+        b.put_flag(false); // frame_cropping_flag
+        b.put_flag(false); // vui_parameters_present_flag
+
+        let nal = b.into_bytes(0x67, 244, 0x00, 0x28);
+        let sps = parse_sps(&nal).expect("High 4:4:4 SPS must parse");
+        assert_eq!(sps.profile_idc, 244);
+    }
+
+    #[test]
+    fn sps_builder_ue_round_trips_through_reader() {
+        // Guard the test helper itself: every ue() we write must read back
+        // identically, otherwise the SPS tests above would be asserting against
+        // a miscalibrated builder.
+        for value in [0u32, 1, 2, 3, 7, 8, 119, 1000] {
+            let mut b = SpsBuilder::new();
+            b.put_ue(value);
+            let bytes = b.into_bytes(0x67, 77, 0, 0x28);
+            let mut r = BitReader::new(&bytes[4..]);
+            assert_eq!(r.read_ue(), Some(value), "ue round-trip failed for {value}");
+        }
+    }
+
+    #[test]
+    fn sps_builder_se_round_trips_through_reader() {
+        for value in [0i32, 1, -1, 2, -2, 5, -5] {
+            let mut b = SpsBuilder::new();
+            b.put_se(value);
+            let bytes = b.into_bytes(0x67, 77, 0, 0x28);
+            let mut r = BitReader::new(&bytes[4..]);
+            assert_eq!(r.read_se(), Some(value), "se round-trip failed for {value}");
+        }
+    }
 }

@@ -182,57 +182,11 @@ jobs:
           restore-keys: cargo-coverage-
 
       - name: Run coverage
-        env:
-          # Per-process .profraw filenames keep test crashes from
-          # silently dropping coverage data — important for tests
-          # that exercise GStreamer pipelines, which can abort.
-          LLVM_PROFILE_FILE: beam-%p-%m.profraw
-        run: |
-          # Ratchet protocol: --fail-under-lines locks current
-          # coverage as a floor. Baseline measured was 55.40%.
-          # Several PRs lifted coverage in steady increments. This
-          # PR (#45 big-lift-final) introduces trait-based injection
-          # to test previously-untestable code paths, building on the
-          # video::classify_idr_wait_step and signaling::classify_ws_incoming
-          # extractions from the previous PR:
-          # - agent/input.rs: Inject trait — input callback dispatch
-          #   can now be exercised against a MockInjector instead of
-          #   requiring a real X11 display.
-          # - agent/clipboard.rs: ClipboardWrite + ClipboardRead
-          #   traits — clipboard dispatch can be exercised against
-          #   MockClipboard fakes.
-          # - agent/filetransfer.rs: FileSink trait — file transfer
-          #   dispatch can be exercised against MockFileSink fakes.
-          # - agent/main.rs: build_input_callback closure body
-          #   refactored into dispatch_input_action +
-          #   spawn_setxkbmap_worker + handle_pre_dispatch helpers
-          #   that take the new traits. 30+ new tests drive every
-          #   InputAction variant + error branch.
-          # - agent/display.rs: set_display_resolution refactored
-          #   into XrandrOutcome + classification helpers
-          #   (xrandr_probe_should_retry, xrandr_warn_line,
-          #   xrandr_should_log_warn, xrandr_mode_set_failed_message).
-          # - agent/cursor.rs: cursor_name_to_css /
-          #   cursor_serial_changed / cursor_css_changed extracted
-          #   from the X11-bound monitor loop.
-          # - agent/clipboard_sync.rs: classify_clipboard_read_result
-          #   + ClipboardSyncDispatch enum so the loop's branch tree
-          #   is exercisable without a real ClipboardBridge.
-          # - server/main.rs: TLS handshake / TCP accept / connection
-          #   error / persist sessions / destroy session log
-          #   helpers + classify_tls_handshake_result test helper.
-          # Coverage rose to 87.62% lines / 87.80% regions.
-          # Lines is the lower axis; floor(87.62 - 1) = 86.
-          # The remaining I/O-bound gap (~7.4pp) is structural:
-          # async fn main bodies, X11/PulseAudio/GStreamer-bound
-          # functions that need a live runtime to exercise. The
-          # trait infrastructure is in place so future PRs can add
-          # mocks at the call sites that wrap the actual GStreamer
-          # pipeline / screen capture / audio capture once those
-          # are themselves refactored behind traits.
-          # --ignore-filename-regex 'tests?/' excludes the test
-          # harness modules from the floor so it tracks real source
-          # coverage only.
-          cargo llvm-cov --workspace \
-            --ignore-filename-regex 'tests?/' \
-            --fail-under-lines 86
+        # Single source of truth: the ratchet floor, the test-harness
+        # exclude, and the LLVM_PROFILE_FILE crash-resilience pattern all
+        # live in the Makefile's `coverage-rust` target (#45). Ratcheting
+        # the floor is then a one-line Makefile change that applies
+        # identically to local `make coverage-rust` and to this gate —
+        # no duplicated number to drift out of sync (which is what left
+        # the docs stale before this change).
+        run: make coverage-rust

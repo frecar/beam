@@ -13,6 +13,7 @@
 
 .PHONY: build build-release build-web build-rust \
         dev stop run test lint fmt fix check ci pre-push install-hooks version-check bump-version \
+        coverage coverage-rust coverage-report \
         install uninstall deploy clean setup doctor help
 
 CARGO := cargo
@@ -20,6 +21,17 @@ NPM := npm
 INSTALL_DIR := /usr/local/bin
 CONFIG_DIR := /etc/beam
 WEB_INSTALL_DIR := /usr/share/beam/web/dist
+
+# Rust line-coverage floor (#45 ratchet protocol). Single source of truth:
+# the CI Coverage job runs `make coverage-rust`, so the gate lives here and
+# nowhere else. Ratchet rule: every PR that raises actual coverage bumps this
+# to floor(actual - 1); never lower it.
+COVERAGE_FLOOR := 87
+# Exclude the test-harness modules so the floor tracks real source coverage.
+COVERAGE_IGNORE := tests?/
+# Per-process .profraw filenames keep test crashes (e.g. GStreamer pipelines
+# that can abort) from silently dropping coverage data.
+COVERAGE_PROFILE := beam-%p-%m.profraw
 
 help:
 	@echo "Beam Remote Desktop"
@@ -30,6 +42,9 @@ help:
 	@echo "  make build          Build everything (debug)"
 	@echo "  make build-release  Build everything (release)"
 	@echo "  make test           Run all tests"
+	@echo "  make coverage       Rust + web coverage (both gated on their floor)"
+	@echo "  make coverage-rust  Rust line coverage, enforce ratchet floor (CI gate)"
+	@echo "  make coverage-report Rust HTML coverage report (find next gaps)"
 	@echo "  make lint           Run clippy + TypeScript type check"
 	@echo "  make fmt            Format all Rust code"
 	@echo "  make fix            Auto-fix lint + format (Rust + web)"
@@ -94,6 +109,27 @@ test:
 	$(CARGO) test --workspace
 	cd web && npx tsc --noEmit
 	cd web && $(NPM) test
+
+# === Coverage (#45 ratchet protocol) ===
+
+# Rust line coverage with the ratchet floor enforced. This is the EXACT command
+# the CI Coverage job runs — CI calls `make coverage-rust`, so the floor and the
+# excludes live only here (no duplicated number to drift, which is what left the
+# docs stale before). Fails if line coverage drops below COVERAGE_FLOOR.
+coverage-rust:
+	LLVM_PROFILE_FILE=$(COVERAGE_PROFILE) $(CARGO) llvm-cov --workspace \
+		--ignore-filename-regex '$(COVERAGE_IGNORE)' \
+		--fail-under-lines $(COVERAGE_FLOOR)
+
+# Coverage across both stacks: Rust (gated) + web (vitest, gated in vite.config.ts).
+coverage: coverage-rust
+	cd web && $(NPM) run test:coverage
+
+# Generate a browsable HTML coverage report for finding the next gaps to test.
+# Open target/llvm-cov/html/index.html afterwards. Does NOT enforce the floor.
+coverage-report:
+	LLVM_PROFILE_FILE=$(COVERAGE_PROFILE) $(CARGO) llvm-cov --workspace \
+		--ignore-filename-regex '$(COVERAGE_IGNORE)' --html
 
 # === Code Quality ===
 
