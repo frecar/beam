@@ -58,9 +58,17 @@ export default defineConfig(({ mode }) => {
       },
     },
     test: {
+      // Vitest owns `.test.ts`; Playwright owns `.spec.ts`. An explicit
+      // include keeps vitest from ever trying to run the browser smoke
+      // specs under e2e/ (which would fail — they need a real browser).
+      // The vendored E2E helper unit tests DO run here so the helpers
+      // stay covered without padding the src coverage ratchet.
+      include: ['src/**/*.test.ts', 'e2e/shared/tests/**/*.test.ts'],
       coverage: {
         provider: 'v8',
         reporter: ['text', 'json-summary', 'html'],
+        // Scope the ratchet to src/ only — the vendored e2e helpers are
+        // covered by their own tests but excluded from the src %.
         include: ['src/**/*.ts'],
         // Excludes: test files themselves, the bootstrap entry, and
         // type-only declaration files (no runtime to measure).

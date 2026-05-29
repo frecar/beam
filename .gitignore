@@ -10,6 +10,11 @@ web/dist/
 web/coverage/
 web/src/*.js
 
+# Playwright E2E artifacts (web/e2e smoke suite)
+web/playwright-report/
+web/test-results/
+web/.playwright/
+
 # TLS certificates and keys
 *.pem
 *.key
