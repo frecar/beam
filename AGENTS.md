@@ -15,9 +15,10 @@ Canonical agent instructions for this repository per [agents.md](https://agents.
 - Type check Web: `cd web && npx tsc --noEmit`
 
 ### Coverage (#45 ratchet protocol)
-- Rust: `cargo llvm-cov --workspace --ignore-filename-regex 'tests?/'` — CI floor `--fail-under-lines 82` (baseline 55.40% on 2026-05-17, set in #46; most recent measured: 83.47% lines).
+- Rust: `make coverage-rust` — runs `cargo llvm-cov --workspace --ignore-filename-regex 'tests?/' --fail-under-lines $(COVERAGE_FLOOR)`. The floor is the single `COVERAGE_FLOOR` variable in the `Makefile` (currently `87`); the CI Coverage job calls `make coverage-rust`, so there is exactly one number to bump. Tooling is `cargo-llvm-cov` (source-based LLVM coverage — handles async/tokio + FFI cleanly; chosen over `cargo-tarpaulin`). Most recent measured on main: 88.30% lines / 88.09% regions (2026-05-30).
+- `make coverage` runs both Rust and web; `make coverage-report` writes a browsable HTML report to `target/llvm-cov/html/index.html` for finding the next gaps.
 - Web: `cd web && npm run test:coverage` — vitest's v8 provider, threshold `lines: 25` in `vite.config.ts` (baseline 26.61% on 2026-05-17 measuring all `src/**/*.ts`, not just imported files).
-- Ratchet rule: every PR that raises actual coverage may bump the floor to `floor(actual - 1)`. Never lower. Target end-state: 85% lines on both sides.
+- Ratchet rule: every PR that raises actual coverage bumps `COVERAGE_FLOOR` to `floor(actual - 1)`. Never lower. Target end-state: 85% lines on both sides (Rust is past it; web is the remaining gap).
 
 ## Lint and Format
 - Run all lints: `make lint`
