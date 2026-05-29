@@ -58,6 +58,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Isolate npm cache
+        run: |
+          echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "$GITHUB_ENV"
+          mkdir -p "${RUNNER_TEMP}/npm-cache"
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -77,28 +82,37 @@ jobs:
   build-binary:
     name: Build ${{ matrix.target }}
     needs: [version-check]
-    runs-on: ${{ matrix.runner }}
+    runs-on: [self-hosted, Linux, "${{ matrix.runner_arch }}", cluster-ci]
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
+            runner_arch: X64
             arch: x86_64
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
+            runner_arch: ARM64
             arch: aarch64
     steps:
       - uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
+          sudo flock /tmp/apt-ci.lock bash <<'APT'
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq \
             pkg-config \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
             libpulse-dev libopus-dev \
             libpam0g-dev libclang-dev
+          APT
+
+      - name: Isolate Rust homes
+        run: |
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUNNER_TEMP}/rustup" >> "$GITHUB_ENV"
+          echo "${RUNNER_TEMP}/cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -107,8 +121,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ${{ runner.temp }}/cargo/registry
+            ${{ runner.temp }}/cargo/git
             target
           key: cargo-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-release-${{ matrix.target }}-
@@ -181,14 +195,14 @@ jobs:
   test-package:
     name: Test .deb (${{ matrix.arch }})
     needs: [package-deb]
-    runs-on: ${{ matrix.runner }}
+    runs-on: [self-hosted, Linux, "${{ matrix.runner_arch }}", cluster-ci]
     strategy:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-24.04
+            runner_arch: X64
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner_arch: ARM64
     steps:
       - name: Download .deb
         uses: actions/download-artifact@v8
