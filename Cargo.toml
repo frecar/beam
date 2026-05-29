@@ -32,7 +32,6 @@ tower-http = { version = "0.6.11", features = ["fs", "cors", "trace", "limit", "
 
 # TLS
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-rustls-pemfile = "2"
 rcgen = "0.14.8"
 tokio-rustls = "0.26.4"
 
@@ -41,7 +40,7 @@ hyper-util = { version = "0.1.20", features = ["tokio", "server-auto"] }
 
 # Auth
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
-pam = "0.8"
+pam-client2 = "0.5"
 
 # GStreamer
 gstreamer = "0.25.2"
@@ -57,4 +56,9 @@ nix = { version = "0.31.3", features = ["ioctl", "fs", "process", "signal", "use
 # Audio
 libpulse-binding = "2"
 libpulse-simple-binding = "2"
-audiopus = "0.3.0-rc.0"
+# opus2 is a maintained safe libopus wrapper (same API as the old `audiopus`
+# crate). Its `libopus_sys` backend probes for the system libopus via
+# pkg-config first, so it links `libopus-dev` and avoids the unmaintained
+# `audiopus_sys` (RUSTSEC-2026-0150) and any vendored CMake build.
+# Pinned to 0.3 to avoid 0.4's extra pure-Rust backend dependency.
+opus2 = "0.3"

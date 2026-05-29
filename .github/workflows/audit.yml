@@ -44,13 +44,12 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Advisories with no fixed upgrade available are allowlisted
-          # here with rationale. Review on every dependency bump — if a
-          # fix becomes available, drop the ID and run `cargo update`.
+          # No advisories are currently allowlisted. The former
+          # RUSTSEC-2025-0040 ignore (the `users 0.10.0` crate, pulled in
+          # transitively via `pam 0.8.0`) was dropped once `pam` was
+          # replaced with `pam-client2`, which removes the `users`
+          # dependency entirely.
           #
-          # RUSTSEC-2025-0040 (users 0.10.0): `root` appended to group
-          # listings. No fixed upgrade available; reaches us transitively
-          # via `pam 0.8.0`. We do not consume the `users` group-listing
-          # API. Re-evaluate when `pam` ships a release that drops the
-          # `users` dependency or `users` publishes a fix.
-          ignore: RUSTSEC-2025-0040
+          # If a future advisory has no fixed upgrade available, add the ID
+          # here with rationale and a re-evaluation trigger — and review on
+          # every dependency bump.
