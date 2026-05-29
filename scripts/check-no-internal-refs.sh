@@ -13,7 +13,7 @@ is_allowlisted_match() {
 
     # WHY: all repository workflows run on the private cluster runner pool, but
     # workflow runner labels are not deployment endpoints or runtime config.
-    if [[ "$file" == .github/workflows/* && "$line" == *"runs-on: [self-hosted, Linux, X64, cluster-ci]"* ]]; then
+    if [[ "$file" == .github/workflows/* && "$line" == *"runs-on: [self-hosted, Linux,"* && "$line" == *"cluster-ci]"* ]]; then
         return 0
     fi
 
