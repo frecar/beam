@@ -12,7 +12,7 @@
 # - Minor (0.x.0): breaking config/protocol changes requiring simultaneous update
 
 .PHONY: build build-release build-web build-rust \
-        dev stop run test lint fmt fix check ci pre-push install-hooks version-check bump-version \
+        dev stop run test web-e2e e2e lint fmt fix check ci pre-push install-hooks version-check bump-version \
         coverage coverage-rust coverage-report \
         install uninstall deploy clean setup doctor help
 
@@ -42,6 +42,7 @@ help:
 	@echo "  make build          Build everything (debug)"
 	@echo "  make build-release  Build everything (release)"
 	@echo "  make test           Run all tests"
+	@echo "  make e2e            Browser E2E smoke suite (Playwright, chromium)"
 	@echo "  make coverage       Rust + web coverage (both gated on their floor)"
 	@echo "  make coverage-rust  Rust line coverage, enforce ratchet floor (CI gate)"
 	@echo "  make coverage-report Rust HTML coverage report (find next gaps)"
@@ -109,6 +110,20 @@ test:
 	$(CARGO) test --workspace
 	cd web && npx tsc --noEmit
 	cd web && $(NPM) test
+
+# === Browser E2E smoke (shared contract) ===
+
+# Build the web bundle, serve it with vite preview, and drive a chromium
+# smoke suite against it (Playwright). Installs the chromium browser first
+# so a clean checkout works without a separate setup step.
+web-e2e:
+	cd web && $(NPM) run test:e2e:install
+	cd web && $(NPM) run test:e2e
+
+# Standard entry point for the browser smoke suite. Aliases `web-e2e` so the
+# `e2e` target name stays consistent with the shared smoke contract even
+# though the Playwright command lives under the web tree.
+e2e: web-e2e
 
 # === Coverage (#45 ratchet protocol) ===
 
