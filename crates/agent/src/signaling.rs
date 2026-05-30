@@ -71,7 +71,9 @@ fn build_tls_connector(tls_cert_path: Option<&str>) -> tokio_tungstenite::Connec
     if let Some(cert_path) = tls_cert_path {
         match std::fs::read(cert_path) {
             Ok(pem_data) => {
-                let certs: Vec<_> = rustls_pemfile::certs(&mut pem_data.as_slice())
+                use rustls::pki_types::CertificateDer;
+                use rustls::pki_types::pem::PemObject;
+                let certs: Vec<_> = CertificateDer::pem_slice_iter(&pem_data)
                     .filter_map(|r| r.ok())
                     .collect();
                 for cert in certs {
