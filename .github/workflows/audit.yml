@@ -30,7 +30,7 @@ jobs:
     name: cargo audit
     runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Isolate Rust homes
         run: |
@@ -39,9 +39,13 @@ jobs:
           echo "${RUNNER_TEMP}/cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # SHA-pinned (supply-chain hardening): the `@stable` channel is moved to an explicit
+        # `toolchain:` input so pinning the action to a SHA preserves behavior.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
 
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # No advisories are currently allowlisted. The former
