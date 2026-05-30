@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege default: every job in this workflow is read-only —
+# checkout, cargo build/test/clippy/fmt, npm ci/test/build, version-check,
+# and the hermetic Playwright smoke. None comment on PRs, push, or create
+# releases, so the read-only default GITHUB_TOKEN needs no per-job
+# escalation. Workflows that DO write (release, audit, dependabot
+# auto-merge) carry their own narrower permissions blocks.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -226,3 +235,37 @@ jobs:
         # no duplicated number to drift out of sync (which is what left
         # the docs stale before this change).
         run: make coverage-rust
+
+  ci-gate:
+    # Single aggregate status check. Point branch protection at "CI Gate"
+    # instead of each individual job so new jobs become gating
+    # automatically and a re-run that cancels/skips a required job can't
+    # slip through.
+    #
+    # `if: ${{ !cancelled() }}` keeps THIS job running even when an
+    # upstream job was cancelled or skipped — without it, a cancelled
+    # upstream would mark ci-gate "skipped" and a "skipped" required
+    # check counts as passing in branch protection (the exact blind spot
+    # this gate exists to close). The step below then reds the gate on
+    # ANY non-success upstream result: `failure`, `cancelled`, OR
+    # `skipped`. None of this workflow's jobs are conditionally skipped
+    # by design, so a `skipped` here always means infra trouble and
+    # should fail closed.
+    name: CI Gate
+    needs: [check, version-check, web, web-e2e, coverage]
+    runs-on: ubuntu-24.04
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Assert all required jobs succeeded
+        if: >-
+          ${{ contains(needs.*.result, 'failure')
+              || contains(needs.*.result, 'cancelled')
+              || contains(needs.*.result, 'skipped') }}
+        run: |
+          echo "::error::A required CI job did not succeed:"
+          echo "  check          = ${{ needs.check.result }}"
+          echo "  version-check  = ${{ needs.version-check.result }}"
+          echo "  web            = ${{ needs.web.result }}"
+          echo "  web-e2e        = ${{ needs.web-e2e.result }}"
+          echo "  coverage       = ${{ needs.coverage.result }}"
+          exit 1
