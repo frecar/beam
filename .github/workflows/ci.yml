@@ -23,7 +23,7 @@ jobs:
     name: Check
     runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Private reference check
         run: bash scripts/check-no-internal-refs.sh
@@ -55,12 +55,16 @@ jobs:
           echo "${RUNNER_TEMP}/cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # SHA-pinned (supply-chain hardening): the `@stable` ref encodes the toolchain
+        # channel, so pinning the action to a SHA requires moving the channel
+        # into an explicit `toolchain:` input to preserve behavior.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache Cargo registry and build
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ${{ runner.temp }}/cargo/registry
@@ -82,10 +86,10 @@ jobs:
     name: Version consistency
     runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24
 
@@ -99,7 +103,7 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Isolate npm cache
         run: |
@@ -107,7 +111,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/npm-cache"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24
           cache: npm
@@ -147,10 +151,10 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24
           cache: npm
@@ -170,7 +174,7 @@ jobs:
 
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: playwright-report
           path: web/playwright-report/
@@ -180,7 +184,7 @@ jobs:
     name: Coverage
     runs-on: [self-hosted, Linux, X64, cluster-ci]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install system dependencies
         # xclip is needed for clipboard_bridge tests that exercise the
@@ -206,15 +210,19 @@ jobs:
           echo "${RUNNER_TEMP}/cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # SHA-pinned (supply-chain hardening): channel moved to an explicit input — see above.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
+          toolchain: stable
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@50b4a718b59c718df4ef27a3b445f86cd57b9f00 # v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Cache Cargo registry and build
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           # Separate cache key from `check` — RUSTFLAGS=-C
           # instrument-coverage invalidates incremental builds, so
