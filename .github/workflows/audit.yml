@@ -28,7 +28,10 @@ permissions:
 jobs:
   security_audit:
     name: cargo audit
-    runs-on: [self-hosted, Linux, X64, cluster-ci]
+    # GitHub-hosted: pull_request-reachable on a public repo, so it must
+    # not run fork code on a self-hosted runner. cargo audit only reads
+    # Cargo.lock against the advisory DB — no infra dependency.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
