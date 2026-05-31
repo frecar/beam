@@ -21,7 +21,12 @@ env:
 jobs:
   check:
     name: Check
-    runs-on: [self-hosted, Linux, X64, cluster-ci]
+    # GitHub-hosted runner. This is a public repo: a fork PR can run
+    # arbitrary code in CI, so every pull_request-reachable job runs on an
+    # ephemeral GitHub-hosted runner rather than a self-hosted one. Only
+    # release.yml (triggered solely by trusted tag pushes, never a fork PR)
+    # stays self-hosted, where it needs the per-arch build + signing setup.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -84,7 +89,8 @@ jobs:
 
   version-check:
     name: Version consistency
-    runs-on: [self-hosted, Linux, X64, cluster-ci]
+    # GitHub-hosted — public-repo fork-PR isolation (see `check` above).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -98,7 +104,8 @@ jobs:
 
   web:
     name: Web
-    runs-on: [self-hosted, Linux, X64, cluster-ci]
+    # GitHub-hosted — public-repo fork-PR isolation (see `check` above).
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: web
@@ -182,7 +189,8 @@ jobs:
 
   coverage:
     name: Coverage
-    runs-on: [self-hosted, Linux, X64, cluster-ci]
+    # GitHub-hosted — public-repo fork-PR isolation (see `check` above).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -265,7 +273,9 @@ jobs:
     # SHA256), NOT `gitleaks/gitleaks-action`: the Docker action pulls an image
     # (Docker-Hub pull-rate-limit pain) and trips org-license checks. The scan
     # itself is a local git op — no network once the binary is in place.
-    runs-on: [self-hosted, Linux, X64, cluster-ci]
+    #
+    # GitHub-hosted — public-repo fork-PR isolation (see `check` above).
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
