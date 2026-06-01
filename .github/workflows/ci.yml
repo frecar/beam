@@ -331,6 +331,83 @@ jobs:
             gitleaks dir . "${common[@]}"
           fi
 
+  agent-display-smoke:
+    name: Agent display smoke
+    # Boots beam-agent against a SIMULATED X display (Xvfb) and asserts it
+    # captures + encodes real frames through the software (x264enc) GStreamer
+    # pipeline. The crate's unit tests use trait-injected mocks, so this is
+    # the only gate that exercises the runtime plugin set, the live X-server
+    # capture path, and the startup deps (xclip) — the breakage classes a
+    # mock can't reach. Software encode only (CI has no GPU); the NVENC/VA-API
+    # paths and the full desktop-handoff round trip are out of scope here.
+    #
+    # GitHub-hosted — public-repo fork-PR isolation (see `check` above).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install system dependencies
+        # Build deps (pkg-config + GStreamer/Pulse/Opus/clang dev headers)
+        # plus the RUNTIME surface the smoke needs:
+        #   - xvfb          : the virtual X server beam-agent connects to
+        #   - x11-utils      : xdpyinfo, to poll Xvfb readiness (not a sleep)
+        #   - xclip          : ClipboardBridge::new aborts the agent without it
+        #   - gstreamer1.0-plugins-{base,good,bad,ugly}: the loadable plugins
+        #     for appsrc/appsink/videoconvert (base/good), h264parse (bad),
+        #     and x264enc (ugly) — the software encode pipeline.
+        #   - gstreamer1.0-tools: gst-inspect-1.0, for the pre-launch element
+        #     check so a missing plugin fails loud rather than cryptically.
+        run: |
+          sudo flock /tmp/apt-ci.lock bash <<'APT'
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq \
+            pkg-config \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+            libpulse-dev libopus-dev \
+            libpam0g-dev libclang-dev \
+            xvfb x11-utils xclip \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            gstreamer1.0-tools
+          APT
+
+      - name: Isolate Rust homes
+        run: |
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUNNER_TEMP}/rustup" >> "$GITHUB_ENV"
+          echo "${RUNNER_TEMP}/cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain
+        # SHA-pinned (supply-chain hardening): channel moved to an explicit input — see above.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: |
+            ${{ runner.temp }}/cargo/registry
+            ${{ runner.temp }}/cargo/git
+            target
+          key: cargo-agent-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-agent-smoke-
+
+      - name: Build beam-agent (release)
+        run: cargo build --release --locked -p beam-agent
+
+      - name: Run agent display smoke
+        # The script starts Xvfb, waits for it via xdpyinfo, boots beam-agent
+        # with software x264enc against a dead WS endpoint (the capture+encode
+        # thread runs independently of the server connection), and asserts both
+        # "First frame captured from X display" and "First H.264 frame from
+        # encoder" appear within the timeout. It dumps the agent + Xvfb logs
+        # and exits non-zero on any failure — no `|| true` masking.
+        run: bash scripts/agent-display-smoke.sh
+
   ci-gate:
     # Single aggregate status check. Point branch protection at "CI Gate"
     # instead of each individual job so new jobs become gating
@@ -347,7 +424,7 @@ jobs:
     # by design, so a `skipped` here always means infra trouble and
     # should fail closed.
     name: CI Gate
-    needs: [check, version-check, web, web-e2e, coverage, gitleaks]
+    needs: [check, version-check, web, web-e2e, coverage, gitleaks, agent-display-smoke]
     runs-on: ubuntu-24.04
     if: ${{ !cancelled() }}
     steps:
@@ -363,4 +440,6 @@ jobs:
           echo "  web            = ${{ needs.web.result }}"
           echo "  web-e2e        = ${{ needs.web-e2e.result }}"
           echo "  coverage       = ${{ needs.coverage.result }}"
+          echo "  gitleaks       = ${{ needs.gitleaks.result }}"
+          echo "  agent-display-smoke = ${{ needs.agent-display-smoke.result }}"
           exit 1
