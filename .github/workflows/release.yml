@@ -208,22 +208,44 @@ jobs:
           - arch: arm64
             runner_arch: ARM64
     steps:
+      # Checkout is required so the runtime smoke script (scripts/package-smoke.sh)
+      # is available to mount into the install container.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
       - name: Download .deb
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: deb-${{ matrix.arch }}
+          path: debs
 
       - name: Test .deb install in Docker
+        # Install the .deb in a clean ubuntu:24.04, verify the static
+        # packaging contract (binaries on PATH, web assets present), then
+        # run a RUNTIME smoke: boot beam-server and assert /api/health and
+        # the SPA root actually respond. A separate strict `bash -c` per
+        # check (no `&& ... || true` chain) so a failure can't be masked.
         run: |
-          docker run --rm -v $(pwd):/debs ubuntu:24.04 bash -c "
-            apt-get update -qq &&
-            dpkg -i /debs/beam_*_${{ matrix.arch }}.deb || apt-get install -f -y -qq &&
-            beam-server --version &&
-            beam-doctor --help || true &&
-            test -f /usr/share/beam/web/dist/index.html &&
-            ls /usr/share/beam/web/dist/assets/*.js >/dev/null 2>&1 &&
-            echo 'Web assets verified OK'
-          "
+          set -euo pipefail
+          docker run --rm \
+            -v "$(pwd)/debs:/debs:ro" \
+            -v "$(pwd)/scripts/package-smoke.sh:/usr/local/bin/package-smoke.sh:ro" \
+            ubuntu:24.04 bash -euo pipefail -c '
+              apt-get update -qq
+              # curl is required by the runtime smoke and is not in the base image.
+              dpkg -i /debs/beam_*_'"${{ matrix.arch }}"'.deb \
+                || { apt-get install -f -y -qq; }
+              apt-get install -y -qq curl
+
+              # Static packaging contract.
+              beam-server --version
+              beam-doctor --help || true
+              test -f /usr/share/beam/web/dist/index.html
+              ls /usr/share/beam/web/dist/assets/*.js >/dev/null 2>&1
+              echo "Static web assets verified OK"
+
+              # Runtime smoke: server boots + serves HTTP surface.
+              bash /usr/local/bin/package-smoke.sh
+            '
 
   publish-apt:
     name: Publish APT repository
