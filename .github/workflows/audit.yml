@@ -1,4 +1,19 @@
 name: Security audit
+# managed-public-ci-template: cargo-audit — DO NOT HAND-EDIT.
+# This file is a managed copy kept byte-identical to the canonical CI
+# template. Hand-edits are overwritten by the next template sync; change
+# the canonical template (and re-run the drift check) instead.
+#
+# cargo audit supply-chain sweep — scans Cargo.lock against the RustSec
+# advisory DB. This repo ships a native binary (a .deb), not a container
+# image, so its dependency-scan surface is the crate graph, not an OS
+# image layer; cargo audit is the equivalent of the filesystem scan the
+# container repos run.
+#
+# Triggers: every Cargo manifest/lock change (push + PR) so a dependency
+# bump is gated, plus a weekly schedule so a newly-disclosed advisory
+# against an unchanged Cargo.lock still surfaces (the whole point of
+# supply-chain scanning).
 
 on:
   push:
