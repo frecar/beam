@@ -408,6 +408,121 @@ jobs:
         # and exits non-zero on any failure — no `|| true` masking.
         run: bash scripts/agent-display-smoke.sh
 
+  post-deploy-smoke:
+    name: Post-deploy smoke
+    # Validates scripts/post-deploy-smoke.sh — the smoke a deployment tool
+    # runs against an ALREADY-RUNNING instance after `apt install beam=X.Y.Z`.
+    # It is the deploy-time counterpart to release.yml's package smoke: the
+    # package smoke proves a freshly-built .deb boots in isolation; THIS smoke
+    # proves the deploy took effect on a live host (right version serving,
+    # service stays up, dashboard still renders). Here we boot a real
+    # beam-server, point the smoke at it over the network, and assert both the
+    # green path AND a failure path actually behaves — a smoke that cannot
+    # fail proves nothing.
+    #
+    # GitHub-hosted — public-repo fork-PR isolation (see `check` above).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install system dependencies
+        # Build deps for beam-server, plus curl (the smoke's only runtime dep).
+        run: |
+          sudo flock /tmp/apt-ci.lock bash <<'APT'
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq \
+            pkg-config \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+            libpulse-dev libopus-dev \
+            libpam0g-dev libclang-dev \
+            curl
+          APT
+
+      - name: Isolate Rust homes
+        run: |
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUNNER_TEMP}/rustup" >> "$GITHUB_ENV"
+          echo "${RUNNER_TEMP}/cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain
+        # SHA-pinned (supply-chain hardening): channel moved to an explicit input — see above.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: |
+            ${{ runner.temp }}/cargo/registry
+            ${{ runner.temp }}/cargo/git
+            target
+          key: cargo-postdeploy-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-postdeploy-smoke-
+
+      - name: Build beam-server (release)
+        run: cargo build --release --locked -p beam-server
+
+      - name: Boot beam-server + run post-deploy smoke
+        # Boot a REAL beam-server (lazy per-session agents → no display needed),
+        # then exercise the live-instance smoke end-to-end. We assert the GREEN
+        # path passes AND a deliberately wrong EXPECTED_VERSION fails — proving
+        # the version-match guard (the post-deploy-specific assertion) actually
+        # catches a "deploy didn't take effect" instance instead of rubber-
+        # stamping it.
+        run: |
+          set -euo pipefail
+          PORT=18444
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          echo "beam-server version under test: ${VERSION}"
+
+          # Minimal web_root with the SPA marker the smoke asserts. The full
+          # bundle is validated by the `web` + `web-e2e` jobs; here we only
+          # need the marker so the SPA-root check is meaningful.
+          WEB_ROOT="${RUNNER_TEMP}/beam-web"
+          mkdir -p "${WEB_ROOT}"
+          printf '<!DOCTYPE html><html><head><title>Beam Remote Desktop</title></head><body><div id="app"></div></body></html>\n' \
+            > "${WEB_ROOT}/index.html"
+
+          CONFIG="${RUNNER_TEMP}/beam.toml"
+          cat > "${CONFIG}" <<EOF
+          [server]
+          bind = "127.0.0.1"
+          port = ${PORT}
+          web_root = "${WEB_ROOT}"
+
+          [session]
+          gpu_driver = "dummy"
+          EOF
+
+          # beam-server persists state under /var/lib/beam; create it writable.
+          sudo mkdir -p /var/lib/beam
+          sudo chown "$(id -u):$(id -g)" /var/lib/beam
+
+          ./target/release/beam-server --config "${CONFIG}" --port "${PORT}" \
+            > "${RUNNER_TEMP}/beam-server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "${SERVER_PID}" 2>/dev/null || true' EXIT
+
+          BASE="https://127.0.0.1:${PORT}"
+
+          echo "::group::green path (correct version + marker must PASS)"
+          BEAM_SMOKE_SETTLE=2 bash scripts/post-deploy-smoke.sh "${BASE}" "${VERSION}"
+          echo "::endgroup::"
+
+          echo "::group::failure path (wrong version must FAIL)"
+          if BEAM_SMOKE_SETTLE=2 bash scripts/post-deploy-smoke.sh "${BASE}" "0.0.0-not-deployed"; then
+            echo "::error::post-deploy-smoke PASSED on a version mismatch — the guard is broken"
+            cat "${RUNNER_TEMP}/beam-server.log"
+            exit 1
+          fi
+          echo "version-mismatch correctly rejected"
+          echo "::endgroup::"
+
   ci-gate:
     # Single aggregate status check. Point branch protection at "CI Gate"
     # instead of each individual job so new jobs become gating
@@ -424,7 +539,7 @@ jobs:
     # by design, so a `skipped` here always means infra trouble and
     # should fail closed.
     name: CI Gate
-    needs: [check, version-check, web, web-e2e, coverage, gitleaks, agent-display-smoke]
+    needs: [check, version-check, web, web-e2e, coverage, gitleaks, agent-display-smoke, post-deploy-smoke]
     runs-on: ubuntu-24.04
     if: ${{ !cancelled() }}
     steps:
@@ -442,4 +557,5 @@ jobs:
           echo "  coverage       = ${{ needs.coverage.result }}"
           echo "  gitleaks       = ${{ needs.gitleaks.result }}"
           echo "  agent-display-smoke = ${{ needs.agent-display-smoke.result }}"
+          echo "  post-deploy-smoke   = ${{ needs.post-deploy-smoke.result }}"
           exit 1
