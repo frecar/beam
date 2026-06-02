@@ -44,10 +44,19 @@
 # validation). It does not open a remote-desktop session, negotiate the
 # video pipeline, or exercise GPU/X11/GStreamer — those need real display
 # hardware and would make a deploy gate either trivially synthetic or flaky.
-# Host-local capture-stack health (GStreamer / encoder / X11 / GPU) is the
-# job of `beam-doctor`, which the deploy tooling can run on the host
-# alongside this network probe. A deeper capture-pipeline health probe is
-# tracked as a follow-up.
+#
+# Capture readiness is checked SEPARATELY, on the host, not over the network.
+# beam-server only relays frames — it never links GStreamer, and capture/encode
+# runs in a per-session beam-agent that does not exist on an idle host. So there
+# is nothing capture-related for a network probe to honestly assert here. The
+# drift that causes a black screen after an upgrade (a missing encoder plugin or
+# Xorg dummy driver) is host-local, and `beam-doctor --capture` checks exactly
+# that and exits non-zero if the capture stack is broken. A deployment tool
+# should run BOTH against each upgraded host: this script over the network, then
+#
+#   beam-doctor --capture
+#
+# on the host itself, treating a non-zero exit from either as a failed rollout.
 #
 # Hermetic and non-flaky: beam-server starts agents lazily per session, so it
 # is fully healthy with no display attached. No display/GPU/X11 needed.
