@@ -112,10 +112,30 @@ make release VERSION=X.Y.Z
 #    config-management tool that runs `apt update && apt install beam=X.Y.Z`
 #    on each target host)
 
-# 7. Verify deployment on each host (service health, logs, version)
+# 7. Verify deployment on each host with the post-deploy smoke:
+#       scripts/post-deploy-smoke.sh https://<host>:8444 X.Y.Z
+#    Run it against EACH upgraded host (its own address, not a shared
+#    front-end), passing the version you just deployed. It polls
+#    /api/health until status=ok, asserts the SERVED version matches the
+#    one you deployed (catches "the upgrade didn't take effect / an old
+#    process is still bound"), re-checks after a short settle window
+#    (catches a crash-loop that answers once then dies), and asserts the
+#    SPA root still renders. It exits non-zero (loudly) on any failure, so
+#    a deployment tool should treat a non-zero exit as a failed rollout.
 ```
 
 `make release` validates version sync, runs the full CI suite (fmt, clippy, tests, tsc, vite build), creates the git tag, and pushes both the commit and tag. CI then builds the `.deb` and publishes to the APT repo and GitHub Releases.
+
+The post-deploy smoke is intentionally a live-server HTTP gate, not a full
+remote-desktop session validation: it needs no display/GPU/X11 (beam-server
+starts agents lazily per session), so it stays hermetic and non-flaky. For
+host-local capture-stack health (GStreamer, encoder, X11, GPU) run
+`beam-doctor` on the host alongside it. The same script is exercised
+end-to-end against a real beam-server by the `post-deploy-smoke` CI job, so it
+is kept honest on every change. Counterpart: the release pipeline's package
+smoke (`scripts/package-smoke.sh`) proves a freshly-built `.deb` boots in
+isolation; the post-deploy smoke proves the upgrade actually took effect on a
+running host.
 
 **IMPORTANT**: Always use `make release` to tag and push -- never tag manually. This ensures CI passes before a tag is created.
 
