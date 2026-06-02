@@ -112,27 +112,47 @@ make release VERSION=X.Y.Z
 #    config-management tool that runs `apt update && apt install beam=X.Y.Z`
 #    on each target host)
 
-# 7. Verify deployment on each host with the post-deploy smoke:
-#       scripts/post-deploy-smoke.sh https://<host>:8444 X.Y.Z
-#    Run it against EACH upgraded host (its own address, not a shared
-#    front-end), passing the version you just deployed. It polls
-#    /api/health until status=ok, asserts the SERVED version matches the
-#    one you deployed (catches "the upgrade didn't take effect / an old
-#    process is still bound"), re-checks after a short settle window
-#    (catches a crash-loop that answers once then dies), and asserts the
-#    SPA root still renders. It exits non-zero (loudly) on any failure, so
-#    a deployment tool should treat a non-zero exit as a failed rollout.
+# 7. Verify deployment on each host with TWO complementary checks:
+#
+#    a) Network HTTP gate (from anywhere that can reach the host):
+#         scripts/post-deploy-smoke.sh https://<host>:8444 X.Y.Z
+#       Run it against EACH upgraded host (its own address, not a shared
+#       front-end), passing the version you just deployed. It polls
+#       /api/health until status=ok, asserts the SERVED version matches the
+#       one you deployed (catches "the upgrade didn't take effect / an old
+#       process is still bound"), re-checks after a short settle window
+#       (catches a crash-loop that answers once then dies), and asserts the
+#       SPA root still renders.
+#
+#    b) Host-local capture-readiness gate (ON the host):
+#         beam-doctor --capture
+#       The HTTP gate proves the server is up and serving the right version,
+#       but the server only relays frames — it never links GStreamer, and
+#       capture/encode runs in a per-session beam-agent absent on an idle
+#       host, so HTTP says nothing about whether a session would produce a
+#       picture. `beam-doctor --capture` checks the host-local capture stack
+#       (GStreamer + an H.264 encoder element + Xorg dummy driver) and exits
+#       non-zero if it would black-screen.
+#
+#    Both exit non-zero (loudly) on failure, so a deployment tool should
+#    treat a non-zero exit from EITHER as a failed rollout.
 ```
 
 `make release` validates version sync, runs the full CI suite (fmt, clippy, tests, tsc, vite build), creates the git tag, and pushes both the commit and tag. CI then builds the `.deb` and publishes to the APT repo and GitHub Releases.
 
 The post-deploy smoke is intentionally a live-server HTTP gate, not a full
 remote-desktop session validation: it needs no display/GPU/X11 (beam-server
-starts agents lazily per session), so it stays hermetic and non-flaky. For
-host-local capture-stack health (GStreamer, encoder, X11, GPU) run
-`beam-doctor` on the host alongside it. The same script is exercised
-end-to-end against a real beam-server by the `post-deploy-smoke` CI job, so it
-is kept honest on every change. Counterpart: the release pipeline's package
+starts agents lazily per session), so it stays hermetic and non-flaky. The
+capture stack is a separate, host-local concern — beam-server relays frames and
+never links GStreamer, so a network probe cannot honestly assert capture
+readiness (there is no per-session X server on an idle host). Run
+`beam-doctor --capture` ON the host to gate that: it checks the capture stack
+(GStreamer, an H.264 encoder element, the Xorg dummy driver) and exits non-zero
+if a session would black-screen. Both gates are exercised in CI: the
+`post-deploy-smoke` job boots a real beam-server and runs the HTTP smoke
+end-to-end, and the `capture-readiness-smoke` job proves `beam-doctor --capture`
+passes with the stack present and fails with the encoder hidden — so neither
+gate can silently rot into a no-op. Counterpart: the release pipeline's package
 smoke (`scripts/package-smoke.sh`) proves a freshly-built `.deb` boots in
 isolation; the post-deploy smoke proves the upgrade actually took effect on a
 running host.

@@ -1,7 +1,59 @@
 #!/usr/bin/env bash
 # beam-doctor — Beam Remote Desktop diagnostic tool
 # Checks runtime dependencies, service status, and configuration.
+#
+# Modes:
+#   beam-doctor            full diagnostic (capture stack + service + config + runtime)
+#   beam-doctor --capture  capture-stack ONLY (GStreamer / encoder / GPU / X11),
+#                          a scriptable post-deploy capture-readiness gate.
+#
+# --capture exists because a network HTTP smoke (scripts/post-deploy-smoke.sh)
+# proves the SERVER is up and serving the right version, but says nothing about
+# whether a session would actually produce a picture: beam-server relays frames
+# and never links GStreamer — capture/encode lives in the per-session beam-agent.
+# The drift that causes a black screen after an upgrade (an encoder plugin or the
+# Xorg dummy driver going missing) is host-local, so it is checked here ON the
+# host, not over the network. Run `beam-doctor --capture` on each host after the
+# network smoke; it exits non-zero (a usable gate) if any capture-stack check
+# fails. The full run additionally surfaces service/config/runtime state, whose
+# WARNs are informational and would muddy a gate's exit code — hence the split.
+#
+# Scope of --capture (deliberately): it confirms the capture STACK is installed
+# and an H.264 encoder ELEMENT can be found — NOT a live session, a live X
+# connection (the X server is per-session and absent on an idle host), or a real
+# GPU encode. Those need a real desktop session and are out of scope for a
+# non-disruptive readiness gate.
 set -uo pipefail
+
+CAPTURE_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --capture)
+            CAPTURE_ONLY=1
+            ;;
+        -h|--help)
+            cat <<'USAGE'
+beam-doctor — Beam Remote Desktop diagnostic tool
+
+Usage:
+  beam-doctor            Full diagnostic: capture stack, GPU, X11, audio,
+                         service, configuration, and runtime.
+  beam-doctor --capture  Capture stack only (GStreamer, encoder, GPU, X11
+                         tools). A scriptable post-deploy capture-readiness
+                         gate — exits non-zero if any capture-stack check
+                         fails. Does NOT open a session, connect to a live
+                         X server, or exercise the GPU encoder.
+  beam-doctor --help     Show this help.
+USAGE
+            exit 0
+            ;;
+        *)
+            printf 'beam-doctor: unknown argument: %s\n' "$arg" >&2
+            printf 'Try `beam-doctor --help`.\n' >&2
+            exit 2
+            ;;
+    esac
+done
 
 OK=0; WARN=0; FAIL=0
 green="\033[32m"; yellow="\033[33m"; red="\033[31m"; bold="\033[1m"; reset="\033[0m"
@@ -9,6 +61,12 @@ green="\033[32m"; yellow="\033[33m"; red="\033[31m"; bold="\033[1m"; reset="\033
 pass()  { OK=$((OK+1));   printf "${green}[OK]${reset}   %s\n" "$1"; }
 warn()  { WARN=$((WARN+1)); printf "${yellow}[WARN]${reset} %s\n" "$1"; }
 fail()  { FAIL=$((FAIL+1)); printf "${red}[FAIL]${reset} %s\n" "$1"; }
+
+if [ "$CAPTURE_ONLY" -eq 1 ]; then
+    printf "${bold}beam-doctor — capture-readiness check${reset}\n"
+fi
+
+# === CAPTURE STACK (always checked; the only checks in --capture mode) ========
 
 # --- GStreamer ---
 echo ""
@@ -117,6 +175,32 @@ if command -v setxkbmap >/dev/null 2>&1; then
     pass "setxkbmap found"
 else
     warn "setxkbmap not found — install x11-xkb-utils (keyboard layout sync won't work)"
+fi
+
+# === END CAPTURE STACK ========================================================
+#
+# In --capture mode the remaining sections (service / config / runtime) are
+# skipped: they describe a particular host's deploy state (is the unit running,
+# is beam.toml present), not whether the capture stack can produce frames. A
+# post-deploy gate wants a clean exit code that reflects ONLY capture-stack
+# health, so we summarise and exit here.
+if [ "$CAPTURE_ONLY" -eq 1 ]; then
+    echo ""
+    printf "${bold}Capture-readiness summary:${reset} "
+    printf "${green}${OK} passed${reset}, "
+    printf "${yellow}${WARN} warnings${reset}, "
+    if [ "$FAIL" -gt 0 ]; then
+        printf "${red}${FAIL} failures${reset}\n"
+    else
+        printf "${green}${FAIL} failures${reset}\n"
+    fi
+    echo ""
+    if [ "$FAIL" -gt 0 ]; then
+        printf "${red}Capture stack NOT ready${reset} — a session would likely show a black screen.\n"
+        exit 1
+    fi
+    printf "${green}Capture stack ready.${reset}\n"
+    exit 0
 fi
 
 # --- Audio ---

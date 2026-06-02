@@ -63,7 +63,9 @@ Beam auto-detects your GPU and selects the best encoder:
 
 ```bash
 beam-server --version
-beam-doctor
+beam-doctor              # full diagnostic
+beam-doctor --capture    # capture stack only — a scriptable post-deploy gate,
+                         # exits non-zero if a session would black-screen
 ```
 
 ## Configuration
@@ -169,6 +171,9 @@ beam-doctor
 - Run `make doctor` to check encoder availability
 
 ### Black screen after login
+- Run `beam-doctor --capture` — it checks just the capture stack (GStreamer, an
+  H.264 encoder element, the Xorg dummy driver) and exits non-zero if a piece is
+  missing, which is the usual cause of a black screen after an upgrade
 - Check agent logs: `journalctl -u beam -f` and `/var/log/beam/agent-*.log`
 - Press F9 to open the performance overlay and check if frames are arriving
 - This usually means H.264 frames aren't reaching the browser — force a reconnect (refresh the page)

@@ -523,6 +523,86 @@ jobs:
           echo "version-mismatch correctly rejected"
           echo "::endgroup::"
 
+  capture-readiness-smoke:
+    name: Capture readiness smoke
+    # Validates `beam-doctor --capture` — the host-local capture-readiness gate
+    # a deployment tool runs on each host after the network post-deploy smoke.
+    #
+    # The network smoke proves beam-server is up and serving the right version,
+    # but the server only relays frames — it never links GStreamer. Whether a
+    # session would actually produce a picture depends on the host's capture
+    # stack (GStreamer plugins, an H.264 encoder element, the Xorg dummy
+    # driver), which an HTTP probe cannot see. `beam-doctor --capture` checks
+    # exactly that drift class on the host and exits non-zero if the stack is
+    # broken. This job proves the gate behaves on BOTH paths — a gate that
+    # cannot fail proves nothing:
+    #   - ready path:    full plugin set installed → exit 0.
+    #   - degraded path: encoder hidden from PATH   → exit non-zero.
+    #
+    # No Rust build, no GPU, no live session — this is a pure shell-script gate,
+    # so it is cheap and deterministic. (NVENC/VA-API and the live capture
+    # round-trip are exercised by `agent-display-smoke`; this job is only about
+    # the readiness gate's contract.)
+    #
+    # GitHub-hosted — public-repo fork-PR isolation (see `check` above).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install capture stack
+        # The runtime capture surface beam-doctor --capture inspects:
+        #   - gstreamer1.0-tools: gst-inspect-1.0 (the encoder/element probe)
+        #   - plugins-{base,good,bad,ugly}: appsrc/appsink, ximagesrc,
+        #     h264parse, x264enc — the software capture+encode element set
+        #   - xserver-xorg-core + video-dummy: Xorg + the dummy driver beam
+        #     uses for headless virtual displays
+        #   - x11-xserver-utils (xrandr), xclip, x11-xkb-utils (setxkbmap)
+        run: |
+          sudo flock /tmp/apt-ci.lock bash <<'APT'
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            xserver-xorg-core xserver-xorg-video-dummy \
+            x11-xserver-utils xclip x11-xkb-utils
+          APT
+
+      - name: Ready path — capture stack present must PASS
+        # Xwrapper.config is absent on the runner, so beam-doctor would FAIL the
+        # "allows non-console users" check. Provision it (mirrors what the .deb
+        # postinstall does on a real host) so the ready path reflects a properly
+        # installed host, not a half-configured runner.
+        run: |
+          set -euo pipefail
+          echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config >/dev/null
+          echo "::group::beam-doctor --capture (ready)"
+          bash scripts/beam-doctor --capture
+          echo "::endgroup::"
+          echo "ready path passed (exit 0)"
+
+      - name: Degraded path — encoder missing must FAIL
+        # Hide gst-inspect-1.0 (and the rest of the capture binaries) from PATH
+        # to simulate post-upgrade plugin drift. The gate MUST exit non-zero;
+        # if it passes, the "capture ready" signal is meaningless.
+        run: |
+          set -euo pipefail
+          STRIP="${RUNNER_TEMP}/nogst-bin"
+          mkdir -p "${STRIP}"
+          for b in bash cat grep awk sed cut head printf command id find ss systemctl mktemp tee uname; do
+            src="$(command -v "$b" || true)"
+            [ -n "${src}" ] && ln -sf "${src}" "${STRIP}/${b}"
+          done
+          echo "::group::beam-doctor --capture (degraded — encoder hidden)"
+          if PATH="${STRIP}" bash scripts/beam-doctor --capture; then
+            echo "::error::beam-doctor --capture PASSED with the capture stack hidden — the gate is broken"
+            exit 1
+          fi
+          echo "::endgroup::"
+          echo "degraded path correctly failed (non-zero exit)"
+
   ci-gate:
     # Single aggregate status check. Point branch protection at "CI Gate"
     # instead of each individual job so new jobs become gating
@@ -539,7 +619,7 @@ jobs:
     # by design, so a `skipped` here always means infra trouble and
     # should fail closed.
     name: CI Gate
-    needs: [check, version-check, web, web-e2e, coverage, gitleaks, agent-display-smoke, post-deploy-smoke]
+    needs: [check, version-check, web, web-e2e, coverage, gitleaks, agent-display-smoke, post-deploy-smoke, capture-readiness-smoke]
     runs-on: ubuntu-24.04
     if: ${{ !cancelled() }}
     steps:
@@ -558,4 +638,5 @@ jobs:
           echo "  gitleaks       = ${{ needs.gitleaks.result }}"
           echo "  agent-display-smoke = ${{ needs.agent-display-smoke.result }}"
           echo "  post-deploy-smoke   = ${{ needs.post-deploy-smoke.result }}"
+          echo "  capture-readiness-smoke = ${{ needs.capture-readiness-smoke.result }}"
           exit 1
