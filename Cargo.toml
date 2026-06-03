@@ -61,4 +61,4 @@ libpulse-simple-binding = "2"
 # pkg-config first, so it links `libopus-dev` and avoids the unmaintained
 # `audiopus_sys` (RUSTSEC-2026-0150) and any vendored CMake build.
 # Pinned to 0.3 to avoid 0.4's extra pure-Rust backend dependency.
-opus2 = "0.3"
+opus2 = "0.4"
