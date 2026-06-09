@@ -137,6 +137,8 @@ Two compounding problems on touch:
 
 **Proposed fix** (defer): replace prompt with a remote file-picker UI (server-side `/api/files?path=...` listing), or — minimum — only expose Download on platforms where typing a path makes sense (desktop only).
 
+**Resolution (G8 #100)** — **chosen: in-app path-entry modal** (a refinement of the two options above). Rather than build a server-side `/api/files` listing endpoint (Option 1 — new attack surface: path-traversal / symlink-escape hardening, deferred) or hide Download on touch (Option 2 — removes a capability), the `window.prompt()` call is replaced with a styled in-app modal (`#download-overlay`) that keeps the remote-path-entry semantics. The modal mirrors the existing `#help-overlay` pattern: a 16px-font text input (defeats iOS focus auto-zoom — the same fix as P1), Cancel/Download actions sized to the WCAG touch-target floor (`--touch-target-min`), an explicit close X (Esc is captured by the remote session's mobile-keyboard input on touch), backdrop-tap-to-close, and focus restoration on close. The chosen path still flows through the unchanged `connection.sendInput({ t: 'fdr', path })` call — this is the **remote source path** the agent reads, NOT a local save destination (so the File System Access API `showSaveFilePicker()` is deliberately not used; it solves a different problem). Logic extracted to `web/src/download-prompt.ts` with regression tests in `web/src/download-prompt.test.ts`. A full server-side folder browser (Option 1) remains a worthwhile future enhancement but is out of scope here.
+
 ---
 
 ## Pain points
@@ -352,7 +354,7 @@ The mobile override correctly relaxes `min-width: auto` and shrinks to viewport 
 
 Terminate is a destructive action — and the touch target is roughly 26x16px (text "Terminate" + 3/10px padding). On a list of 5+ sessions, accidentally terminating the wrong one is plausible.
 
-**Screenshot description**: Admin panel on iPad portrait, table shows 5 active sessions, last column has tiny red "Terminate" links. Thumb mis-tap probability is high.
+**Screenshot description**: Admin panel on iPad portrait, table shows 5 active sessions, last column has tiny red "Terminate" links. Accidental thumb taps are likely.
 
 **Proposed fix** (defer): bump to >=44x44 with confirm dialog ("Terminate session for `<username>`?").
 
@@ -574,7 +576,7 @@ Both buttons get `min-height: 48px` and `font-size: 16px` on mobile. Touch targe
 | G5: Panels: SIP, CHP, Admin mobile layouts | P8, P10, P11 (admin) | M | open |
 | G6: Touch-mode for canvas (pinch / two-finger scroll) | P17 | L | open |
 | G7: Idle warning dismiss + touch wording | P15 | S | open |
-| G8: Replace `window.prompt()` download with picker | B3 | M | open |
+| G8: Replace `window.prompt()` download with picker | B3 | M | shipped — in-app `#download-overlay` path-entry modal (#100); replaces `window.prompt()`, 16px input (no iOS zoom), keeps `{ t: 'fdr', path }` remote-path semantics. Server-side folder browser deferred. |
 | G9: Help overlay surfaced through FAB | P13, P16 | S | open |
 
 Each group should be its own GitHub sub-issue with `## Relationships → Parent: #87` via the native sub-issue API, severity calibrated to the highest finding in the group (G1 + G6 + G8 = blocker -> severity:high; rest medium/low).

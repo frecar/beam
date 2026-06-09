@@ -1,5 +1,6 @@
 import { ClipboardBridge, type ClipboardHistoryEntry } from './clipboard';
-import { BeamConnection, type InputEvent } from './connection';
+import { BeamConnection } from './connection';
+import { buildDownloadRequest } from './download-prompt';
 import type { DownloadMessage } from './filetransfer';
 import { FileDownloader, FileUploader } from './filetransfer';
 import {
@@ -62,6 +63,11 @@ import {
   connectBtn,
   type ConnectionState,
   desktopView,
+  downloadCancel,
+  downloadClose,
+  downloadForm,
+  downloadOverlay,
+  downloadPathInput,
   fabDisconnect,
   fabDownload,
   fabEndSession,
@@ -1386,13 +1392,92 @@ fileUploadInput.addEventListener('change', () => {
   fileUploadInput.value = '';
 });
 
-// --- File download button ---
+// --- File download button (audit G8 #100 / #87 B3) ---
+//
+// The old handler popped a window.prompt() for the remote path. That is
+// hostile on touch: iOS Safari auto-zooms, single-line, no styling. It is
+// now an in-app modal (#download-overlay) mirroring the help-overlay
+// pattern — a 16px-font input (defeats iOS focus auto-zoom) plus
+// Cancel/Download actions sized to the WCAG touch-target floor.
+//
+// Semantics are unchanged: the value is a path on the REMOTE desktop
+// (relative to home or absolute) that the agent reads and streams back
+// via { t: 'fdr', path }. This is NOT the File System Access API
+// (showSaveFilePicker), which chooses a LOCAL save destination — a
+// different concern that would not replace remote source-path selection.
+
+// Remember what was focused when the modal opened so focus is restored on
+// close (a11y: keyboard users shouldn't land back at <body>).
+let downloadReturnFocus: HTMLElement | null = null;
+
+function openDownloadOverlay(opener: HTMLElement | null): void {
+  downloadReturnFocus = opener;
+  downloadPathInput.value = '';
+  downloadOverlay.classList.add('visible');
+  // Focus the input so a keyboard/screen-reader user lands on the field
+  // and a touch user gets the soft keyboard immediately.
+  downloadPathInput.focus();
+}
+
+function closeDownloadOverlay(): void {
+  downloadOverlay.classList.remove('visible');
+  if (downloadReturnFocus && document.body.contains(downloadReturnFocus)) {
+    downloadReturnFocus.focus();
+  }
+  downloadReturnFocus = null;
+}
+
+function submitDownloadRequest(): void {
+  const event = buildDownloadRequest(downloadPathInput.value);
+  // Empty / whitespace-only entry → no-op, same as the old prompt's
+  // `if (path && ...)` guard. Just close the modal.
+  if (event === null) {
+    closeDownloadOverlay();
+    return;
+  }
+  if (connection) {
+    ui?.showNotification(`Requesting download: ${event.path}`, 'info', 2000);
+    connection.sendInput(event);
+  }
+  closeDownloadOverlay();
+}
 
 btnDownload.addEventListener('click', () => {
-  const path = window.prompt('Enter file path on remote desktop (relative to home or absolute):');
-  if (path && connection) {
-    ui?.showNotification(`Requesting download: ${path}`, 'info', 2000);
-    connection.sendInput({ t: 'fdr', path } as InputEvent);
+  openDownloadOverlay(btnDownload);
+});
+
+// Form submit covers both the Download button (type="submit") and Enter
+// in the input. preventDefault stops a full-page reload.
+downloadForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  submitDownloadRequest();
+});
+
+downloadCancel.addEventListener('click', () => {
+  closeDownloadOverlay();
+});
+
+// Explicit X close on the card (Esc is captured by the mobile-keyboard
+// input on touch, so a visible affordance is required).
+downloadClose.addEventListener('click', () => {
+  closeDownloadOverlay();
+});
+
+// Backdrop tap closes — only when the target is the overlay itself, not
+// the card, so taps inside the form don't dismiss (same target-check the
+// help overlay uses).
+downloadOverlay.addEventListener('click', (e) => {
+  if (e.target === downloadOverlay) {
+    closeDownloadOverlay();
+  }
+});
+
+// Esc closes on desktop (fine pointers). On touch the remote-session
+// mobile-keyboard input captures Esc, which is why the X button exists.
+downloadPathInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeDownloadOverlay();
   }
 });
 
@@ -1599,9 +1684,9 @@ fabUpload.addEventListener('click', () => {
 
 fabDownload.addEventListener('click', () => {
   closeFab();
-  // Reuse the same handler as btn-download (window.prompt for path).
-  // P20 audit calls out the prompt() UX gap; that's a separate
-  // sub-issue (#100) — out of scope for G1.
+  // Reuse the btn-download handler, which now opens the in-app
+  // #download-overlay modal (audit G8 #100 replaced the old
+  // window.prompt() the FAB previously inherited).
   btnDownload.click();
 });
 
