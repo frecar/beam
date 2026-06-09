@@ -1219,6 +1219,133 @@
         }
       }
 
+      /*
+       * Download-path overlay (#download-overlay) — audit G8 (#100).
+       * Mirrors the #help-overlay backdrop + card so the two modals feel
+       * consistent. The input is font-size 16px on purpose: iOS Safari
+       * auto-zooms any focused control below 16px and never zooms back
+       * out — the exact mobile-hostile behavior the old window.prompt()
+       * had (audit P1 / B3).
+       */
+      #download-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 10001;
+        background: var(--bg-overlay);
+        backdrop-filter: blur(4px);
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+      }
+      #download-overlay.visible {
+        display: flex;
+      }
+      #download-overlay .download-card {
+        position: relative;
+        background: var(--help-card-bg);
+        border: 1px solid var(--border-accent);
+        border-radius: 8px;
+        padding: 24px 28px;
+        color: var(--help-card-text);
+        width: 100%;
+        max-width: 420px;
+        box-shadow: 0 8px 32px var(--shadow-overlay);
+      }
+      #download-overlay .download-card h2 {
+        font-size: 15px;
+        font-weight: 500;
+        color: var(--text-primary);
+        margin-bottom: 14px;
+        letter-spacing: 0.3px;
+      }
+      #download-overlay .download-label {
+        display: block;
+        font-size: 13px;
+        color: var(--text-secondary);
+        margin-bottom: 6px;
+      }
+      #download-overlay .download-input {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        /* 16px: defeats iOS focus auto-zoom (the core B3/P1 fix). */
+        font-size: 16px;
+        line-height: 1.4;
+        padding: 10px 12px;
+        background: var(--bg-input);
+        border: 1px solid var(--border-kbd);
+        border-radius: 6px;
+        color: var(--text-primary);
+      }
+      #download-overlay .download-input:focus-visible {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-focus);
+      }
+      #download-overlay .download-hint {
+        font-size: 12px;
+        color: var(--text-stat);
+        margin-top: 6px;
+      }
+      #download-overlay .download-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 18px;
+      }
+      #download-overlay .download-btn {
+        min-height: var(--touch-target-min);
+        padding: 0 16px;
+        border-radius: 6px;
+        font-size: 14px;
+        cursor: pointer;
+        border: 1px solid var(--border-kbd);
+      }
+      #download-overlay .download-btn-secondary {
+        background: transparent;
+        color: var(--text-secondary);
+      }
+      #download-overlay .download-btn-secondary:hover,
+      #download-overlay .download-btn-secondary:focus-visible {
+        background: var(--bg-btn-hover);
+        color: var(--text-primary);
+        outline: none;
+      }
+      #download-overlay .download-btn-primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      #download-overlay .download-btn-primary:hover,
+      #download-overlay .download-btn-primary:focus-visible {
+        background: var(--accent-hover);
+        border-color: var(--accent-hover);
+        outline: none;
+      }
+      #download-overlay .download-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        min-width: var(--touch-target-min);
+        min-height: var(--touch-target-min);
+        background: transparent;
+        border: 0;
+        color: var(--text-stat);
+        cursor: pointer;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+      }
+      #download-overlay .download-close:hover,
+      #download-overlay .download-close:focus-visible {
+        color: var(--text-primary);
+        background: var(--bg-btn-hover);
+        outline: none;
+      }
+
       /* Reconnect Overlay — shown on top of frozen desktop */
       #reconnect-overlay {
         display: none;
@@ -2372,6 +2499,69 @@
           <div>&nbsp;&nbsp;End or disconnect the session</div>
         </div>
       </div>
+    </div>
+
+    <!--
+      Download-path overlay (#download-overlay) — audit G8 (#100 / #87 B3).
+
+      Replaces the old window.prompt() for the remote download path. The
+      native prompt is hostile on touch (iOS Safari auto-zooms, single
+      line, no styling); this modal mirrors the #help-overlay pattern:
+
+      - A backdrop that closes on tap (target-checked in main.ts so taps
+        inside the card don't dismiss).
+      - A card with one text input for the REMOTE path (relative to home
+        or absolute), font-size 16px to defeat iOS focus auto-zoom.
+      - Cancel + Download actions sized to the WCAG touch-target floor,
+        plus an explicit close X (Esc is captured by the remote session's
+        mobile-keyboard input on touch, so a visible affordance is
+        required).
+
+      The chosen path still flows through the unchanged
+      connection.sendInput({ t: 'fdr', path }) call — this is the remote
+      source path the agent reads, NOT a local save destination.
+    -->
+    <div
+      id="download-overlay"
+      role="dialog"
+      aria-label="Download file from remote desktop"
+      aria-modal="true"
+    >
+      <form class="download-card" id="download-form">
+        <button
+          type="button"
+          id="download-close"
+          class="download-close"
+          aria-label="Cancel download"
+        ></button>
+        <h2>Download file</h2>
+        <label class="download-label" for="download-path-input">
+          File path on the remote desktop
+        </label>
+        <input
+          type="text"
+          id="download-path-input"
+          class="download-input"
+          placeholder="e.g. Documents/report.pdf or /etc/hostname"
+          autocomplete="off"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck="false"
+          enterkeyhint="go"
+          aria-describedby="download-hint"
+        />
+        <div id="download-hint" class="download-hint">
+          Relative to your home directory, or an absolute path.
+        </div>
+        <div class="download-actions">
+          <button type="button" id="download-cancel" class="download-btn download-btn-secondary">
+            Cancel
+          </button>
+          <button type="submit" id="download-submit" class="download-btn download-btn-primary">
+            Download
+          </button>
+        </div>
+      </form>
     </div>
 
     <!-- Screenshot Flash Overlay -->

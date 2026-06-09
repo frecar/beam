@@ -77,6 +77,16 @@ export const btnUpload = document.getElementById('btn-upload') as HTMLButtonElem
 export const fileUploadInput = document.getElementById('file-upload-input') as HTMLInputElement;
 export const btnDownload = document.getElementById('btn-download') as HTMLButtonElement;
 
+// Download-path modal (audit G8 #100): replaces window.prompt(). The
+// overlay hosts the remote-path input + Cancel/Download actions; main.ts
+// wires open/close/submit. The X + Cancel both close; submit emits the
+// { t: 'fdr', path } message via the download-prompt.ts logic helper.
+export const downloadOverlay = document.getElementById('download-overlay') as HTMLDivElement;
+export const downloadForm = document.getElementById('download-form') as HTMLFormElement;
+export const downloadPathInput = document.getElementById('download-path-input') as HTMLInputElement;
+export const downloadCancel = document.getElementById('download-cancel') as HTMLButtonElement;
+export const downloadClose = document.getElementById('download-close') as HTMLButtonElement;
+
 // Mobile FAB
 export const mobileFab = document.getElementById('mobile-fab') as HTMLDivElement;
 export const mobileFabToggle = document.getElementById('mobile-fab-toggle') as HTMLButtonElement;
