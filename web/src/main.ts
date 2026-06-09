@@ -1552,6 +1552,12 @@ function initFabIcons(): void {
   // content — no text label, the aria-label on the button carries
   // accessible text.
   helpClose.innerHTML = ICON_CLOSE;
+  // Download-overlay explicit close button (X) — the primary touch-close
+  // affordance (Esc is captured by the remote-session keyboard on touch).
+  // Same pattern as helpClose: icon is the only content, aria-label carries
+  // the accessible text. Without this injection the X renders blank for
+  // sighted users (beam#100 review).
+  downloadClose.innerHTML = ICON_CLOSE;
   // Select-row labels: prepend the icon before the existing text node.
   fabLayoutSelectLabel.innerHTML = `${ICON_LAYOUT}<span>${fabLayoutSelectLabel.textContent ?? 'Layout'}</span>`;
   fabScrollSpeedSelectLabel.innerHTML = `${ICON_SCROLL}<span>${fabScrollSpeedSelectLabel.textContent ?? 'Scroll'}</span>`;
