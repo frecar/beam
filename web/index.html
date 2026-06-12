@@ -482,12 +482,30 @@
         outline-offset: 2px;
       }
 
-      /* Desktop View - leave room for the 28px status bar at the bottom */
+      /* Desktop View - leave room for the 28px status bar at the bottom.
+         overflow:hidden clips the zoom layer when pinch-zoomed (#98 G6);
+         touch-action:none stops the browser consuming pan/pinch gestures
+         itself — iOS Safari ignores maximum-scale=1 for pinch, so the
+         viewport meta alone is not enough. */
       #desktop-view {
         display: none;
         width: 100vw;
         height: calc(100vh - 28px);
         cursor: default;
+        overflow: hidden;
+        touch-action: none;
+      }
+
+      /* #98 (audit G6) — single transform target for the client-side
+         pinch-zoom in Scroll & zoom touch mode. Hosts the streamed canvas,
+         the (fallback) video element, and the local cursor so they ride the
+         transform together. position:relative so the local cursor positions
+         in untransformed layer space. */
+      #zoom-layer {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        transform-origin: 0 0;
       }
 
       /* In fullscreen, fill the entire screen (no status bar) */
@@ -2339,9 +2357,15 @@
 
     <!-- Desktop View -->
     <div id="desktop-view" role="application" aria-label="Remote desktop" tabindex="-1">
-      <video id="remote-video" autoplay playsinline style="display:none"></video>
-      <canvas id="remote-canvas"></canvas>
-      <div id="local-cursor" aria-hidden="true"></div>
+      <!-- #98 (audit G6): the zoom layer hosts the streamed content + local
+           cursor so the Scroll & zoom touch mode can pinch-zoom and pan with
+           a single CSS transform. Client-side only - the streamed protocol
+           is untouched. -->
+      <div id="zoom-layer">
+        <video id="remote-video" autoplay playsinline style="display:none"></video>
+        <canvas id="remote-canvas"></canvas>
+        <div id="local-cursor" aria-hidden="true"></div>
+      </div>
 
       <!-- File upload drop overlay -->
       <div id="file-drop-overlay" aria-hidden="true">
@@ -2620,6 +2644,15 @@
             <option value="3">3x</option>
           </select>
         </div>
+        <!--
+          G6 (#98): touch interaction mode toggle. "Pointer" = touches
+          drive the remote mouse (default). "Scroll & zoom" = two-finger
+          pan scrolls the remote, pinch zooms the canvas client-side,
+          one-finger drag pans while zoomed. The menu deliberately stays
+          open on toggle so the state flip is visible (same rationale as
+          the 2-tap confirm rows).
+        -->
+        <button class="fab-action" id="fab-touch-mode" aria-label="Switch touch mode between pointer input and scroll and zoom" aria-pressed="false">Touch: Pointer</button>
         <button class="fab-action" id="fab-upload" aria-label="Upload file to remote desktop">Upload</button>
         <button class="fab-action" id="fab-download" aria-label="Download file from remote desktop">Download</button>
         <button class="fab-action" id="fab-fullscreen" aria-label="Toggle fullscreen">Fullscreen</button>

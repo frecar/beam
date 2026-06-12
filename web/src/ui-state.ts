@@ -126,6 +126,8 @@ export const fabLayoutSelect = document.getElementById('fab-layout-select') as H
 export const fabScrollSpeedSelect = document.getElementById(
   'fab-scroll-speed-select'
 ) as HTMLSelectElement;
+// G6 (#98) — touch interaction mode toggle (Pointer / Scroll & zoom).
+export const fabTouchMode = document.getElementById('fab-touch-mode') as HTMLButtonElement;
 export const mobileKeyboardInput = document.getElementById(
   'mobile-keyboard-input'
 ) as HTMLInputElement;

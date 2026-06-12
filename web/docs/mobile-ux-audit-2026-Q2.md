@@ -440,6 +440,15 @@ Note: the issue body explicitly lists "Streaming canvas itself" under the audit 
 
 **Proposed fix** (defer, design-heavy): introduce a touch interaction mode (toggle in FAB): "Pointer" (current) / "Scroll & zoom" (two-finger = scroll, pinch = zoom client-side via canvas transform). This is the cleanest way to give touch users access to scroll without changing the protocol.
 
+**Resolution (G6 #98)** — the proposed touch-mode toggle shipped as specified. Gesture-routing decisions made:
+
+- **FAB "Touch mode" toggle** (Pointer / Scroll & zoom), persisted in `localStorage` (`beam_touch_mode`) and restored on connect. Default stays **Pointer** (the historical single-finger mouse emulation + long-press right-click, multi-touch ignored) so existing users see no behavior change.
+- **Scroll & zoom mode**: touches never reach the remote pointer — the mode is explicit viewport control. **Two-finger pan** sends remote scroll-wheel events (`{ t: 's', dx, dy }`, the same message the wheel path uses), in natural touch direction (content follows the fingers), with the Scroll-speed multiplier applied — the status-bar/FAB "Scroll speed" select is now meaningful on touch. **Pinch** zooms client-side via a CSS `translate + scale` transform (1x–5x, anchored at the pinch midpoint) on a new `#zoom-layer` wrapper that hosts canvas + video + local cursor; the streamed protocol is untouched. **Single-finger drag** pans the zoomed viewport (no-op at 1x).
+- **Gesture classification**: a two-finger gesture is classified once per gesture — after a 16px dead zone, by *dominance* (spread change vs midpoint travel), then locked until the touch count changes. Dominance (not which-threshold-first) avoids finger tremble misclassifying a pinch as a scroll.
+- **Zoom persists across mode switches**: zoom in under Scroll & zoom, flip to Pointer, and tap small targets precisely — coordinate normalization reads the transformed bounding rect, which stays correct under uniform scale. Session teardown resets the zoom.
+- **iOS Safari hardening**: `touch-action: none` + `overflow: hidden` on `#desktop-view` and `preventDefault()` on proprietary `gesturestart`/`gesturechange` events — Safari ignores `maximum-scale=1` for pinch, so the viewport meta alone is not enough.
+- **Deferred** (file follow-ups if wanted): three-finger gestures, edge swipes, double-tap zoom reset, an inverted-scroll-direction preference, and a visible zoom-level indicator.
+
 ### P18 — Toast container: full-width on mobile but stacks behind FAB
 
 **File**: `index.html:506-515`, `1577-1581` (responsive)
@@ -574,7 +583,7 @@ Both buttons get `min-height: 48px` and `font-size: 16px` on mobile. Touch targe
 | G3: Touch-target hygiene pass (44px audit) | P2, P9, P10, P12, P18 | S | shipped — `--touch-target-min: 44px` CSS variable + per-control mobile overrides |
 | G4: Login form polish (form-select zoom, enterkeyhint, autocapitalize) | P1, P3, M2, M3 | S | open |
 | G5: Panels: SIP, CHP, Admin mobile layouts | P8, P10, P11 (admin) | M | open |
-| G6: Touch-mode for canvas (pinch / two-finger scroll) | P17 | L | open |
+| G6: Touch-mode for canvas (pinch / two-finger scroll) | P17 | L | shipped (#98) — FAB Touch-mode toggle (Pointer / Scroll & zoom): two-finger pan = remote scroll, pinch = client-side canvas zoom (1x-5x), one-finger pan while zoomed. Real-device sign-off pending. |
 | G7: Idle warning dismiss + touch wording | P15 | S | open |
 | G8: Replace `window.prompt()` download with picker | B3 | M | shipped — in-app `#download-overlay` path-entry modal (#100); replaces `window.prompt()`, 16px input (no iOS zoom), keeps `{ t: 'fdr', path }` remote-path semantics. Server-side folder browser deferred. |
 | G9: Help overlay surfaced through FAB | P13, P16 | S | open |

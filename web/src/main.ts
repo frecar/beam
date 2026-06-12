@@ -15,14 +15,16 @@ import {
   ICON_LAYOUT,
   ICON_MOON,
   ICON_MUTE,
+  ICON_POINTER,
   ICON_POWER,
   ICON_SCREENSHOT,
   ICON_SCROLL,
   ICON_STATS,
   ICON_UNMUTE,
   ICON_UPLOAD,
+  ICON_ZOOM_IN,
 } from './icons';
-import { InputHandler } from './input';
+import { InputHandler, type TouchMode } from './input';
 import { clearRateLimitTimer, performLogin } from './login';
 import { initMonitoring } from './monitoring';
 import { clearSession, loadSession, sendReleaseBeacon, TokenManager } from './session';
@@ -41,6 +43,7 @@ import {
   showIdleWarning,
   THEME_KEY,
   toggleTheme,
+  TOUCH_MODE_KEY,
   updateLatencyStatsFps,
   updatePerfOverlay,
   updateThemeButton,
@@ -84,6 +87,7 @@ import {
   fabScrollSpeedSelectLabel,
   fabStats,
   fabTheme,
+  fabTouchMode,
   fabUpload,
   fileDropOverlay,
   fileUploadInput,
@@ -1051,6 +1055,9 @@ async function startConnection(
         scrollSpeedSelect.onchange = () => onScrollChange(scrollSpeedSelect.value);
         fabScrollSpeedSelect.onchange = () => onScrollChange(fabScrollSpeedSelect.value);
       }
+
+      // G6 (#98) — restore the persisted touch interaction mode.
+      inputHandler.setTouchMode(savedTouchMode());
     }
 
     // Re-send layout and current dimensions on (re)connect
@@ -1561,6 +1568,9 @@ function initFabIcons(): void {
   // Select-row labels: prepend the icon before the existing text node.
   fabLayoutSelectLabel.innerHTML = `${ICON_LAYOUT}<span>${fabLayoutSelectLabel.textContent ?? 'Layout'}</span>`;
   fabScrollSpeedSelectLabel.innerHTML = `${ICON_SCROLL}<span>${fabScrollSpeedSelectLabel.textContent ?? 'Scroll'}</span>`;
+  // G6 (#98) — touch-mode button renders icon + label from the persisted
+  // mode (state-dependent, like Theme/Mute).
+  updateTouchModeButton(savedTouchMode());
 }
 // Hydrate immediately — the elements are already in the static HTML.
 initFabIcons();
@@ -1709,6 +1719,33 @@ fabMute.addEventListener('click', () => {
 fabForwardKeys.addEventListener('click', () => {
   closeFab();
   toggleForwardKeys();
+});
+
+// G6 (#98) — touch interaction mode toggle. 'pointer' (default): touches
+// drive the remote mouse, the historical behavior. 'scrollzoom': two-finger
+// pan sends remote scroll-wheel events, pinch zooms the canvas client-side,
+// single-finger drag pans the zoomed viewport. Persisted and restored on
+// connect. The FAB menu deliberately stays open on toggle: the label flip
+// is the visible state feedback, and closing would yank the pressed button
+// out from under screen-reader focus mid-announcement.
+
+function savedTouchMode(): TouchMode {
+  return localStorage.getItem(TOUCH_MODE_KEY) === 'scrollzoom' ? 'scrollzoom' : 'pointer';
+}
+
+function updateTouchModeButton(mode: TouchMode): void {
+  const scrollzoom = mode === 'scrollzoom';
+  const label = scrollzoom ? 'Touch: Scroll & zoom' : 'Touch: Pointer';
+  fabTouchMode.innerHTML = `${scrollzoom ? ICON_ZOOM_IN : ICON_POINTER}<span>${label}</span>`;
+  fabTouchMode.classList.toggle('active', scrollzoom);
+  fabTouchMode.setAttribute('aria-pressed', String(scrollzoom));
+}
+
+fabTouchMode.addEventListener('click', () => {
+  const next: TouchMode = savedTouchMode() === 'scrollzoom' ? 'pointer' : 'scrollzoom';
+  localStorage.setItem(TOUCH_MODE_KEY, next);
+  inputHandler?.setTouchMode(next);
+  updateTouchModeButton(next);
 });
 
 // G9 (#101) — Help + Stats actions for touch users.
