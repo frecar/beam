@@ -149,6 +149,8 @@ describe('index.html — mobile FAB enrichment (#87 G1)', () => {
       'fab-forward-keys',
       'fab-end-session',
       'fab-disconnect',
+      // G6 (#98): touch interaction mode toggle.
+      'fab-touch-mode',
     ];
     for (const id of requiredIds) {
       expect(indexHtml).toMatch(new RegExp(`id="${id}"`));
@@ -166,6 +168,20 @@ describe('index.html — mobile FAB enrichment (#87 G1)', () => {
       // an aria-label.
       expect(el).toMatch(/aria-label="[^"]+"/);
     }
+  });
+
+  it('touch-mode canvas plumbing (#98 G6): zoom layer wraps the streamed content', () => {
+    // The pinch-zoom CSS transform targets #zoom-layer; canvas + local
+    // cursor must live inside it so they ride the transform together.
+    expect(indexHtml).toMatch(
+      /<div id="zoom-layer">[\s\S]*?id="remote-canvas"[\s\S]*?id="local-cursor"[\s\S]*?<\/div>/
+    );
+    // Gesture surface must opt out of browser touch handling — iOS
+    // Safari ignores maximum-scale=1 for pinch, so the viewport meta
+    // alone is not enough.
+    expect(indexHtml).toMatch(/#desktop-view\s*\{[\s\S]*?touch-action:\s*none/);
+    // Zoomed layer overflow must be clipped, not scrolled.
+    expect(indexHtml).toMatch(/#desktop-view\s*\{[\s\S]*?overflow:\s*hidden/);
   });
 
   it('FAB menu container caps height + scrolls when overflowed', () => {

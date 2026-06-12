@@ -10,6 +10,23 @@ export { isSignificantResize, roundToEven } from './resize';
 const EVDEV_LEFT_CTRL = 29;
 
 /**
+ * Touch interaction modes (#98 audit G6):
+ * - 'pointer'    — touches drive the remote mouse: single-finger drag moves
+ *                  the cursor, long-press right-clicks. Multi-touch ignored.
+ * - 'scrollzoom' — touches control the local viewport and never reach the
+ *                  remote pointer: two-finger pan sends remote scroll-wheel
+ *                  events, pinch zooms the canvas client-side (CSS transform,
+ *                  streamed protocol unchanged), single-finger drag pans the
+ *                  viewport while zoomed in.
+ */
+export type TouchMode = 'pointer' | 'scrollzoom';
+
+/** Distance in CSS px between two touch points. */
+function touchSpread(a: Touch, b: Touch): number {
+  return Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+}
+
+/**
  * Keyboard layout signatures: map physical key codes to the characters
  * they produce on each layout. Used with the Keyboard Layout Map API
  * (Chrome/Edge) to detect the actual OS keyboard layout.
@@ -157,6 +174,37 @@ export class InputHandler {
   private static readonly LONG_PRESS_MS = 500;
   private static readonly LONG_PRESS_MOVE_THRESHOLD = 10;
 
+  // Scroll & zoom touch mode state (#98 audit G6)
+  private touchMode: TouchMode = 'pointer';
+  /** Wrapper element the pinch-zoom CSS transform is applied to. */
+  private zoomLayer: HTMLElement | null;
+  private zoomScale = 1;
+  private zoomTx = 0;
+  private zoomTy = 0;
+  /**
+   * Two-finger gesture classification: 'undecided' until movement leaves
+   * the dead zone, then locked to 'pinch' or 'scroll' until the touch
+   * count changes. null = no two-finger gesture in progress.
+   */
+  private twoFingerGesture: 'undecided' | 'pinch' | 'scroll' | null = null;
+  private gestureStartSpread = 0;
+  private gestureStartMidX = 0;
+  private gestureStartMidY = 0;
+  private lastSpread = 0;
+  private lastMidX = 0;
+  private lastMidY = 0;
+  private panActive = false;
+  private panLastX = 0;
+  private panLastY = 0;
+  private static readonly MAX_ZOOM_SCALE = 5;
+  /**
+   * Total movement (px) before a two-finger gesture is classified at all.
+   * Classification is then by dominance (spread change vs midpoint travel),
+   * NOT by which absolute threshold is crossed first — finger tremble
+   * during a pinch would otherwise misclassify the gesture as a scroll.
+   */
+  private static readonly GESTURE_DEAD_ZONE_PX = 16;
+
   // Bound listeners (stored so we can remove them)
   private onKeyDown = this.handleKeyDown.bind(this);
   private onKeyUp = this.handleKeyUp.bind(this);
@@ -170,6 +218,12 @@ export class InputHandler {
   private onTouchStart = this.handleTouchStart.bind(this);
   private onTouchMove = this.handleTouchMove.bind(this);
   private onTouchEnd = this.handleTouchEnd.bind(this);
+  // iOS Safari fires proprietary GestureEvents for pinches and ignores
+  // `maximum-scale=1` in the viewport meta — prevent them so the browser
+  // never zooms the page itself regardless of touch mode (#98).
+  private onGesturePrevent = (e: Event): void => {
+    e.preventDefault();
+  };
 
   // Coalescing state
   private pendingMouseMove: { x: number; y: number } | null = null;
@@ -183,6 +237,7 @@ export class InputHandler {
     this.target = target;
     this.videoElement = target.querySelector('video');
     this.canvasElement = target.querySelector('canvas');
+    this.zoomLayer = target.querySelector('#zoom-layer');
     this.localCursor = document.getElementById('local-cursor');
     this.sendInput = sendInput;
   }
@@ -248,6 +303,36 @@ export class InputHandler {
     this.scrollMultiplier = multiplier;
   }
 
+  /**
+   * Switch the touch interaction mode (#98 audit G6). In-flight gesture
+   * state resets; the client-side zoom deliberately persists so a user can
+   * zoom in under 'scrollzoom' and then tap small targets precisely under
+   * 'pointer' (coordinate math reads the transformed bounding rect, which
+   * stays correct under a uniform scale).
+   */
+  setTouchMode(mode: TouchMode): void {
+    if (this.touchMode === mode) return;
+    this.touchMode = mode;
+    this.resetGestureState();
+  }
+
+  getTouchMode(): TouchMode {
+    return this.touchMode;
+  }
+
+  /** Current client-side zoom scale (1 = no zoom). */
+  getZoomScale(): number {
+    return this.zoomScale;
+  }
+
+  /** Reset the client-side viewport zoom to identity. */
+  resetZoom(): void {
+    this.zoomScale = 1;
+    this.zoomTx = 0;
+    this.zoomTy = 0;
+    this.applyZoomTransform();
+  }
+
   enable(): void {
     if (this.active) return;
     this.active = true;
@@ -264,6 +349,8 @@ export class InputHandler {
     this.target.addEventListener('touchstart', this.onTouchStart, { passive: false });
     this.target.addEventListener('touchmove', this.onTouchMove, { passive: false });
     this.target.addEventListener('touchend', this.onTouchEnd, { passive: false });
+    this.target.addEventListener('gesturestart', this.onGesturePrevent);
+    this.target.addEventListener('gesturechange', this.onGesturePrevent);
 
     // Watch for container size changes and send resize events (debounced).
     this.resizeObserver = new ResizeObserver((entries) => {
@@ -294,7 +381,11 @@ export class InputHandler {
     this.target.removeEventListener('touchstart', this.onTouchStart);
     this.target.removeEventListener('touchmove', this.onTouchMove);
     this.target.removeEventListener('touchend', this.onTouchEnd);
+    this.target.removeEventListener('gesturestart', this.onGesturePrevent);
+    this.target.removeEventListener('gesturechange', this.onGesturePrevent);
     this.cancelLongPress();
+    this.resetGestureState();
+    this.resetZoom();
 
     // Cancel pending mouse-move coalescing
     if (this.animationFrameId !== null) {
@@ -765,7 +856,12 @@ export class InputHandler {
   private handleTouchStart(e: TouchEvent): void {
     e.preventDefault();
 
-    // Only handle single-finger touch for mouse emulation
+    if (this.touchMode === 'scrollzoom') {
+      this.handleScrollZoomTouchStart(e);
+      return;
+    }
+
+    // Pointer mode: only handle single-finger touch for mouse emulation
     if (e.touches.length !== 1) {
       this.cancelLongPress();
       return;
@@ -801,6 +897,11 @@ export class InputHandler {
   private handleTouchMove(e: TouchEvent): void {
     e.preventDefault();
 
+    if (this.touchMode === 'scrollzoom') {
+      this.handleScrollZoomTouchMove(e);
+      return;
+    }
+
     if (e.touches.length !== 1) {
       this.cancelLongPress();
       return;
@@ -824,6 +925,12 @@ export class InputHandler {
 
   private handleTouchEnd(e: TouchEvent): void {
     e.preventDefault();
+
+    if (this.touchMode === 'scrollzoom') {
+      this.handleScrollZoomTouchEnd(e);
+      return;
+    }
+
     this.cancelLongPress();
 
     // Don't send button up if long press fired (it already sent right-click)
@@ -837,6 +944,164 @@ export class InputHandler {
     if (this.longPressTimer) {
       clearTimeout(this.longPressTimer);
       this.longPressTimer = null;
+    }
+  }
+
+  // --- Scroll & zoom touch mode (#98 audit G6) ---
+  //
+  // In this mode touches NEVER send pointer events to the remote. Two-finger
+  // gestures are classified once per gesture (dead zone, then dominance) and
+  // locked until the touch count changes:
+  //   pinch  -> client-side CSS scale/translate on the zoom layer
+  //   scroll -> remote scroll-wheel events ({t:'s'}), natural touch
+  //             direction (content follows the fingers), reusing the
+  //             wheel path's scroll-speed multiplier
+  // Single-finger drag pans the viewport while zoomed in (no-op at 1x).
+
+  private handleScrollZoomTouchStart(e: TouchEvent): void {
+    this.cancelLongPress();
+    if (e.touches.length === 2) {
+      this.beginTwoFingerGesture(e.touches[0], e.touches[1]);
+    } else if (e.touches.length === 1) {
+      this.twoFingerGesture = null;
+      this.beginPan(e.touches[0]);
+    } else {
+      // 3+ fingers: cancel everything. A fresh gesture starts when the
+      // touch count returns to 1 or 2 — a lifted/replaced finger must
+      // not inherit a stale gesture lock.
+      this.resetGestureState();
+    }
+  }
+
+  private handleScrollZoomTouchMove(e: TouchEvent): void {
+    if (e.touches.length === 2 && this.twoFingerGesture !== null) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const spread = touchSpread(a, b);
+      const midX = (a.clientX + b.clientX) / 2;
+      const midY = (a.clientY + b.clientY) / 2;
+
+      if (this.twoFingerGesture === 'undecided') {
+        const spreadDelta = Math.abs(spread - this.gestureStartSpread);
+        const midDelta = Math.hypot(midX - this.gestureStartMidX, midY - this.gestureStartMidY);
+        if (Math.max(spreadDelta, midDelta) > InputHandler.GESTURE_DEAD_ZONE_PX) {
+          this.twoFingerGesture = spreadDelta > midDelta ? 'pinch' : 'scroll';
+        }
+      }
+
+      if (this.twoFingerGesture === 'pinch') {
+        this.applyPinch(spread, midX, midY);
+      } else if (this.twoFingerGesture === 'scroll') {
+        // `+ 0` normalizes -0 (from negating a zero delta) to plain 0.
+        const dx = -(midX - this.lastMidX) * this.scrollMultiplier + 0;
+        const dy = -(midY - this.lastMidY) * this.scrollMultiplier + 0;
+        if (dx !== 0 || dy !== 0) {
+          this.sendInput({ t: 's', dx, dy });
+        }
+      }
+
+      this.lastSpread = spread;
+      this.lastMidX = midX;
+      this.lastMidY = midY;
+    } else if (e.touches.length === 1 && this.panActive) {
+      const t = e.touches[0];
+      if (this.zoomScale > 1) {
+        this.zoomTx += t.clientX - this.panLastX;
+        this.zoomTy += t.clientY - this.panLastY;
+        this.clampZoomTranslation();
+        this.applyZoomTransform();
+      }
+      this.panLastX = t.clientX;
+      this.panLastY = t.clientY;
+    }
+  }
+
+  private handleScrollZoomTouchEnd(e: TouchEvent): void {
+    if (e.touches.length === 2) {
+      // 3 -> 2 fingers: start a fresh two-finger gesture from here.
+      this.beginTwoFingerGesture(e.touches[0], e.touches[1]);
+    } else if (e.touches.length === 1) {
+      // 2 -> 1: the two-finger gesture is over; the remaining finger
+      // may pan the zoomed viewport from its current position.
+      this.twoFingerGesture = null;
+      this.beginPan(e.touches[0]);
+    } else {
+      this.twoFingerGesture = null;
+      this.panActive = false;
+    }
+  }
+
+  private beginTwoFingerGesture(a: Touch, b: Touch): void {
+    this.panActive = false;
+    this.twoFingerGesture = 'undecided';
+    this.gestureStartSpread = this.lastSpread = touchSpread(a, b);
+    this.gestureStartMidX = this.lastMidX = (a.clientX + b.clientX) / 2;
+    this.gestureStartMidY = this.lastMidY = (a.clientY + b.clientY) / 2;
+  }
+
+  private beginPan(t: Touch): void {
+    this.panActive = true;
+    this.panLastX = t.clientX;
+    this.panLastY = t.clientY;
+  }
+
+  private resetGestureState(): void {
+    this.twoFingerGesture = null;
+    this.panActive = false;
+    this.cancelLongPress();
+  }
+
+  /**
+   * Apply one pinch step: rescale around the pinch midpoint (the content
+   * point under the midpoint stays anchored) and pan with the midpoint's
+   * own movement.
+   */
+  private applyPinch(spread: number, midX: number, midY: number): void {
+    if (this.lastSpread <= 0) return;
+    const newScale = Math.min(
+      InputHandler.MAX_ZOOM_SCALE,
+      Math.max(1, (this.zoomScale * spread) / this.lastSpread)
+    );
+
+    const rect = this.target.getBoundingClientRect();
+    const localX = midX - rect.left;
+    const localY = midY - rect.top;
+    const contentX = (localX - this.zoomTx) / this.zoomScale;
+    const contentY = (localY - this.zoomTy) / this.zoomScale;
+    this.zoomTx = localX - contentX * newScale + (midX - this.lastMidX);
+    this.zoomTy = localY - contentY * newScale + (midY - this.lastMidY);
+    this.zoomScale = newScale;
+    if (newScale === 1) {
+      this.zoomTx = 0;
+      this.zoomTy = 0;
+    }
+    this.clampZoomTranslation();
+    this.applyZoomTransform();
+  }
+
+  /** Clamp translation so the scaled layer always covers the container. */
+  private clampZoomTranslation(): void {
+    const rect = this.target.getBoundingClientRect();
+    const minTx = rect.width * (1 - this.zoomScale);
+    const minTy = rect.height * (1 - this.zoomScale);
+    this.zoomTx = Math.min(0, Math.max(minTx, this.zoomTx));
+    this.zoomTy = Math.min(0, Math.max(minTy, this.zoomTy));
+  }
+
+  private applyZoomTransform(): void {
+    const transform =
+      this.zoomScale === 1
+        ? ''
+        : `translate(${this.zoomTx}px, ${this.zoomTy}px) scale(${this.zoomScale})`;
+    // Transform the dedicated zoom layer — canvas, video, and local cursor
+    // move together. Fall back to the content elements directly if the
+    // layer is missing (defensive: minimal DOM in tests).
+    const targets = this.zoomLayer ? [this.zoomLayer] : [this.canvasElement, this.videoElement];
+    for (const el of targets) {
+      if (el) {
+        el.style.transformOrigin = '0 0';
+        el.style.transform = transform;
+      }
     }
   }
 

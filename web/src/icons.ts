@@ -71,6 +71,18 @@ export const ICON_SCROLL = s(
   '<polyline points="6 9 12 3 18 9"/><polyline points="6 15 12 21 18 15"/>'
 );
 
+// Touch-mode toggle icons — G6 (#98). The FAB "Touch mode" action swaps
+// between these to mirror the active mode: mouse-pointer for 'pointer'
+// (touches drive the remote mouse), magnifier-plus for 'scrollzoom'
+// (two-finger scroll + pinch-zoom viewport control).
+export const ICON_POINTER = s(
+  '<path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/>'
+);
+
+export const ICON_ZOOM_IN = s(
+  '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/>'
+);
+
 // Help icon (circle + question mark) — used on the FAB "Help" action
 // introduced for G9 (#101) so touch users can reach the help overlay
 // without an F-key.

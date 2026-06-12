@@ -21,6 +21,7 @@ import {
 // --- Storage keys ---
 export const AUDIO_MUTED_KEY = 'beam_audio_muted';
 export const SCROLL_SPEED_KEY = 'beam_scroll_speed';
+export const TOUCH_MODE_KEY = 'beam_touch_mode';
 export const THEME_KEY = 'beam_theme';
 export const FORWARD_KEYS_KEY = 'beam_forward_keys';
 export const SESSION_TIMEOUT_KEY = 'beam_session_timeout';
