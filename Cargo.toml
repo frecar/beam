@@ -28,7 +28,7 @@ beam-protocol = { path = "crates/protocol" }
 axum = { version = "0.8.9", features = ["ws"] }
 axum-extra = { version = "0.12.6", features = ["typed-header"] }
 tower = "0.5.3"
-tower-http = { version = "0.6.11", features = ["fs", "cors", "trace", "limit", "request-id", "uuid"] }
+tower-http = { version = "0.7.0", features = ["fs", "cors", "trace", "limit", "request-id", "uuid"] }
 
 # TLS
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "logging", "std", "tls12"] }
