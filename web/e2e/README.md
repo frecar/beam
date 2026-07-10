@@ -34,7 +34,9 @@ make e2e
 ```
 
 The Playwright config builds the production bundle and serves it with
-`vite preview` on `127.0.0.1:4173`, then drives chromium against it.
+`vite preview` on `127.0.0.1:<per-run port>` (resolved from `GITHUB_RUN_ID`
+by the shared config with `--strictPort`; 4173 locally), then drives chromium
+against it.
 
 ## Conventions
 
