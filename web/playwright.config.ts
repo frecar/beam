@@ -7,14 +7,16 @@ import { defineSmokeConfig } from './e2e/shared/config';
 // The shared module lives at `web/e2e/shared/` (vendored — copied, not
 // symlinked). Refresh by re-copying from the shared smoke-test foundation
 // at vendor-bump time.
+//
+// The preview port + `--strictPort` are owned by the shared module: it
+// resolves a per-CI-run port from GITHUB_RUN_ID (4173 locally) and threads
+// the one resolved value into `use.baseURL` + `webServer.command` +
+// `webServer.url`, so a port collision on a shared runner is a loud bind
+// failure — never a silent wrong-app serve. Do not hand-write ports here.
 const config = defineSmokeConfig({
-  baseURL: 'http://127.0.0.1:4173',
-  webServer: {
+  preview: {
     // Build the production bundle and serve it with Vite's preview server.
     // We smoke the real built artifact, not the dev server.
-    command: 'npm run build && npm run preview -- --host 127.0.0.1 --port 4173',
-    url: 'http://127.0.0.1:4173',
-    reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },
 });
