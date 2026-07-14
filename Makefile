@@ -167,6 +167,8 @@ fix:
 	cd web && $(NPM) run format
 
 check:
+	python3 scripts/check_no_private_git_deps.py
+	python3 scripts/check_no_private_git_deps.py --self-test
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --workspace -- -D warnings
 	$(CARGO) test --workspace
@@ -182,6 +184,8 @@ check:
 
 ci:
 	@echo "Running CI checks (mirrors .github/workflows/ci.yml)..."
+	python3 scripts/check_no_private_git_deps.py
+	python3 scripts/check_no_private_git_deps.py --self-test
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --workspace -- -D warnings
 	$(CARGO) test --workspace
