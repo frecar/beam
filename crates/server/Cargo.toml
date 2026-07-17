@@ -36,5 +36,5 @@ pem = "3"
 [dev-dependencies]
 http-body-util = "0.1"
 filetime = "0.2"
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
