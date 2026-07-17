@@ -33,6 +33,11 @@ jobs:
       - name: Private reference check
         run: bash scripts/check-no-internal-refs.sh
 
+      - name: Non-public Git dependency check
+        run: |
+          python3 scripts/check_no_private_git_deps.py
+          python3 scripts/check_no_private_git_deps.py --self-test
+
       - name: LLM endpoint policy lint
         run: python3 scripts/check_no_external_llm.py
 
@@ -225,7 +230,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-llvm-cov
 
