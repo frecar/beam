@@ -35,6 +35,14 @@ updates:
       prefix: "deps(frontend)"
     allow:
       - dependency-type: "all"
+    ignore:
+      # typescript 7 (native compiler) is blocked upstream, not by our code:
+      # @typescript-eslint/eslint-plugin's peer range does not yet admit TS 7,
+      # so `npm install` fails ERESOLVE (see the closed PR bumping it). Hold the
+      # major until the @typescript-eslint toolchain supports TS 7, then bump
+      # typescript + @typescript-eslint together and REMOVE this ignore.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     groups:
       npm-minor:
         patterns:
