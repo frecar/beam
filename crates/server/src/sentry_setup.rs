@@ -186,4 +186,94 @@ mod tests {
         assert!(init(Some(""), "test").is_none());
         assert!(init(Some("   "), "test").is_none());
     }
+
+    #[test]
+    fn init_returns_guard_for_valid_dsn() {
+        // A syntactically valid but non-routable DSN (RFC 2606 reserved
+        // .invalid TLD) — this exercises the real `sentry::init()` call path
+        // without depending on network reachability.
+        let guard = init(Some("https://public@example.invalid/1"), "test");
+        assert!(guard.is_some());
+        assert!(guard.unwrap().is_enabled());
+    }
+
+    #[test]
+    fn flush_is_a_harmless_noop_with_no_client_bound() {
+        // No `init()` call on this thread's hub — `flush()` must not panic.
+        flush();
+    }
+
+    fn event_with_message(message: &str) -> sentry::protocol::Event<'static> {
+        sentry::protocol::Event {
+            message: Some(message.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn before_send_scrubs_message() {
+        let event = event_with_message("Authorization: Bearer secrettoken123");
+        let scrubbed = before_send(event).expect("before_send always returns Some");
+        assert!(scrubbed.message.unwrap().contains(REDACTED));
+    }
+
+    #[test]
+    fn before_send_redacts_sensitive_extra_keys() {
+        let mut event = event_with_message("hello");
+        event.extra.insert(
+            "user_password".to_string(),
+            serde_json::Value::String("hunter2".to_string()),
+        );
+        event.extra.insert(
+            "session_id".to_string(),
+            serde_json::Value::String("abc-123".to_string()),
+        );
+        let scrubbed = before_send(event).expect("before_send always returns Some");
+        assert_eq!(
+            scrubbed.extra.get("user_password"),
+            Some(&serde_json::Value::String(REDACTED.to_string()))
+        );
+        // Non-sensitive keys pass through untouched.
+        assert_eq!(
+            scrubbed.extra.get("session_id"),
+            Some(&serde_json::Value::String("abc-123".to_string()))
+        );
+    }
+
+    #[test]
+    fn before_send_redacts_sensitive_tags() {
+        let mut event = event_with_message("hello");
+        event
+            .tags
+            .insert("api_token".to_string(), "live-value".to_string());
+        event
+            .tags
+            .insert("environment".to_string(), "production".to_string());
+        let scrubbed = before_send(event).expect("before_send always returns Some");
+        assert_eq!(scrubbed.tags.get("api_token"), Some(&REDACTED.to_string()));
+        assert_eq!(
+            scrubbed.tags.get("environment"),
+            Some(&"production".to_string())
+        );
+    }
+
+    #[test]
+    fn before_send_scrubs_breadcrumb_messages() {
+        let mut event = event_with_message("hello");
+        event.breadcrumbs.values.push(sentry::protocol::Breadcrumb {
+            message: Some("Authorization: Bearer leaked-token-value".to_string()),
+            ..Default::default()
+        });
+        let scrubbed = before_send(event).expect("before_send always returns Some");
+        let crumb_message = scrubbed.breadcrumbs.values[0].message.as_ref().unwrap();
+        assert!(crumb_message.contains(REDACTED));
+        assert!(!crumb_message.contains("leaked-token-value"));
+    }
+
+    #[test]
+    fn before_send_passes_through_event_with_no_message() {
+        let event = sentry::protocol::Event::default();
+        let scrubbed = before_send(event).expect("before_send always returns Some");
+        assert!(scrubbed.message.is_none());
+    }
 }
