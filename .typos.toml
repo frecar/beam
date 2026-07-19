@@ -1,0 +1,11 @@
+# typos (crate-ci/typos) configuration.
+#
+# Allowlist below records deliberate keyword fragments that typos flags
+# but which are correct for this repo — not spelling defects.
+#
+# Maintenance rule: add a word here ONLY when it is a real domain term,
+# package name, or deliberate keyword fragment — never to paper over an
+# actual misspelling.
+
+[default.extend-words]
+gard = "gard"  # deliberately-obfuscated "a[s]gard" fragment in scripts/check-no-internal-refs.sh's own regex

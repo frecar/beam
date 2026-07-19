@@ -117,6 +117,12 @@ export function initMonitoring(): void {
       numberFromRuntime(runtime?.sentryTracesSampleRate) ??
       numberFromEnv(import.meta.env.VITE_SENTRY_TRACES_SAMPLE_RATE) ??
       0,
+    // Tag every browser event `surface=browser` so it's distinguishable
+    // from (and correlates with, via release/SHA) the Rust server's own
+    // backend Sentry stream.
+    initialScope: {
+      tags: { surface: 'browser' },
+    },
     beforeSend: scrubErrorEvent,
     beforeBreadcrumb: scrubBreadcrumb,
   });
