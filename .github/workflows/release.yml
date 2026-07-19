@@ -71,7 +71,35 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Build web client
+        # SENTRY_AUTH_TOKEN/SENTRY_ORG/SENTRY_PROJECT gate the sentry-cli
+        # sourcemap upload in web/vite.config.ts (sentryUploadEnabled) — the
+        # plugin also deletes the uploaded .map files immediately after
+        # upload (filesToDeleteAfterUpload), so web/dist/ is already clean
+        # by the time this job's artifact is uploaded below. Both downstream
+        # consumers of that artifact (package-deb's .deb and package's public
+        # release tarball) therefore never see a sourcemap — stripped once,
+        # at the source, not per-consumer.
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+          SENTRY_RELEASE: ${{ github.ref_name }}
         run: cd web && npm ci && npm run build
+
+      - name: Verify no sourcemaps in the build output
+        # Regression guard for the strip-at-source step above: if
+        # filesToDeleteAfterUpload ever stops matching (glob typo, plugin
+        # config drift, upload disabled so the plugin never runs at all),
+        # this fails loud here instead of silently shipping .map files in
+        # the public .deb / release tarball later.
+        run: |
+          set -euo pipefail
+          if find web/dist -name '*.map' | grep -q .; then
+            echo "::error::Sourcemap (.map) files present in web/dist — must not ship publicly"
+            find web/dist -name '*.map'
+            exit 1
+          fi
+          echo "No .map files in web/dist — OK"
 
       - name: Upload web dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -185,10 +213,12 @@ jobs:
       - name: Build .deb package
         run: |
           VERSION=$(grep -A5 '\[workspace.package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)"/\1/')
-          ARCH=${{ matrix.arch }} VERSION=${VERSION} nfpm package \
+          export VERSION
+          export ARCH="${{ matrix.arch }}"
+          nfpm package \
             --config packaging/nfpm.yaml \
             --packager deb \
-            --target beam_${VERSION}_${{ matrix.arch }}.deb
+            --target "beam_${VERSION}_${ARCH}.deb"
 
       - name: Upload .deb
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -274,7 +304,7 @@ jobs:
         run: |
           echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | gpg --batch --import
           GPG_KEY_ID=$(gpg --list-keys --with-colons | grep '^pub' | head -1 | cut -d: -f5)
-          echo "GPG_KEY_ID=${GPG_KEY_ID}" >> $GITHUB_ENV
+          echo "GPG_KEY_ID=${GPG_KEY_ID}" >> "$GITHUB_ENV"
 
       - name: Prepare APT repository
         run: |
@@ -304,7 +334,7 @@ jobs:
           cd ../..
 
           # Export public key
-          gpg --armor --export ${GPG_KEY_ID} > gpg/beam.gpg
+          gpg --armor --export "${GPG_KEY_ID}" > gpg/beam.gpg
 
       - name: Copy landing page
         run: cp packaging/index.html apt-repo/index.html

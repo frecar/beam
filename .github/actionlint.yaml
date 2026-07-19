@@ -1,0 +1,9 @@
+# actionlint configuration.
+#
+# Declares the cluster's self-hosted runner labels so actionlint's
+# `runner-label` check does not false-flag every
+# `runs-on: [self-hosted, Linux, X64, cluster-ci]` (and the ARM64
+# variant) line as an unknown label.
+self-hosted-runner:
+  labels:
+    - cluster-ci  # the shared self-hosted CI runner pool

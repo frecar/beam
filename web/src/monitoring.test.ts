@@ -114,4 +114,20 @@ describe('initMonitoring', () => {
       })
     );
   });
+
+  it('tags every browser event with surface=browser', () => {
+    vi.stubGlobal('window', {});
+    window.__BEAM_RUNTIME_CONFIG__ = {
+      observability: { sentryDsn: 'https://public@example.invalid/1' },
+    };
+
+    initMonitoring();
+
+    // Dump the actual initialScope shape rather than a loose
+    // objectContaining match — a partial match would still pass if the
+    // tag were missing or misspelled, which is exactly the class of
+    // "green test proves nothing" bug this asserts against.
+    const call = vi.mocked(Sentry.init).mock.calls[0]?.[0];
+    expect(call?.initialScope).toEqual({ tags: { surface: 'browser' } });
+  });
 });

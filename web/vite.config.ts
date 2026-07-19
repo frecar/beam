@@ -23,6 +23,14 @@ export default defineConfig(({ mode }) => {
         release: releaseName ? { name: releaseName } : undefined,
         sourcemaps: {
           assets: './dist/assets/**',
+          // Delete .map files immediately after upload, at the single
+          // point both `release.yml` consumers of `dist/` (the .deb via
+          // package-deb, and the public GitHub Release tarball via
+          // package) read from. Stripping downstream in only one of
+          // those two jobs would leave the other shipping sourcemaps
+          // publicly, so the strip lives here, at the source, not
+          // repeated per-consumer.
+          filesToDeleteAfterUpload: './dist/assets/**/*.map',
         },
       })
     );
@@ -41,7 +49,11 @@ export default defineConfig(({ mode }) => {
   return {
     plugins,
     build: {
-      sourcemap: true,
+      // 'hidden' generates sourcemaps (for the sentry-cli upload above)
+      // without emitting a `//# sourceMappingURL=` comment in the shipped
+      // JS, so a browser (or a curious public user) can't discover/fetch
+      // them even before the post-upload delete step runs.
+      sourcemap: 'hidden',
     },
     server: {
       proxy: {

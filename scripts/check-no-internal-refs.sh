@@ -17,6 +17,13 @@ is_allowlisted_match() {
         return 0
     fi
 
+    # WHY: actionlint's self-hosted-runner config declares the same
+    # non-secret runner label as the runs-on carve-out above — it just
+    # documents which labels are valid, not a deployment endpoint.
+    if [[ "$file" == ".github/actionlint.yaml" ]]; then
+        return 0
+    fi
+
     if [[ "$file" == "crates/agent/src/display.rs" ]]; then
         # WHY: conventional marker-file variable/test wording, not an external service.
         case "$line" in
