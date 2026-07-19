@@ -52,6 +52,11 @@ pub struct ServerConfig {
 pub struct ObservabilityConfig {
     /// Browser-safe Sentry DSN. Empty/absent disables browser error reporting.
     pub sentry_dsn: Option<String>,
+    /// Backend Sentry DSN (server-process error/panic reporting). Distinct
+    /// from `sentry_dsn` (browser-safe) so the two ingest keys stay isolated
+    /// per Sentry project. Empty/absent disables backend error reporting.
+    #[serde(default)]
+    pub sentry_backend_dsn: Option<String>,
     /// Browser trace sample rate, 0.0 to 1.0. Defaults to disabled.
     #[serde(default)]
     pub sentry_traces_sample_rate: f64,
@@ -137,6 +142,7 @@ impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
             sentry_dsn: None,
+            sentry_backend_dsn: None,
             sentry_traces_sample_rate: 0.0,
             sentry_environment: default_environment(),
         }
@@ -406,6 +412,7 @@ mod tests {
 
         // Observability defaults
         assert!(config.observability.sentry_dsn.is_none());
+        assert!(config.observability.sentry_backend_dsn.is_none());
         assert_eq!(config.observability.sentry_traces_sample_rate, 0.0);
         assert_eq!(config.observability.sentry_environment, "production");
 
@@ -509,6 +516,7 @@ client_metrics_enabled = true
 
 [observability]
 sentry_dsn = "https://public@example.invalid/1"
+sentry_backend_dsn = "https://public@example.invalid/2"
 sentry_traces_sample_rate = 0.25
 sentry_environment = "staging"
 
@@ -553,6 +561,10 @@ idle_timeout = 7200
         assert_eq!(
             config.observability.sentry_dsn.as_deref(),
             Some("https://public@example.invalid/1")
+        );
+        assert_eq!(
+            config.observability.sentry_backend_dsn.as_deref(),
+            Some("https://public@example.invalid/2")
         );
         assert_eq!(config.observability.sentry_traces_sample_rate, 0.25);
         assert_eq!(config.observability.sentry_environment, "staging");
@@ -602,6 +614,10 @@ idle_timeout = 7200
 
         let observability = ObservabilityConfig::default();
         assert_eq!(observability.sentry_dsn, from_toml.observability.sentry_dsn);
+        assert_eq!(
+            observability.sentry_backend_dsn,
+            from_toml.observability.sentry_backend_dsn
+        );
         assert_eq!(
             observability.sentry_traces_sample_rate,
             from_toml.observability.sentry_traces_sample_rate

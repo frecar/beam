@@ -1,6 +1,7 @@
 mod auth;
 mod client_metrics;
 mod config;
+mod sentry_setup;
 mod session;
 mod signaling;
 mod tls;
@@ -16,6 +17,8 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::TraceLayer;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::session::SessionManager;
 use crate::web::AppState;
@@ -458,20 +461,39 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let (config_path, port_override) = parse_args();
 
-    // Load configuration
+    // Load configuration. This has to happen before Sentry init since the
+    // backend DSN itself lives in config — there's no way to know whether
+    // (or where) to report errors before we've read the config file.
     let mut config = config::load_config(&config_path)?;
     if let Some(p) = port_override {
         config.server.port = p;
     }
+
+    // Initialize the backend Sentry client (no-op if no DSN configured) as
+    // early as possible — before the tracing subscriber is installed, so
+    // the `sentry_tracing` layer is present for every log emitted from here
+    // on. The guard is held for the entire process lifetime; dropping it
+    // flushes any pending events, so it MUST NOT be dropped early. Explicit
+    // `std::process::exit()` calls skip destructors entirely, which is why
+    // every such call site below calls `sentry_setup::flush()` first.
+    let _sentry_guard = sentry_setup::init(
+        config.observability.sentry_backend_dsn.as_deref(),
+        &config.observability.sentry_environment,
+    );
+
+    // Initialize tracing: fmt layer for local/journald logs, plus the Sentry
+    // layer (inert when no client was initialized above) so `tracing::error!`
+    // et al. also surface as Sentry events/breadcrumbs.
+    let fmt_layer = tracing_subscriber::fmt::layer();
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(sentry::integrations::tracing::layer())
+        .init();
+
     // Validate configuration semantics
     if let Err(issues) = config.validate() {
         let has_errors = has_validation_errors(&issues);
@@ -484,6 +506,7 @@ async fn main() -> Result<()> {
         }
         if has_errors {
             tracing::error!("{}", config_validation_summary(&issues));
+            sentry_setup::flush();
             std::process::exit(1);
         }
     }
@@ -743,6 +766,13 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("{}", shutdown_clean_message());
+
+    // Explicit flush on the ordinary-shutdown path too: `main()` returning
+    // `Ok(())` already drops `_sentry_guard` (which flushes), but an
+    // explicit call here makes the guarantee immediate rather than implicit
+    // in drop order, and keeps this path symmetric with the exit(1) path
+    // above.
+    sentry_setup::flush();
 
     Ok(())
 }
