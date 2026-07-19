@@ -32,6 +32,8 @@ pam-client2 = { workspace = true }
 nix = { workspace = true }
 bytes = "1"
 pem = "3"
+sentry = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 http-body-util = "0.1"

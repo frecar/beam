@@ -20,9 +20,23 @@ anyhow = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 toml = "1.1"
+regex = "1"
 
 # Protocol
 beam-protocol = { path = "crates/protocol" }
+
+# Error reporting (backend Sentry SDK). rustls-only transport (ureq+rustls) to
+# match this workspace's TLS stack (see `rustls` above) and avoid pulling in a
+# second TLS implementation (native-tls/openssl) or a libcurl build dependency
+# via sentry's default `curl`/`reqwest` transports.
+sentry = { version = "0.48", default-features = false, features = [
+    "tracing",
+    "panic",
+    "backtrace",
+    "contexts",
+    "ureq",
+    "rustls",
+] }
 
 # Web framework
 axum = { version = "0.8.9", features = ["ws"] }
