@@ -34,7 +34,7 @@ tokio-rustls = { workspace = true }
 rustls-native-certs = "0.8"
 futures-util = "0.3"
 urlencoding = "2"
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 rcgen = { workspace = true }
