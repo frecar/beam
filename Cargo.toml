@@ -29,7 +29,7 @@ beam-protocol = { path = "crates/protocol" }
 # match this workspace's TLS stack (see `rustls` above) and avoid pulling in a
 # second TLS implementation (native-tls/openssl) or a libcurl build dependency
 # via sentry's default `curl`/`reqwest` transports.
-sentry = { version = "0.48", default-features = false, features = [
+sentry = { version = "0.49", default-features = false, features = [
     "tracing",
     "panic",
     "backtrace",
