@@ -31,7 +31,7 @@ jsonwebtoken = { workspace = true }
 pam-client2 = { workspace = true }
 nix = { workspace = true }
 bytes = "1"
-pem = "3"
+pem = "4"
 sentry = { workspace = true }
 regex = { workspace = true }
 
