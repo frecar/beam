@@ -23,19 +23,19 @@
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
     "@sentry/vite-plugin": "^5.4.0",
-    "@typescript-eslint/eslint-plugin": "^8.66.0",
+    "@typescript-eslint/eslint-plugin": "^8.67.0",
     "@typescript-eslint/parser": "^8.58.2",
     "@vitest/coverage-v8": "^4.1.10",
-    "eslint": "^10.8.0",
+    "eslint": "^10.8.1",
     "eslint-plugin-simple-import-sort": "^14.0.0",
     "prettier": "^3.9.6",
-    "rollup-plugin-visualizer": "^7.0.1",
+    "rollup-plugin-visualizer": "^7.1.1",
     "typescript": "^6.0.3",
     "vite": "^8.2.1",
     "vitest": "^4.1.6"
   },
   "dependencies": {
-    "@sentry/browser": "^10.69.0"
+    "@sentry/browser": "^10.70.0"
   },
   "browserslist": {
     "production": [
