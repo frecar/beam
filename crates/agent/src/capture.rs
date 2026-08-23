@@ -19,6 +19,12 @@ pub struct PooledFrame {
     return_tx: std_mpsc::Sender<Vec<u8>>,
 }
 
+fn normalize_bgra_alpha(data: &mut [u8]) {
+    for pixel in data.as_chunks_mut::<4>().0 {
+        pixel[3] = 0xFF;
+    }
+}
+
 impl PooledFrame {
     pub fn len(&self) -> usize {
         self.data.len()
@@ -192,9 +198,7 @@ impl ScreenCapture {
         // nvh264enc is told the data is BGRA, so set alpha to 0xFF to prevent
         // random padding values from causing color distortion during GPU
         // BGRA→NV12 conversion.
-        for pixel in data.chunks_exact_mut(4) {
-            pixel[3] = 0xFF;
-        }
+        normalize_bgra_alpha(&mut data);
 
         Ok(PooledFrame {
             data,
@@ -225,6 +229,23 @@ impl Drop for ScreenCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_bgra_alpha_updates_complete_pixels_only() {
+        let mut data = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+        normalize_bgra_alpha(&mut data);
+        assert_eq!(data, [1, 2, 3, 0xFF, 5, 6, 7, 0xFF, 9]);
+    }
+
+    #[test]
+    fn normalize_bgra_alpha_accepts_empty_and_partial_pixels() {
+        let mut empty = [];
+        normalize_bgra_alpha(&mut empty);
+
+        let mut partial = [1, 2, 3];
+        normalize_bgra_alpha(&mut partial);
+        assert_eq!(partial, [1, 2, 3]);
+    }
 
     /// Build a PooledFrame from a synthetic buffer + channel for tests that
     /// don't need a real X11 connection.

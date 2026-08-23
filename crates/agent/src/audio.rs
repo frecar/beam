@@ -25,6 +25,12 @@ pub(crate) fn opus_sample_rate_for(sample_rate: u32) -> anyhow::Result<u32> {
     }
 }
 
+fn decode_s16le_into(pcm: &[u8], samples: &mut [i16]) {
+    for (i, bytes) in pcm.as_chunks::<2>().0.iter().enumerate() {
+        samples[i] = i16::from_le_bytes(*bytes);
+    }
+}
+
 pub struct AudioCapture {
     simple: Simple,
     opus_encoder: OpusEncoder,
@@ -113,9 +119,7 @@ impl AudioCapture {
             .map_err(|e| anyhow::anyhow!("PulseAudio read failed: {e}"))?;
 
         // Convert s16le bytes to i16 samples using pre-allocated buffer
-        for (i, chunk) in self.pcm_buffer.chunks_exact(2).enumerate() {
-            self.samples_buffer[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
-        }
+        decode_s16le_into(&self.pcm_buffer, &mut self.samples_buffer);
 
         let encoded_len = self
             .opus_encoder
@@ -129,6 +133,21 @@ impl AudioCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_s16le_preserves_order_and_ignores_partial_sample() {
+        let mut samples = [0i16; 2];
+        decode_s16le_into(&[0x34, 0x12, 0xFE, 0xFF, 0xAA], &mut samples);
+        assert_eq!(samples, [0x1234, -2]);
+    }
+
+    #[test]
+    fn decode_s16le_empty_and_incomplete_inputs_leave_samples_unchanged() {
+        let mut samples = [7i16];
+        decode_s16le_into(&[], &mut samples);
+        decode_s16le_into(&[0x34], &mut samples);
+        assert_eq!(samples, [7]);
+    }
 
     #[test]
     fn audio_capture_rejects_invalid_server() {
