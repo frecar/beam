@@ -228,7 +228,12 @@ pub(crate) async fn run_video_send_loop(
                 }
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                debug!("Dropping video frame (WS outbox full, prioritizing latency)");
+                // Dropping an H.264 reference frame invalidates dependent P-frames.
+                // Gate them until a fresh IDR reaches the outbox, otherwise the
+                // browser renders corruption until the next periodic keyframe.
+                video_needs_keyframe.store(true, Ordering::Relaxed);
+                force_keyframe.store(true, Ordering::Relaxed);
+                debug!("Dropping video frame (WS outbox full), requesting recovery keyframe");
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 info!("WS outbox closed, stopping video send");
@@ -531,8 +536,9 @@ mod tests {
 
     #[tokio::test]
     async fn video_loop_drops_when_outbox_full() {
-        // 1-slot outbox + many frames → some frames hit TrySendError::Full and
-        // are dropped, but the loop continues without panic.
+        // 1-slot outbox + many frames → a frame hits TrySendError::Full. The
+        // loop must request an IDR and gate dependent P-frames so the browser
+        // cannot receive a corrupt prediction chain.
         let (encoded_tx, mut encoded_rx) = mpsc::channel::<Vec<u8>>(64);
         let (ws_tx, _ws_rx) = mpsc::channel::<Message>(1);
         let force_kf = Arc::new(AtomicBool::new(false));
@@ -561,6 +567,15 @@ mod tests {
         )
         .await
         .expect("video loop should make progress past Full errors");
+
+        assert!(
+            force_kf.load(Ordering::Relaxed),
+            "outbox drop should request a recovery keyframe"
+        );
+        assert!(
+            video_nk.load(Ordering::Relaxed),
+            "outbox drop should gate P-frames until the recovery IDR"
+        );
     }
 
     #[tokio::test]
