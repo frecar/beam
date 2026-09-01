@@ -1,0 +1,65 @@
+name: Web dependency audit
+# managed-public-ci-template: npm-audit — DO NOT HAND-EDIT.
+# This file is a managed copy kept byte-identical to the canonical CI
+# template. Hand-edits are overwritten by the next template sync; change
+# the canonical template (and re-run the drift check) instead.
+#
+# The npm half of this repo's supply-chain coverage. The sibling
+# `audit.yml` scans Cargo.lock against the RustSec advisory DB; nothing
+# scanned `web/package-lock.json`, which was referenced only as an npm
+# cache key. A lockfile that is cached but never audited looks covered
+# to a reader and is not.
+#
+# `npm audit` rather than a container/filesystem scanner for the same
+# reason cargo audit is used next door: this repo ships a native binary,
+# so its dependency-scan surface is the dependency graph itself.
+#
+# Triggers mirror the cargo-audit sibling exactly — every manifest/lock
+# change (push + PR) so a dependency bump is gated, plus a weekly
+# schedule so a newly-disclosed advisory against an unchanged lockfile
+# still surfaces, which is the whole point of supply-chain scanning.
+# The weekly slot is deliberately offset from the cargo job so the two
+# do not contend for the same runner minute.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/package.json'
+      - 'web/package-lock.json'
+      - '.github/workflows/npm-audit.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/package.json'
+      - 'web/package-lock.json'
+      - '.github/workflows/npm-audit.yml'
+  schedule:
+    - cron: '30 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  npm-audit:
+    name: npm audit (web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # `npm audit` reads the lockfile directly and needs no install, which
+      # keeps this job independent of whether the build currently succeeds --
+      # a broken build must not silently take dependency scanning with it.
+      - name: Audit web dependencies
+        working-directory: web
+        run: npm audit --audit-level=high
