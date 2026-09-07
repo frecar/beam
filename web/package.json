@@ -32,7 +32,7 @@
     "rollup-plugin-visualizer": "^7.1.1",
     "typescript": "^6.0.3",
     "vite": "^8.2.2",
-    "vitest": "^4.1.6"
+    "vitest": "^5.0.0"
   },
   "dependencies": {
     "@sentry/browser": "^10.72.0"
